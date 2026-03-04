@@ -8,16 +8,17 @@ The execution engine is responsible for translating signals into actual orders (
 
 | Component | Status | Notes |
 |---|---|---|
-| `ForwardEngine` class | ✅ Written | `backend/core/engine/forward_engine.py` |
-| `RiskManager` class | ✅ Written | `backend/core/risk_manager.py` |
-| Paper fill simulation | ✅ Written | Uses real-time prices + slippage |
-| Execution mode logic | ✅ Written | suggestion / semi-auto / full-auto |
-| Emergency stop | ✅ Written | Halts all strategies |
-| Celery signal task | 🔧 In progress | `run_signals` wiring is next milestone |
-| Celery schedule | 🔧 Pending | Beat schedule not yet configured |
-| WebSocket signal push | 🔧 Pending | Skeleton in place, not broadcasting |
-
-> The execution engine code is complete. The gap is the **Celery task wiring** that loops over active strategies, calls `SignalEngine.run()`, pipes results into `ForwardEngine.process_signal()`, and persists `Trade` records to the database.
+| `ForwardEngine` class | ✅ Complete | `backend/core/engine/forward_engine.py` |
+| `RiskManager` class | ✅ Complete | `backend/core/risk_manager.py` |
+| Paper fill simulation | ✅ Complete | Uses real-time prices + slippage |
+| Execution mode logic | ✅ Complete | suggestion / semi-auto / full-auto |
+| Emergency stop | ✅ Complete | Queries DB, closes all open trades, fires email alert |
+| Celery signal task | ✅ Complete | `signal_runner.py` loops active strategies, pipes to ForwardEngine |
+| Celery schedule | ✅ Complete | Beat schedule in Docker + `start-dev.ps1` for local dev |
+| WebSocket signal push | ✅ Complete | `signal` + `trade` events broadcast after every fill |
+| Semi-auto approve/reject | ✅ Complete | `POST /api/signals/{id}/approve` + `/reject` + Dashboard panel |
+| ML inference | ✅ Complete | `MLScorer` blends into HybridStrategy (60% rule / 40% ML) |
+| In-app notifications | ✅ Complete | DB-backed, WS real-time bell, Gmail SMTP alerts |
 
 ---
 

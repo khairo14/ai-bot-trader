@@ -1,4 +1,7 @@
+import csv
+import io
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from pydantic import BaseModel
@@ -48,6 +51,9 @@ async def run_backtest(request: BacktestRequest, db: AsyncSession = Depends(get_
         parameters=request.parameters or {},
     )
 
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
     db_result = BacktestResult(**result)
     db.add(db_result)
     await db.commit()
@@ -74,3 +80,67 @@ async def get_result(result_id: int, db: AsyncSession = Depends(get_db)):
     if not item:
         raise HTTPException(status_code=404, detail="Backtest result not found")
     return item
+
+
+@router.get("/results/{result_id}/export")
+async def export_backtest_trades(result_id: int, db: AsyncSession = Depends(get_db)):
+    """Download trade-by-trade detail for one backtest run as CSV."""
+    result = await db.execute(
+        select(BacktestResult).where(BacktestResult.id == result_id)
+    )
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Backtest result not found")
+
+    trades = item.trades_detail or []
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["entry_time", "exit_time", "symbol", "side",
+                     "entry_price", "exit_price", "quantity", "pnl", "pnl_pct", "exit_reason"])
+    for t in trades:
+        writer.writerow([
+            t.get("entry_time", ""), t.get("exit_time", ""),
+            t.get("symbol", ""), t.get("side", ""),
+            t.get("entry_price", ""), t.get("exit_price", ""),
+            t.get("quantity", ""), t.get("pnl", ""),
+            t.get("pnl_pct", ""), t.get("exit_reason", ""),
+        ])
+    buf.seek(0)
+    filename = f"backtest_{result_id}_{item.symbol.replace('/', '')}_{item.strategy_name}.csv"
+    return StreamingResponse(
+        buf,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@router.get("/results/export/all")
+async def export_all_backtest_summary(db: AsyncSession = Depends(get_db)):
+    """Download a summary CSV of all backtest runs."""
+    query = select(BacktestResult).order_by(desc(BacktestResult.created_at))
+    result = await db.execute(query)
+    items = result.scalars().all()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["id", "strategy_name", "symbol", "timeframe", "start_date", "end_date",
+                     "initial_capital", "final_capital", "total_return_pct", "annualized_return_pct",
+                     "max_drawdown_pct", "sharpe_ratio", "profit_factor", "win_rate_pct",
+                     "total_trades", "avg_win", "avg_loss", "rr_ratio", "created_at"])
+    for r in items:
+        writer.writerow([
+            r.id, r.strategy_name, r.symbol, r.timeframe,
+            r.start_date.date() if r.start_date else "",
+            r.end_date.date() if r.end_date else "",
+            r.initial_capital, r.final_capital,
+            r.total_return_pct, r.annualized_return_pct,
+            r.max_drawdown_pct, r.sharpe_ratio, r.profit_factor,
+            r.win_rate_pct, r.total_trades, r.avg_win, r.avg_loss, r.rr_ratio,
+            r.created_at.isoformat() if r.created_at else "",
+        ])
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=backtest_summary.csv"},
+    )

@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Plus, Layers, ToggleLeft, ToggleRight } from 'lucide-react'
+import { Plus, Layers, ToggleLeft, ToggleRight, X, BookOpen, Sparkles, Trash2 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import axios from 'axios'
 import toast from 'react-hot-toast'
+import { SkeletonCard } from '../components/Skeleton'
 
 interface Strategy {
   id: number
@@ -12,7 +14,13 @@ interface Strategy {
   execution_mode: string
   is_active: boolean
   is_paper: boolean
+  parameters: Record<string, unknown>
 }
+
+const BROKERS = ['binance', 'alpaca', 'ibkr']
+const ASSET_CLASSES = ['crypto', 'stock', 'option']
+const STRATEGY_TYPES = ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb']
+const TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d']
 
 const ModeBadge = ({ mode }: { mode: string }) => {
   const colors: Record<string, string> = {
@@ -27,11 +35,29 @@ const ModeBadge = ({ mode }: { mode: string }) => {
   )
 }
 
+const defaultForm = {
+  name: '',
+  description: '',
+  strategy_type: 'hybrid_macd_rsi',
+  symbol: 'BTC/USDT',
+  timeframe: '1h',
+  broker: 'binance',
+  asset_class: 'crypto',
+  execution_mode: 'suggestion',
+  is_paper: true,
+}
+
 export default function Strategies() {
   const [strategies, setStrategies] = useState<Strategy[]>([])
+  const [loadingStrategies, setLoadingStrategies] = useState(true)
+  const [showModal, setShowModal] = useState(false)
+  const [form, setForm] = useState(defaultForm)
+  const [saving, setSaving] = useState(false)
+  const [formErrors, setFormErrors] = useState<{ name?: string; symbol?: string }>({})
 
   const load = () => {
-    axios.get('/api/strategies/').then(r => setStrategies(r.data.strategies || []))
+    setLoadingStrategies(true)
+    axios.get('/api/strategies/').then(r => setStrategies(r.data.strategies || [])).finally(() => setLoadingStrategies(false))
   }
 
   useEffect(() => { load() }, [])
@@ -48,6 +74,88 @@ export default function Strategies() {
     load()
   }
 
+  const togglePaper = async (s: Strategy) => {
+    await axios.patch(`/api/strategies/${s.id}`, { is_paper: !s.is_paper })
+    toast.success(s.is_paper ? 'Switched to Live trading' : 'Switched to Paper trading')
+    load()
+  }
+
+  const deleteStrategy = (s: Strategy) => {
+    toast(
+      (t) => (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', minWidth: '220px' }}>
+          <p style={{ fontWeight: 600, fontSize: '13px' }}>Delete &quot;{s.name}&quot;?</p>
+          <p style={{ fontSize: '12px', color: '#9ca3af' }}>This cannot be undone.</p>
+          <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+            <button
+              onClick={async () => {
+                toast.dismiss(t.id)
+                await axios.delete(`/api/strategies/${s.id}`)
+                toast.success(`"${s.name}" deleted`)
+                load()
+              }}
+              style={{ flex: 1, padding: '5px 0', background: '#ef4444', color: '#fff', borderRadius: '6px', fontWeight: 700, fontSize: '12px', cursor: 'pointer', border: 'none' }}
+            >
+              Delete
+            </button>
+            <button
+              onClick={() => toast.dismiss(t.id)}
+              style={{ flex: 1, padding: '5px 0', background: '#374151', color: '#d1d5db', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', border: 'none' }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ),
+      { duration: 10000, icon: null }
+    )
+  }
+
+  const seedDefaults = async () => {
+    try {
+      const res = await axios.post('/api/strategies/seed')
+      const { created, skipped } = res.data
+      toast.success(`Seeded ${created} strategies (${skipped} already existed)`)
+      load()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Seed failed')
+    }
+  }
+
+  const createStrategy = async () => {
+    const errors: { name?: string; symbol?: string } = {}
+    if (!form.name.trim()) errors.name = 'Name is required'
+    if (!form.symbol.trim()) errors.symbol = 'Symbol is required (e.g. BTC/USDT)'
+    else if (!/^[A-Z0-9]+\/[A-Z0-9]+$|^[A-Z]{1,5}$/.test(form.symbol.trim().toUpperCase()))
+      errors.symbol = 'Use format BTC/USDT (crypto) or AAPL (stocks)'
+    if (Object.keys(errors).length) { setFormErrors(errors); return }
+    setFormErrors({})
+    setSaving(true)
+    try {
+      await axios.post('/api/strategies/', {
+        name: form.name.trim(),
+        description: form.description.trim() || null,
+        asset_class: form.asset_class,
+        broker: form.broker,
+        execution_mode: form.execution_mode,
+        parameters: {
+          strategy_type: form.strategy_type,
+          symbol: form.symbol.trim().toUpperCase(),
+          timeframe: form.timeframe,
+          limit: 200,
+        },
+      })
+      toast.success('Strategy created')
+      setShowModal(false)
+      setForm(defaultForm)
+      load()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Failed to create strategy')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -55,16 +163,40 @@ export default function Strategies() {
           <h1 className="text-xl font-bold text-white">Strategies</h1>
           <p className="text-sm text-gray-500 mt-0.5">Manage and configure your trading strategies</p>
         </div>
-        <button className="flex items-center gap-1.5 px-3 py-2 bg-brand-500 hover:bg-green-400 text-black text-sm font-semibold rounded-lg transition-all">
-          <Plus size={16} /> New Strategy
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            to="/strategy-library"
+            className="flex items-center gap-1.5 px-3 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition-all border border-dark-500"
+          >
+            <BookOpen size={15} /> Library
+          </Link>
+          <button
+            onClick={seedDefaults}
+            className="flex items-center gap-1.5 px-3 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition-all border border-dark-500"
+          >
+            <Sparkles size={15} /> Seed Defaults
+          </button>
+          <button
+            onClick={() => setShowModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 bg-brand-500 hover:bg-green-400 text-black text-sm font-semibold rounded-lg transition-all"
+          >
+            <Plus size={16} /> New Strategy
+          </button>
+        </div>
       </div>
 
-      {strategies.length === 0 ? (
+      {loadingStrategies ? (
+        <div className="space-y-3">
+          <SkeletonCard lines={2} /><SkeletonCard lines={2} /><SkeletonCard lines={2} />
+        </div>
+      ) : strategies.length === 0 ? (
         <div className="bg-dark-800 border border-dark-600 rounded-xl p-12 text-center">
           <Layers size={40} className="text-gray-600 mx-auto mb-4 opacity-30" />
           <p className="text-gray-500 text-sm">No strategies configured yet.</p>
-          <p className="text-gray-600 text-xs mt-1">Create a strategy to get started.</p>
+          <p className="text-gray-600 text-xs mt-1">
+            Click <strong className="text-gray-400">Seed Defaults</strong> to load 9 curated strategies, or browse the{' '}
+            <Link to="/strategy-library" className="text-brand-500 hover:underline">Strategy Library</Link>.
+          </p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -79,10 +211,30 @@ export default function Strategies() {
                 </button>
                 <div>
                   <p className="text-sm font-medium text-white">{s.name}</p>
-                  <p className="text-xs text-gray-500">{s.broker} · {s.asset_class} · {s.is_paper ? '📄 Paper' : '💰 Live'}</p>
+                  <p className="text-xs text-gray-500">
+                    {s.broker} · {s.asset_class} · {s.is_paper ? '📄 Paper' : '💰 Live'}
+                    {s.parameters?.symbol ? ` · ${s.parameters.symbol}` : ''}
+                    {s.parameters?.timeframe ? ` · ${s.parameters.timeframe}` : ''}
+                  </p>
                 </div>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-4">
+                {/* Paper / Live toggle switch */}
+                <div className="flex items-center gap-1.5" title={s.is_paper ? 'Paper trading — click to switch to Live' : 'Live trading — click to switch to Paper'}>
+                  <span className={`text-xs font-medium ${s.is_paper ? 'text-blue-400' : 'text-yellow-400'}`}>
+                    {s.is_paper ? 'Paper' : 'Live'}
+                  </span>
+                  <button
+                    onClick={() => togglePaper(s)}
+                    className={`relative w-9 h-5 rounded-full transition-colors duration-200 focus:outline-none ${
+                      s.is_paper ? 'bg-blue-600' : 'bg-yellow-500'
+                    }`}
+                  >
+                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${
+                      s.is_paper ? 'left-0.5' : 'translate-x-4'
+                    }`} />
+                  </button>
+                </div>
                 <ModeBadge mode={s.execution_mode} />
                 <select
                   value={s.execution_mode}
@@ -93,11 +245,143 @@ export default function Strategies() {
                   <option value="semi-auto">Semi-Auto</option>
                   <option value="full-auto">Full-Auto</option>
                 </select>
+                <button
+                  onClick={() => deleteStrategy(s)}
+                  className="p-1.5 text-gray-600 hover:text-red-400 hover:bg-red-900/20 rounded transition-colors"
+                  title="Delete strategy"
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
             </div>
           ))}
         </div>
       )}
+
+      {/* Create Strategy Modal */}
+      {showModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-dark-800 border border-dark-600 rounded-2xl w-full max-w-md shadow-2xl">
+            <div className="flex items-center justify-between p-5 border-b border-dark-600">
+              <h2 className="text-base font-semibold text-white">New Strategy</h2>
+              <button onClick={() => setShowModal(false)} className="text-gray-500 hover:text-gray-300 transition-colors">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              {/* Name */}
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Name *</label>
+                <input
+                  value={form.name}
+                  onChange={e => {
+                    setForm(f => ({ ...f, name: e.target.value }))
+                    if (formErrors.name) setFormErrors(fe => ({ ...fe, name: undefined }))
+                  }}
+                  placeholder="e.g. BTC MACD-RSI 1h"
+                  className={`w-full bg-dark-700 border rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500 ${
+                    formErrors.name ? 'border-red-500' : 'border-dark-500'
+                  }`}
+                />
+                {formErrors.name && <p className="text-xs text-red-400 mt-1">{formErrors.name}</p>}
+              </div>
+
+              {/* Strategy Type + Symbol */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Strategy Type</label>
+                  <select value={form.strategy_type} onChange={e => setForm(f => ({ ...f, strategy_type: e.target.value }))}
+                    className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                    {STRATEGY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Symbol</label>
+                  <input
+                    value={form.symbol}
+                    onChange={e => {
+                      setForm(f => ({ ...f, symbol: e.target.value }))
+                      if (formErrors.symbol) setFormErrors(fe => ({ ...fe, symbol: undefined }))
+                    }}
+                    placeholder="BTC/USDT"
+                    className={`w-full bg-dark-700 border rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500 ${
+                      formErrors.symbol ? 'border-red-500' : 'border-dark-500'
+                    }`}
+                  />
+                  {formErrors.symbol && <p className="text-xs text-red-400 mt-1">{formErrors.symbol}</p>}
+                </div>
+              </div>
+
+              {/* Broker + Timeframe */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Broker</label>
+                  <select value={form.broker} onChange={e => setForm(f => ({ ...f, broker: e.target.value }))}
+                    className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                    {BROKERS.map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Timeframe</label>
+                  <select value={form.timeframe} onChange={e => setForm(f => ({ ...f, timeframe: e.target.value }))}
+                    className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                    {TIMEFRAMES.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {/* Asset Class + Execution Mode */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Asset Class</label>
+                  <select value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))}
+                    className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                    {ASSET_CLASSES.map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Execution Mode</label>
+                  <select value={form.execution_mode} onChange={e => setForm(f => ({ ...f, execution_mode: e.target.value }))}
+                    className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
+                    <option value="suggestion">Suggestion</option>
+                    <option value="semi-auto">Semi-Auto</option>
+                    <option value="full-auto">Full-Auto</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Paper toggle */}
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <span className="text-sm text-gray-300">Paper trading</span>
+                <div
+                  onClick={() => setForm(f => ({ ...f, is_paper: !f.is_paper }))}
+                  className={`w-10 h-6 rounded-full transition-colors ${form.is_paper ? 'bg-brand-500' : 'bg-dark-600'} relative`}
+                >
+                  <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${form.is_paper ? 'left-5' : 'left-1'}`} />
+                </div>
+                <span className="text-xs text-gray-500">{form.is_paper ? 'Paper' : 'Live'}</span>
+              </label>
+            </div>
+
+            <div className="flex gap-2 p-5 pt-0">
+              <button
+                onClick={() => setShowModal(false)}
+                className="flex-1 px-4 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={createStrategy}
+                disabled={saving}
+                className="flex-1 px-4 py-2 bg-brand-500 hover:bg-green-400 text-black text-sm font-semibold rounded-lg transition-all disabled:opacity-50"
+              >
+                {saving ? 'Creating…' : 'Create Strategy'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
+

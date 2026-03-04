@@ -45,6 +45,21 @@ class BrokerName(str, enum.Enum):
     IBKR = "ibkr"
 
 
+class NotificationLevel(str, enum.Enum):
+    INFO = "info"
+    SUCCESS = "success"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+class NotificationCategory(str, enum.Enum):
+    SIGNAL = "signal"
+    TRADE = "trade"
+    EMERGENCY = "emergency"
+    SYSTEM = "system"
+    ML = "ml"
+
+
 # ─────────────────────────────────────────────────────────
 # Signals
 # ─────────────────────────────────────────────────────────
@@ -63,6 +78,7 @@ class Signal(Base):
     regime: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     asset_class: Mapped[AssetClass] = mapped_column(SAEnum(AssetClass), nullable=False)
     broker: Mapped[BrokerName] = mapped_column(SAEnum(BrokerName), nullable=False)
+    execution_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # suggestion | semi-auto | full-auto
     reasons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # list of reason strings
     acted_on: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
@@ -148,3 +164,20 @@ class BacktestResult(Base):
     trades_detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)   # full list of trades
     parameters: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+# ─────────────────────────────────────────────────────────
+# In-App Notifications
+# ─────────────────────────────────────────────────────────
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    level: Mapped[NotificationLevel] = mapped_column(SAEnum(NotificationLevel), nullable=False, default=NotificationLevel.INFO)
+    category: Mapped[NotificationCategory] = mapped_column(SAEnum(NotificationCategory), nullable=False, default=NotificationCategory.SYSTEM)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    email_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)   # symbol, broker, trade_id, etc.
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

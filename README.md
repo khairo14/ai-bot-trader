@@ -4,11 +4,11 @@ A production-grade algorithmic trading system with AI-assisted entry/exit signal
 
 ---
 
-## Current Build Status
+## Current Build Status — Phase 1 Complete ✅
 
 | Component | Status | Notes |
 |---|---|---|
-| FastAPI backend | ✅ Running | Port 8000 |
+| FastAPI backend | ✅ Running | Port 8000, auto-migrates on startup |
 | React frontend | ✅ Running | Port 5173 (Vite dev) |
 | PostgreSQL | ✅ Running | Docker container |
 | Redis | ✅ Running | Docker container |
@@ -16,10 +16,18 @@ A production-grade algorithmic trading system with AI-assisted entry/exit signal
 | Alpaca connection | ✅ Paper | $100,000 paper balance |
 | IBKR connection | ✅ Paper | $1,000,000 paper balance via IB Gateway |
 | Dashboard portfolio | ✅ Live data | All 3 broker cards from API |
-| Signal pipeline | 🔧 In progress | Engine written, Celery wiring next |
-| Forward Test page | 🔧 In progress | UI stub only, engine written |
-| Backtest page | 🔧 In progress | UI stub only, engine written |
-| WebSocket broadcasts | 🔧 In progress | Skeleton only |
+| Signal pipeline | ✅ Complete | Celery task → SignalEngine → ForwardEngine → DB |
+| Forward Test page | ✅ Complete | Live paper trading, approve/reject panel |
+| Backtest page | ✅ Complete | Full walk-forward + metrics + CSV export |
+| WebSocket broadcasts | ✅ Complete | `signal` + `trade` events pushed to dashboard |
+| Semi-auto execution | ✅ Complete | Pending Approvals banner on Dashboard |
+| ML model training | ✅ Complete | XGBoost trainer — yfinance OHLCV → AUC-gated model |
+| ML inference | ✅ Complete | MLScorer wired into HybridStrategy (60/40 blend) |
+| Strategy library | ✅ Complete | 3 strategies: hybrid, momentum_breakout, mean_reversion_bb |
+| Notification system | ✅ Complete | In-app bell + DB log + Gmail SMTP alerts |
+| Loading skeletons | ✅ Complete | Dashboard, Strategies, ForwardTest |
+| Health check | ✅ Complete | `GET /health?deep=true` pings DB + Redis |
+| Dev startup script | ✅ Complete | `start-dev.ps1` — one command starts everything |
 
 ---
 
@@ -148,6 +156,13 @@ Switchable per strategy in the **Strategies** page, or via `PATCH /api/strategie
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | System overview, data flow diagrams |
 | [docs/brokers.md](docs/brokers.md) | Broker setup, API details, options support |
+| [docs/setup.md](docs/setup.md) | Full installation and configuration guide |
+| [docs/strategies.md](docs/strategies.md) | Strategy types, ML hybrid, signal format |
+| [docs/execution.md](docs/execution.md) | Execution modes, order flow, paper trading |
+| [docs/backtesting.md](docs/backtesting.md) | Backtest engine, metrics, walk-forward |
+| [docs/risk-management.md](docs/risk-management.md) | Position sizing, circuit breakers, stop logic |
+| [docs/tools.md](docs/tools.md) | Indicator library reference |
+| [docs/phase2.md](docs/phase2.md) | Phase 2 roadmap — ML feedback loop, options, VPS deploy |
 | [docs/strategies.md](docs/strategies.md) | Strategy types, ML features, regime detection |
 | [docs/tools.md](docs/tools.md) | Full tool library reference, custom tool guide |
 | [docs/backtesting.md](docs/backtesting.md) | Backtest engine, metrics, quality checklist |

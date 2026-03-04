@@ -117,11 +117,13 @@ AI Bot Trader is a hybrid rule-based + ML trading bot that supports crypto, stoc
 | Frontend | React 18, Vite, TypeScript, TailwindCSS, Recharts |
 | Database | PostgreSQL 15 (asyncpg driver) |
 | Task Queue | Celery + Redis (scheduled signal runs + ML retraining) |
-| ML Models | scikit-learn, XGBoost, joblib |
+| ML Models | scikit-learn, XGBoost, joblib (trained on yfinance OHLCV) |
+| ML Inference | `MLScorer` singleton — lazy-loaded, thread-safe, per-symbol |
 | Broker: Crypto | `ccxt` async (Binance spot/futures) |
 | Broker: Stocks | `alpaca-py` v0.8+ (Alpaca paper + live) |
 | Broker: Options | `ib_insync` (IB Gateway via TWS API) |
-| Migrations | Alembic |
+| Migrations | Alembic (auto-runs on startup via `lifespan()`) |
+| Notifications | In-app DB bell + Gmail SMTP (App Password, async fire-and-forget) |
 | Containerization | Docker, Docker Compose |
 | Deployment | Local (Python venv + npm) or full Docker stack, optional VPS |
 

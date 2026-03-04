@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FlaskConical, Play, TrendingUp, AlertTriangle } from 'lucide-react'
+import { FlaskConical, Play, TrendingUp, AlertTriangle, Download } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 
@@ -40,14 +40,17 @@ export default function Backtest() {
     broker: 'binance',
   })
   const [result, setResult] = useState<BacktestResult | null>(null)
+  const [backtestId, setBacktestId] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
 
   const runBacktest = async () => {
     setLoading(true)
     setResult(null)
+    setBacktestId(null)
     try {
       const res = await axios.post('/api/backtest/run', form)
       setResult(res.data.result)
+      if (res.data.backtest_id) setBacktestId(res.data.backtest_id)
       toast.success('Backtest completed!')
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || 'Backtest failed')
@@ -101,7 +104,27 @@ export default function Backtest() {
 
         {/* Results */}
         <div className="bg-dark-800 border border-dark-600 rounded-xl p-5">
-          <h2 className="text-sm font-semibold text-gray-300 mb-4">Results</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold text-gray-300">Results</h2>
+            <div className="flex items-center gap-2">
+              {backtestId && (
+                <a
+                  href={`/api/backtest/results/${backtestId}/export`}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-green-400 hover:bg-green-500/10 text-xs transition-all"
+                  title="Download trade-by-trade CSV for this run"
+                >
+                  <Download size={12} /> Trades CSV
+                </a>
+              )}
+              <a
+                href="/api/backtest/results/export/all"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 text-xs transition-all"
+                title="Download summary of all backtest runs"
+              >
+                <Download size={12} /> All Runs CSV
+              </a>
+            </div>
+          </div>
           {!result ? (
             <div className="flex flex-col items-center justify-center h-64 text-gray-600">
               <FlaskConical size={40} className="mb-3 opacity-30" />

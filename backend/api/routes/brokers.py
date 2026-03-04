@@ -1,7 +1,12 @@
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 from typing import Optional
 
 router = APIRouter()
+
+
+class ModePayload(BaseModel):
+    mode: str  # "paper" or "live"
 
 
 @router.get("/")
@@ -33,6 +38,27 @@ async def list_brokers():
             },
         ]
     }
+
+
+@router.get("/modes")
+async def get_all_modes():
+    """Get current paper/live mode for all brokers."""
+    from brokers import get_broker_modes
+    return get_broker_modes()
+
+
+@router.post("/{broker_name}/mode")
+async def set_mode(broker_name: str, payload: ModePayload):
+    """Switch a broker between paper and live mode at runtime.
+    Takes effect on the next broker instantiation — no backend restart needed.
+    WARNING: Switching to 'live' will cause real orders to be placed!
+    """
+    from brokers import set_broker_mode
+    try:
+        set_broker_mode(broker_name, payload.mode)
+        return {"broker": broker_name, "mode": payload.mode, "message": f"{broker_name} switched to {payload.mode} mode"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/{broker_name}/price")

@@ -1,20 +1,24 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
+import toast from 'react-hot-toast'
 import {
   LayoutDashboard, FlaskConical, Play, Settings,
-  Layers, Zap, ShieldAlert
+  Layers, Zap, ShieldAlert, BookOpen
 } from 'lucide-react'
 import clsx from 'clsx'
 
+import NotificationBell from './components/NotificationBell'
 import Dashboard from './pages/Dashboard'
 import Backtest from './pages/Backtest'
 import ForwardTest from './pages/ForwardTest'
 import Strategies from './pages/Strategies'
+import StrategyLibrary from './pages/StrategyLibrary'
 import SettingsPage from './pages/Settings'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/strategies', label: 'Strategies', icon: Layers },
+  { to: '/strategy-library', label: 'Library', icon: BookOpen },
   { to: '/backtest', label: 'Backtest', icon: FlaskConical },
   { to: '/forward-test', label: 'Forward Test', icon: Play },
   { to: '/settings', label: 'Settings', icon: Settings },
@@ -54,15 +58,37 @@ export default function App() {
           ))}
         </nav>
 
+        {/* Notification Bell */}
+        <div className="px-2 pb-2">
+          <NotificationBell />
+        </div>
+
         {/* Emergency Stop */}
         <div className="px-2 pb-4">
           <button
             className="w-full flex items-center gap-2 px-3 py-2.5 rounded-lg bg-red-900/30 text-red-400 hover:bg-red-900/50 hover:text-red-300 text-sm font-medium transition-all border border-red-900/50"
             onClick={() => {
-              if (confirm('⚠️ Emergency Stop: Close ALL positions?')) {
-                fetch('/api/positions/emergency-stop', { method: 'POST' })
-                  .then(() => alert('Emergency stop executed.'))
-              }
+              toast.custom((t) => (
+                <div className="flex flex-col gap-3 p-4 bg-dark-800 border border-red-900/50 rounded-xl text-sm shadow-xl">
+                  <p className="font-semibold text-red-400">Emergency Stop</p>
+                  <p className="text-gray-300 text-xs leading-relaxed">Close ALL open positions across all brokers immediately?</p>
+                  <div className="flex gap-2">
+                    <button
+                      className="flex-1 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-all"
+                      onClick={() => {
+                        toast.dismiss(t.id)
+                        fetch('/api/positions/emergency-stop', { method: 'POST' })
+                          .then(() => toast.success('Emergency stop executed.'))
+                          .catch(() => toast.error('Emergency stop failed.'))
+                      }}
+                    >Yes, stop all</button>
+                    <button
+                      className="flex-1 py-1.5 rounded-lg bg-dark-700 hover:bg-dark-600 text-gray-300 text-xs transition-all border border-dark-500"
+                      onClick={() => toast.dismiss(t.id)}
+                    >Cancel</button>
+                  </div>
+                </div>
+              ), { duration: Infinity })
             }}
           >
             <ShieldAlert size={16} />
@@ -76,6 +102,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/strategies" element={<Strategies />} />
+          <Route path="/strategy-library" element={<StrategyLibrary />} />
           <Route path="/backtest" element={<Backtest />} />
           <Route path="/forward-test" element={<ForwardTest />} />
           <Route path="/settings" element={<SettingsPage />} />

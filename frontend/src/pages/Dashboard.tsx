@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock } from 'lucide-react'
 import axios from 'axios'
+import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
+import { SkeletonStat, SkeletonList } from '../components/Skeleton'
 
 interface Signal {
   id: number
@@ -16,7 +18,9 @@ interface Signal {
   regime: string
   asset_class: string
   broker: string
+  execution_mode: string | null
   reasons: string
+  acted_on: boolean
   created_at: string
 }
 
@@ -59,27 +63,65 @@ const StatCard = ({ label, value, sub, color = 'text-white' }: { label: string; 
 
 export default function Dashboard() {
   const [signals, setSignals] = useState<Signal[]>([])
+  const [pendingSignals, setPendingSignals] = useState<Signal[]>([])
   const [portfolio, setPortfolio] = useState<PortfolioSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [actioning, setActioning] = useState<number | null>(null)
 
   const fetchAll = async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     // Fetch independently — a slow broker never blocks signals from loading
-    const [sigResult, portResult] = await Promise.allSettled([
+    const [sigResult, portResult, pendingResult] = await Promise.allSettled([
       axios.get('/api/signals/?limit=20'),
       axios.get('/api/portfolio/summary'),
+      axios.get('/api/signals/pending'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
+    if (pendingResult.status === 'fulfilled') setPendingSignals(pendingResult.value.data.signals || [])
     setLoading(false)
     setRefreshing(false)
+  }
+
+  const handleApprove = async (id: number) => {
+    setActioning(id)
+    try {
+      await axios.post(`/api/signals/${id}/approve`)
+      toast.success('Signal approved and executed.')
+      fetchAll()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Approval failed')
+    } finally {
+      setActioning(null)
+    }
+  }
+
+  const handleReject = async (id: number) => {
+    setActioning(id)
+    try {
+      await axios.post(`/api/signals/${id}/reject`)
+      toast.success('Signal dismissed.')
+      fetchAll()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Rejection failed')
+    } finally {
+      setActioning(null)
+    }
   }
 
   useEffect(() => {
     fetchAll()
     const interval = setInterval(() => fetchAll(), 30000)
-    return () => clearInterval(interval)
+
+    // Re-fetch immediately when the tab becomes visible again (U-02)
+    const onVisibility = () => { if (document.visibilityState === 'visible') fetchAll() }
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
   }, [])
 
   const buySignals = signals.filter(s => s.signal === 'BUY').length
@@ -159,41 +201,96 @@ export default function Dashboard() {
       </div>
 
       {/* Signal summary */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-green-900/30">
-            <TrendingUp size={18} className="text-green-400" />
+      {loading ? (
+        <div className="grid grid-cols-3 gap-4">
+          <SkeletonStat /><SkeletonStat /><SkeletonStat />
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-4">
+          <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-green-900/30">
+              <TrendingUp size={18} className="text-green-400" />
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Buy Signals</p>
+              <p className="text-lg font-bold text-green-400">{buySignals}</p>
+            </div>
           </div>
-          <div>
-            <p className="text-xs text-gray-500">Buy Signals</p>
-            <p className="text-lg font-bold text-green-400">{buySignals}</p>
+          <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-red-900/30">
+              <TrendingDown size={18} className="text-red-400" />
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Short / Sell Signals</p>
+              <p className="text-lg font-bold text-red-400">{sellSignals}</p>
+            </div>
+          </div>
+          <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-gray-800">
+              <Minus size={18} className="text-gray-400" />
+            </div>
+            <div>
+              <p className="text-xs text-gray-500">Hold</p>
+              <p className="text-lg font-bold text-gray-400">{signals.filter(s => s.signal === 'HOLD').length}</p>
+            </div>
           </div>
         </div>
-        <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-red-900/30">
-            <TrendingDown size={18} className="text-red-400" />
+      )}
+
+      {/* Pending Approvals (semi-auto signals awaiting confirmation) */}
+      {pendingSignals.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <Clock size={14} className="text-yellow-400" />
+            <h2 className="text-sm font-semibold text-yellow-400">Pending Approvals</h2>
+            <span className="text-xs bg-yellow-500/15 text-yellow-400 px-2 py-0.5 rounded-full">{pendingSignals.length}</span>
           </div>
-          <div>
-            <p className="text-xs text-gray-500">Short / Sell Signals</p>
-            <p className="text-lg font-bold text-red-400">{sellSignals}</p>
+          <div className="space-y-2">
+            {pendingSignals.map(s => (
+              <div key={s.id} className="bg-dark-800 border border-yellow-900/40 rounded-xl p-4 flex items-center gap-4">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${s.signal === 'BUY' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'}`}>
+                      {s.signal}
+                    </span>
+                    <span className="text-sm font-semibold text-white">{s.symbol}</span>
+                    <span className="text-xs text-gray-500">{s.strategy_name}</span>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs text-gray-400">
+                    <span>Entry <span className="text-white">${s.entry_price?.toFixed(2)}</span></span>
+                    {s.stop_loss && <span>SL <span className="text-red-400">${s.stop_loss?.toFixed(2)}</span></span>}
+                    {s.take_profit && <span>TP <span className="text-green-400">${s.take_profit?.toFixed(2)}</span></span>}
+                    <span>Confidence <span className="text-white">{((s.confidence || 0) * 100).toFixed(0)}%</span></span>
+                    <span className="text-yellow-600">{s.broker}</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    disabled={actioning === s.id}
+                    onClick={() => handleApprove(s.id)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-900/20 text-green-400 hover:bg-green-900/40 text-xs font-medium transition-all disabled:opacity-50"
+                  >
+                    <CheckCircle size={13} /> Approve
+                  </button>
+                  <button
+                    disabled={actioning === s.id}
+                    onClick={() => handleReject(s.id)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-red-400 hover:bg-red-900/20 text-xs transition-all disabled:opacity-50"
+                  >
+                    <XCircle size={13} /> Dismiss
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
-        <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-gray-800">
-            <Minus size={18} className="text-gray-400" />
-          </div>
-          <div>
-            <p className="text-xs text-gray-500">Hold</p>
-            <p className="text-lg font-bold text-gray-400">{signals.filter(s => s.signal === 'HOLD').length}</p>
-          </div>
-        </div>
-      </div>
+      )}
 
       {/* Recent Signals */}
       <div>
         <h2 className="text-sm font-semibold text-gray-300 mb-3">Recent Signals</h2>
         {loading ? (
-          <div className="text-gray-500 text-sm">Loading signals...</div>
+          <SkeletonList rows={3} />
         ) : signals.length === 0 ? (
           <div className="bg-dark-800 border border-dark-600 rounded-xl p-8 text-center">
             <Activity size={32} className="text-gray-600 mx-auto mb-3" />

@@ -135,16 +135,36 @@ Exit:          Measured move target (height of range projected) OR stop loss
 ### 5. Hybrid (Default — Recommended)
 **Combines rules + ML scoring**
 
+The hybrid strategy is fully wired with live ML inference.
+
 ```
-Step 1: Rule-based filter (must pass to continue)
-Step 2: ML model assigns probability score (0.0 – 1.0)
-Step 3: Only signals with score > threshold are acted on
+Step 1: Rule-based filter (MACD + RSI + ATR)
+        → hard conditions must pass or signal is HOLD
+Step 2: ML scorer (XGBoost, trained on 365d of OHLCV)
+        → returns P(BUY) ∈ [0, 1]
+        → BUY vetoed if P < 0.35
+        → SHORT vetoed if P > 0.65
+Step 3: Blended confidence score
+        → confidence = 0.60 × rule_score + 0.40 × ml_score
+Step 4: Only signals with blended confidence > threshold are acted on
 
 Thresholds (configurable):
   suggestion mode:  score > 0.55
   semi-auto mode:   score > 0.65
   full-auto mode:   score > 0.72
 ```
+
+**ML feature set** (6 features, identical between training and inference):
+| Feature | Description |
+|---|---|
+| `rsi` | RSI-14 |
+| `macd_hist` | MACD histogram |
+| `atr_norm` | ATR-14 normalised by close price |
+| `vol_ratio` | Volume / 20-period average volume |
+| `bb_pct` | Bollinger Band position (0=lower, 1=upper) |
+| `log_ret` | Log return (close / prev close) |
+
+**Training:** Run `ModelTrainer().retrain_all()` to retrain. Models saved to `backend/data/models/`. Registry at `data/models/latest.json`. Models below AUC 0.55 are rejected automatically.
 
 ---
 

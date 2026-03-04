@@ -26,16 +26,27 @@ class AlpacaClient(AbstractBroker):
     name = "alpaca"
     asset_class = "stock"
 
-    def __init__(self):
-        self._paper = "paper-api" in settings.alpaca_base_url
+    def __init__(self, paper: bool | None = None):
+        if paper is None:
+            paper = "paper-api" in settings.alpaca_base_url
+        self._paper = paper
+        # Pick credentials based on mode
+        if paper:
+            api_key = settings.alpaca_api_key
+            api_secret = settings.alpaca_api_secret
+            base_url = settings.alpaca_base_url
+        else:
+            api_key = settings.alpaca_api_key_live or settings.alpaca_api_key
+            api_secret = settings.alpaca_api_secret_live or settings.alpaca_api_secret
+            base_url = settings.alpaca_base_url_live
         self.trading = TradingClient(
-            api_key=settings.alpaca_api_key,
-            secret_key=settings.alpaca_api_secret,
-            paper=self._paper,
+            api_key=api_key,
+            secret_key=api_secret,
+            paper=paper,
         )
         self.data = StockHistoricalDataClient(
-            api_key=settings.alpaca_api_key,
-            secret_key=settings.alpaca_api_secret,
+            api_key=api_key,
+            secret_key=api_secret,
         )
         mode = "PAPER" if self._paper else "LIVE"
         logger.info(f"AlpacaClient initialized in {mode} mode.")

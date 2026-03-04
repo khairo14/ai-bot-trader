@@ -10,49 +10,145 @@ from config import settings
 from brokers.base import AbstractBroker, OrderResult, Position, Balance
 
 
-def ibkr_balance_sync() -> "Balance":
-    """
-    Fetch IBKR account balance in an isolated event loop (safe to call from any thread).
+import asyncio
+import threading
+import time
+import pandas as pd
+from typing import List, Optional, Callable
+from loguru import logger
 
-    Uses a random clientId in the 50-99 range to avoid collision with the main
-    IBKRClient instance (clientId from settings) or concurrent calls.
+from ib_insync import IB, Stock, Option, Contract, MarketOrder, LimitOrder, StopLimitOrder, Trade as IBTrade
 
-    ib_insync automatically subscribes to account updates during connectAsync;
-    we sleep briefly to let the Gateway push the initial account-value snapshot
-    into the local cache, then read ib.accountValues().
-    """
-    async def _fetch() -> Balance:
-        ib = IB()
-        client_id = random.randint(50, 99)
+from config import settings
+from brokers.base import AbstractBroker, OrderResult, Position, Balance
+
+
+# ── Persistent singleton IBKR connection ─────────────────────────────────────
+#
+# Problem: ib_insync requires its own asyncio event loop.  Calling
+# ibkr_balance_sync() from FastAPI used to spin up a *new* event loop +
+# IB connection on every request, producing the cascade of connect/disconnect
+# cycles visible in IB Gateway logs.
+#
+# Fix: one dedicated background thread hosts a permanent asyncio loop that
+# keeps a single IB instance connected.  Balance reads are cached for
+# _CACHE_TTL seconds, so browser refreshes never trigger a new connection.
+
+class _IBKRManager:
+    _CACHE_TTL     = 60.0   # return cached balance for up to 60 s
+    _SETTLE_SECS   = 2.0    # wait after connect for Gateway to push account data
+    _CONNECT_TIMEOUT = 10   # seconds for connectAsync
+
+    def __init__(self) -> None:
+        self._ib: Optional[IB] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._cached: Optional[Balance] = None
+        self._cache_ts: float = 0.0
+        self._started = False
+
+    # ── background thread / loop ─────────────────────────────────────────────
+
+    def _start(self) -> None:
+        """Lazily start the background thread (idempotent)."""
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._run_loop, daemon=True, name="ibkr-bg"
+        )
+        self._thread.start()
+
+    def _run_loop(self) -> None:
+        assert self._loop is not None
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def _submit(self, coro) -> Balance:
+        """Run a coroutine on the background loop and block until done."""
+        assert self._loop is not None
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
+        return fut.result(timeout=30)
+
+    # ── connection helpers ────────────────────────────────────────────────────
+
+    async def _ensure_connected(self) -> bool:
+        if self._ib is None:
+            self._ib = IB()
+        if self._ib.isConnected():
+            return True
         try:
-            await ib.connectAsync(
+            await self._ib.connectAsync(
                 host=settings.ibkr_host,
                 port=settings.ibkr_port,
-                clientId=client_id,
+                clientId=settings.ibkr_client_id,
+                timeout=self._CONNECT_TIMEOUT,
             )
-            # ib_insync auto-subscribes on connect; give the Gateway time to push
-            # the initial account-value snapshot (~188 values for paper accounts).
-            # reqAccountUpdatesAsync() is a never-resolving subscription — do NOT await it.
-            await asyncio.sleep(2.0)
-            values = ib.accountValues()
-            total, available = 0.0, 0.0
-            for v in values:
-                if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
-                    total = float(v.value)
-                if v.tag == "AvailableFunds" and v.currency in ("USD", "BASE"):
-                    available = float(v.value)
-            logger.debug(f"IBKR balance fetched via clientId={client_id}: total={total} available={available}")
-            return Balance(total=total, available=available, currency="USD")
-        finally:
-            ib.disconnect()
+            # Gateway pushes account data asynchronously — wait for it
+            await asyncio.sleep(self._SETTLE_SECS)
+            logger.info(
+                f"[IBKR] Persistent connection established "
+                f"(clientId={settings.ibkr_client_id}, port={settings.ibkr_port})"
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"[IBKR] Connect failed: {exc}")
+            return False
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_fetch())
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
+    # ── balance fetch ─────────────────────────────────────────────────────────
+
+    async def _fetch_async(self) -> Balance:
+        fallback = self._cached or Balance(total=0.0, available=0.0, currency="USD")
+        if not await self._ensure_connected():
+            return fallback
+
+        total = available = 0.0
+        assert self._ib is not None
+        for v in self._ib.accountValues():
+            if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
+                total = float(v.value)
+            if v.tag == "AvailableFunds" and v.currency in ("USD", "BASE"):
+                available = float(v.value)
+
+        balance = Balance(total=total, available=available, currency="USD")
+        self._cached = balance
+        self._cache_ts = time.monotonic()
+        logger.debug(f"[IBKR] Balance refreshed: total={total} available={available}")
+        return balance
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def get_balance(self) -> Balance:
+        """
+        Return IBKR balance.  Uses a 60-second cache so that every page
+        refresh does NOT create a new Gateway connection.
+        """
+        self._start()
+        if self._cached and (time.monotonic() - self._cache_ts) < self._CACHE_TTL:
+            return self._cached
+        try:
+            return self._submit(self._fetch_async())
+        except Exception as exc:
+            logger.warning(f"[IBKR] Balance refresh failed: {exc}")
+            return self._cached or Balance(total=0.0, available=0.0, currency="USD")
+
+    def is_connected(self) -> bool:
+        return bool(self._ib and self._ib.isConnected())
+
+
+_manager = _IBKRManager()
+
+
+def ibkr_balance_sync() -> Balance:
+    """
+    Thread-safe entry-point used by portfolio route.
+    Returns a cached or freshly fetched IBKR balance WITHOUT spawning a new
+    IB connection on every call.
+    """
+    return _manager.get_balance()
 
 
 class IBKRClient(AbstractBroker):
@@ -71,8 +167,9 @@ class IBKRClient(AbstractBroker):
     name = "ibkr"
     asset_class = "stock_options"
 
-    def __init__(self):
-        self._paper = settings.ibkr_paper
+    def __init__(self, paper: bool | None = None):
+        self._paper = paper if paper is not None else settings.ibkr_paper
+        self._port = settings.ibkr_port if self._paper else settings.ibkr_port_live
         self.ib = IB()
         self._connected = False
         mode = "PAPER" if self._paper else "LIVE"
@@ -83,11 +180,12 @@ class IBKRClient(AbstractBroker):
         if not self._connected:
             await self.ib.connectAsync(
                 host=settings.ibkr_host,
-                port=settings.ibkr_port,
+                port=self._port,
                 clientId=settings.ibkr_client_id,
             )
             self._connected = True
-            logger.info(f"[IBKR] Connected to IB Gateway at {settings.ibkr_host}:{settings.ibkr_port}")
+            mode = "PAPER" if self._paper else "LIVE"
+            logger.info(f"[IBKR] Connected to IB Gateway at {settings.ibkr_host}:{self._port} ({mode})")
 
     async def disconnect(self):
         if self._connected:

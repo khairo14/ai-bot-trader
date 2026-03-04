@@ -1,3 +1,4 @@
+import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
 from typing import List, Optional, Callable
@@ -17,11 +18,18 @@ class BinanceClient(AbstractBroker):
     name = "binance"
     asset_class = "crypto"
 
-    def __init__(self):
-        self._paper = settings.binance_testnet
+    def __init__(self, paper: bool | None = None):
+        self._paper = paper if paper is not None else settings.binance_testnet
+        # Pick keys based on mode
+        if self._paper and settings.binance_api_key_testnet:
+            api_key = settings.binance_api_key_testnet
+            api_secret = settings.binance_api_secret_testnet
+        else:
+            api_key = settings.binance_api_key
+            api_secret = settings.binance_api_secret
         exchange_config = {
-            "apiKey": settings.binance_api_key,
-            "secret": settings.binance_api_secret,
+            "apiKey": api_key,
+            "secret": api_secret,
             "enableRateLimit": True,
             "timeout": 10000,
             "options": {
@@ -48,20 +56,25 @@ class BinanceClient(AbstractBroker):
         try:
             await self.exchange.load_markets()
         except Exception as e:
-            # sapi/margin endpoints may be restricted — pre-populate minimal market cache
             logger.warning(f"[Binance] Market pre-load partial error (non-fatal): {e}")
+            # If markets still empty, try direct REST call (works on both live & testnet)
             if not self.exchange.markets:
-                # Seed with a direct spot market call so ccxt won't retry
                 try:
                     raw = await self.exchange.publicGetApiV3ExchangeInfo()  # type: ignore[attr-defined]
                     symbols = raw.get("symbols", []) if isinstance(raw, dict) else []
-                    self.exchange.markets = {
-                        s["symbol"].replace("USDT", "/USDT"): s
-                        for s in symbols if s.get("status") == "TRADING"
-                    }
-                    logger.info(f"[Binance] Loaded {len(self.exchange.markets)} spot markets via fallback.")
+                    markets: dict = {}
+                    for s in symbols:
+                        if s.get("status") != "TRADING":
+                            continue
+                        base = s.get("baseAsset", "")
+                        quote = s.get("quoteAsset", "")
+                        if base and quote:
+                            markets[f"{base}/{quote}"] = s
+                    if markets:
+                        self.exchange.markets = markets
+                        logger.info(f"[Binance] Loaded {len(markets)} spot markets via fallback.")
                 except Exception:
-                    pass  # will lazy-load per-request; that's fine
+                    pass  # will lazy-load per-request
 
     async def get_price(self, symbol: str) -> float:
         await self._ensure_markets()
@@ -90,31 +103,39 @@ class BinanceClient(AbstractBroker):
     async def get_balance(self) -> Balance:
         """
         Returns total spot portfolio value in USDT.
-        Sums up USDT cash + the current market value of every other
-        non-zero spot asset (BNB, BTC, ETH, etc.) converted to USDT.
+        Fetches raw balance directly (no market pre-load).
+        Non-USDT assets are priced via a single batch fetch_tickers call
+        to avoid per-asset rate-limit queuing that causes timeouts on testnet.
         """
-        await self._ensure_markets()
         data = await self.exchange.fetch_balance({"type": "spot"})
 
         usdt_total = float((data.get("USDT") or {}).get("total") or 0.0)
-        usdt_free = float((data.get("USDT") or {}).get("free") or 0.0)
+        usdt_free  = float((data.get("USDT") or {}).get("free")  or 0.0)
 
-        # Add the USDT value of every other asset with a non-dust balance
+        # Collect non-USDT assets with meaningful balance
+        pending: dict[str, float] = {}
         for asset, info in data.items():
             if asset in ("USDT", "info", "free", "used", "total", "debt"):
                 continue
             if not isinstance(info, dict):
                 continue
             qty = float(info.get("total") or 0.0)
-            if qty <= 0:
-                continue
+            if qty > 0:
+                pending[f"{asset}/USDT"] = qty
+
+        # Price them all in ONE batch request instead of N individual calls
+        if pending:
             try:
-                symbol = f"{asset}/USDT"
-                ticker = await self.exchange.fetch_ticker(symbol)
-                price = float(ticker.get("last") or 0.0)
-                usdt_total += qty * price
+                tickers = await asyncio.wait_for(
+                    self.exchange.fetch_tickers(list(pending.keys())),
+                    timeout=8.0,
+                )
+                for symbol, qty in pending.items():
+                    t = tickers.get(symbol) or {}
+                    price = float(t.get("last") or 0.0)
+                    usdt_total += qty * price
             except Exception:
-                pass  # illiquid / no USDT pair — skip
+                pass  # non-fatal — USDT balance already captured above
 
         return Balance(
             total=round(usdt_total, 4),

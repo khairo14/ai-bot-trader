@@ -4,11 +4,15 @@ import pandas as pd
 
 from core.strategies.base import Signal, BaseStrategy
 from core.strategies.hybrid import HybridStrategy
+from core.strategies.momentum import MomentumBreakoutStrategy
+from core.strategies.mean_reversion import MeanReversionBBStrategy
 from brokers import get_broker
 
 
 STRATEGY_REGISTRY = {
     "hybrid_macd_rsi": HybridStrategy,
+    "momentum_breakout": MomentumBreakoutStrategy,
+    "mean_reversion_bb": MeanReversionBBStrategy,
 }
 
 

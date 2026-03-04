@@ -54,6 +54,13 @@ class BacktestEngine:
         commission = commission_pct / 100
         slippage = slippage_pct / 100
 
+        def _ts(val) -> str:
+            """Convert a pandas Timestamp or datetime to ISO string."""
+            try:
+                return val.isoformat()
+            except Exception:
+                return str(val)
+
         for i in range(warmup, len(df)):
             window = df.iloc[:i]
             current_candle = df.iloc[i]
@@ -97,8 +104,8 @@ class BacktestEngine:
                     capital += pnl
 
                     trades.append({
-                        "entry_time": position["entry_time"].isoformat(),
-                        "exit_time": str(current_candle.name),
+                        "entry_time": position["entry_time"],   # already ISO string from _ts()
+                        "exit_time": _ts(current_candle.name),
                         "symbol": symbol,
                         "side": position["side"],
                         "entry_price": position["fill_price"],
@@ -131,7 +138,7 @@ class BacktestEngine:
                             "stop_loss": signal.stop_loss,
                             "take_profit": signal.take_profit,
                             "quantity": qty,
-                            "entry_time": current_candle.name,
+                            "entry_time": _ts(current_candle.name),
                         }
 
             equity_curve.append(capital)

@@ -3,6 +3,7 @@ from typing import Optional
 from loguru import logger
 
 from core.strategies.base import BaseStrategy, Signal
+from core.ml_scorer import ml_scorer
 from tools.basic.rsi import RSI
 from tools.basic.macd import MACD
 from tools.basic.bollinger_bands import BollingerBands
@@ -15,7 +16,7 @@ class HybridStrategy(BaseStrategy):
     Hybrid Rule-Based + ML Signal Strategy.
 
     Step 1: Rule-based filter — all conditions must pass threshold
-    Step 2: ML model scores the probability (Phase 6 — not yet integrated)
+    Step 2: ML model scores P(BUY) — blended with rule confidence
     Step 3: Regime-adjusted signal output
 
     Entry (LONG):
@@ -129,23 +130,70 @@ class HybridStrategy(BaseStrategy):
             reasons_long.append(f"ADX {adx_out.value:.1f} ({adx_out.signal})")
             reasons_short.append(f"ADX {adx_out.value:.1f} ({adx_out.signal})")
 
+        # ── Step 2: ML probability score ──────────────────
+        # ml_prob is P(price rises > 1.5×ATR within 24 candles)
+        # If no model is trained yet, ml_prob is None and we fall back to rule-only.
+        ml_prob: Optional[float] = None
+        try:
+            ml_prob = ml_scorer.predict_proba(data, symbol)
+        except Exception as _ml_err:
+            logger.debug(f"[{self.name}] ML scorer skipped: {_ml_err}")
+
         # ── Determine signal ─────────────────────────────
         min_score = kwargs.get("min_score", 4)
         total_possible = 8
+        # ML gate: if model exists, veto signals where it strongly disagrees
+        ML_VETO_BUY  = 0.35   # if P(buy) < this, suppress BUY even if rules agree
+        ML_VETO_SHORT = 0.65  # if P(buy) > this, suppress SHORT even if rules agree
 
         if long_score >= min_score and long_score > short_score:
             signal_type = "BUY"
-            confidence = round(long_score / total_possible, 3)
-            stop_loss = round(current_price - (atr_value * 2.0), 4)
-            take_profit = round(current_price + (atr_value * 4.0), 4)  # 2:1 R:R minimum
-            reasons = reasons_long
+            rule_conf = long_score / total_possible
+            if ml_prob is not None:
+                if ml_prob < ML_VETO_BUY:
+                    # ML strongly disagrees — downgrade to HOLD
+                    signal_type = "HOLD"
+                    confidence = 0.0
+                    stop_loss = None
+                    take_profit = None
+                    reasons = reasons_long + [f"ML veto: P(buy)={ml_prob:.2f} < {ML_VETO_BUY}"]
+                    logger.info(f"[{self.name}] BUY vetoed by ML (prob={ml_prob:.2f})")
+                else:
+                    # Blend: 60% rule confidence, 40% ML probability
+                    confidence = round(0.6 * rule_conf + 0.4 * ml_prob, 3)
+                    stop_loss = round(current_price - (atr_value * 2.0), 4)
+                    take_profit = round(current_price + (atr_value * 4.0), 4)
+                    reasons = reasons_long + [f"ML confirms: P(buy)={ml_prob:.2f}"]
+            else:
+                confidence = round(rule_conf, 3)
+                stop_loss = round(current_price - (atr_value * 2.0), 4)
+                take_profit = round(current_price + (atr_value * 4.0), 4)
+                reasons = reasons_long
 
         elif short_score >= min_score and short_score > long_score:
             signal_type = "SHORT"
-            confidence = round(short_score / total_possible, 3)
-            stop_loss = round(current_price + (atr_value * 2.0), 4)
-            take_profit = round(current_price - (atr_value * 4.0), 4)
-            reasons = reasons_short
+            rule_conf = short_score / total_possible
+            if ml_prob is not None:
+                if ml_prob > ML_VETO_SHORT:
+                    # ML strongly disagrees — downgrade to HOLD
+                    signal_type = "HOLD"
+                    confidence = 0.0
+                    stop_loss = None
+                    take_profit = None
+                    reasons = reasons_short + [f"ML veto: P(buy)={ml_prob:.2f} > {ML_VETO_SHORT}"]
+                    logger.info(f"[{self.name}] SHORT vetoed by ML (prob={ml_prob:.2f})")
+                else:
+                    # For SHORT: high ml_prob means bearish (inverted)
+                    ml_short_conf = 1.0 - ml_prob
+                    confidence = round(0.6 * rule_conf + 0.4 * ml_short_conf, 3)
+                    stop_loss = round(current_price + (atr_value * 2.0), 4)
+                    take_profit = round(current_price - (atr_value * 4.0), 4)
+                    reasons = reasons_short + [f"ML bearish: P(buy)={ml_prob:.2f}"]
+            else:
+                confidence = round(rule_conf, 3)
+                stop_loss = round(current_price + (atr_value * 2.0), 4)
+                take_profit = round(current_price - (atr_value * 4.0), 4)
+                reasons = reasons_short
 
         else:
             signal_type = "HOLD"
@@ -156,7 +204,7 @@ class HybridStrategy(BaseStrategy):
 
         logger.debug(
             f"[{self.name}] {symbol} {timeframe} → {signal_type} "
-            f"(long: {long_score}, short: {short_score}, conf: {confidence})"
+            f"(long: {long_score}, short: {short_score}, conf: {confidence}, ml: {ml_prob})"
         )
 
         return Signal(

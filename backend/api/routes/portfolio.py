@@ -16,25 +16,21 @@ router = APIRouter()
 async def _safe_balance(broker_name: str) -> dict:
     """Fetch broker balance with timeout; never raises."""
     try:
+        from brokers import get_broker, get_broker_modes
         if broker_name == "ibkr":
             from brokers.ibkr_client import ibkr_balance_sync
             import concurrent.futures
             _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             loop = asyncio.get_event_loop()
             balance = await asyncio.wait_for(
-                loop.run_in_executor(_pool, ibkr_balance_sync), timeout=15.0
+                loop.run_in_executor(_pool, ibkr_balance_sync), timeout=35.0
             )
         else:
-            from brokers import get_broker
             broker = get_broker(broker_name)
             balance = await asyncio.wait_for(broker.get_balance(), timeout=8.0)
 
-        if broker_name == "binance":
-            is_paper = settings.binance_testnet
-        elif broker_name == "alpaca":
-            is_paper = "paper" in settings.alpaca_base_url.lower()
-        else:
-            is_paper = settings.ibkr_paper
+        # Use live runtime mode (respects toggles without needing a restart)
+        is_paper = get_broker_modes().get(broker_name, "paper") == "paper"
 
         return {
             "broker": broker_name,

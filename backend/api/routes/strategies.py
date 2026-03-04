@@ -54,6 +54,83 @@ async def create_strategy(payload: StrategyCreate, db: AsyncSession = Depends(ge
     return strategy
 
 
+# ── Default seed templates ──────────────────────────────────────────────────
+# NOTE: This must be defined and registered BEFORE /{strategy_id} routes so
+#       Starlette does not swallow POST /seed as a 405 on the dynamic route.
+_SEED_TEMPLATES = [
+    # Binance / crypto
+    {"name": "BTC Trend Follower",      "broker": "binance", "asset_class": "crypto",
+     "description": "BTC/USDT 1h MACD-RSI trend following with ADX filter.",
+     "symbol": "BTC/USDT", "timeframe": "1h"},
+    {"name": "ETH Swing Trader",        "broker": "binance", "asset_class": "crypto",
+     "description": "ETH/USDT 4h swing strategy — MACD histogram reversal + RSI(14).",
+     "symbol": "ETH/USDT", "timeframe": "4h"},
+    {"name": "BNB Momentum Scalp",      "broker": "binance", "asset_class": "crypto",
+     "description": "BNB/USDT 1h EMA crossover momentum with volume spike filter.",
+     "symbol": "BNB/USDT", "timeframe": "1h"},
+    # Alpaca / US stocks
+    {"name": "Apple Daily Trend",       "broker": "alpaca",  "asset_class": "stock",
+     "description": "AAPL 1d MACD + EMA(21) slope trend — low-frequency, high-conviction.",
+     "symbol": "AAPL",     "timeframe": "1d"},
+    {"name": "SPY Index Follower",      "broker": "alpaca",  "asset_class": "stock",
+     "description": "SPY 1d broad-market trend with ADX filter. Highest average win rate.",
+     "symbol": "SPY",      "timeframe": "1d"},
+    {"name": "NVDA Momentum Daily",     "broker": "alpaca",  "asset_class": "stock",
+     "description": "NVDA 1d MACD histogram expansion — earnings-momentum and sector rotation.",
+     "symbol": "NVDA",     "timeframe": "1d"},
+    # IBKR / US stocks
+    {"name": "MSFT Blue Chip Trend",    "broker": "ibkr",    "asset_class": "stock",
+     "description": "MSFT 1d conservative trend — MACD-RSI confluence at clear inflection points.",
+     "symbol": "MSFT",     "timeframe": "1d"},
+    {"name": "TSLA Swing Play",         "broker": "ibkr",    "asset_class": "stock",
+     "description": "TSLA 4h high-beta swing — RSI extremes + MACD confirm, wide R:R target.",
+     "symbol": "TSLA",     "timeframe": "4h"},
+    {"name": "Amazon Trend Follow",     "broker": "ibkr",    "asset_class": "stock",
+     "description": "AMZN 1d breakout-continuation after Bollinger Band squeeze + MACD cross.",
+     "symbol": "AMZN",     "timeframe": "1d"},
+]
+
+
+@router.post("/seed")
+async def seed_default_strategies(db: AsyncSession = Depends(get_db)):
+    """
+    Idempotently insert the 9 default curated strategies (3 per broker).
+    Strategies whose name already exists are skipped.
+    """
+    existing_result = await db.execute(select(Strategy.name))
+    existing_names = {row[0] for row in existing_result.all()}
+
+    created, skipped = 0, 0
+    for t in _SEED_TEMPLATES:
+        if t["name"] in existing_names:
+            skipped += 1
+            continue
+        strategy = Strategy(
+            name=t["name"],
+            description=t["description"],
+            asset_class=t["asset_class"],
+            broker=t["broker"],
+            execution_mode="suggestion",
+            parameters={
+                "strategy_type": "hybrid_macd_rsi",
+                "symbol": t["symbol"],
+                "timeframe": t["timeframe"],
+                "limit": 200,
+            },
+            is_active=False,
+            is_paper=True,
+        )
+        db.add(strategy)
+        created += 1
+
+    if created:
+        await db.commit()
+
+    return {"created": created, "skipped": skipped, "total_templates": len(_SEED_TEMPLATES)}
+
+
+# ── Per-strategy CRUD (must come AFTER /seed so it doesn't shadow it) ───────
+
 @router.patch("/{strategy_id}")
 async def update_strategy(
     strategy_id: int,
