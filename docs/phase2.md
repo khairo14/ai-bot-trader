@@ -160,6 +160,37 @@ Currently the dashboard has no login. This feature adds JWT-based authentication
 
 ---
 
+## UI-03 · Strategy Code Editor (Upload / Live Edit)
+
+**What it is:**
+A built-in code editor in the dashboard where you can write, upload, and hot-reload strategy files without touching the filesystem manually or restarting the server.
+
+**Viability:** ✅ Fully viable for a self-hosted bot. The app runs on your own machine/VPS so there's no multi-tenant security risk with executing uploaded Python code.
+
+**What it does:**
+- **Upload tab:** Drop a `.py` file → it's validated, saved to `backend/core/strategies/`, and registered into `STRATEGY_REGISTRY` — live, no restart
+- **Editor tab:** Monaco Editor (same as VS Code) in the browser showing the current strategy source; edit inline and hit Save → hot-reloads
+- **Registry tab:** Shows all currently loaded strategy types, their `name`, `description`, `asset_class`, which strategies in the DB use each one
+- **Validation:** On save/upload, the backend imports the class in a sandboxed try/except; rejects if it doesn't subclass `BaseStrategy` or `generate_signal()` is missing; returns the error message to the UI
+
+**What needs building:**
+
+*Backend:*
+- `GET /api/strategy-code/{name}` — returns raw source of a strategy file
+- `POST /api/strategy-code/upload` — accepts `.py` file, validates, writes to disk, hot-reloads registry
+- `PUT /api/strategy-code/{name}` — accepts raw code string, overwrites file, hot-reloads registry
+- `DELETE /api/strategy-code/{name}` — removes file, unregisters (blocks if any DB strategy row uses it)
+- `GET /api/strategy-code/registry` — returns all registered strategy names + metadata
+- Hot-reload: `importlib.reload()` + rebuild `STRATEGY_REGISTRY` dict in-place
+
+*Frontend:*
+- New page `/strategy-editor` with 3 tabs: Upload | Edit | Registry
+- Monaco Editor component (`@monaco-editor/react`) for the Edit tab
+- File drag-and-drop zone for Upload tab
+- Registry tab: table of strategy types with usage count + delete button
+
+---
+
 ## Priority Order
 
 | # | Item | Effort | Impact |
@@ -168,8 +199,9 @@ Currently the dashboard has no login. This feature adds JWT-based authentication
 | 2 | **OPS-01** VPS deployment | Low | High |
 | 3 | **OPS-02** Auth / login | Low | High (required for VPS) |
 | 4 | **ML-02** Regime detector | High | High |
-| 5 | **UI-01** Analytics dashboard | Medium | Medium |
-| 6 | **EX-01** Options execution | High | Medium |
-| 7 | **EX-02** Trailing stops | Low | Medium |
-| 8 | **UI-02** Multi-timeframe | Medium | Medium |
-| 9 | **ML-03** Portfolio optimization | High | Medium |
+| 5 | **UI-03** Strategy code editor | Medium | High |
+| 6 | **UI-01** Analytics dashboard | Medium | Medium |
+| 7 | **EX-01** Options execution | High | Medium |
+| 8 | **EX-02** Trailing stops | Low | Medium |
+| 9 | **UI-02** Multi-timeframe | Medium | Medium |
+| 10 | **ML-03** Portfolio optimization | High | Medium |
