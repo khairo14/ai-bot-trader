@@ -29,7 +29,7 @@ def _notif_dict(n: Notification) -> dict:
         "message": n.message,
         "is_read": n.is_read,
         "email_sent": n.email_sent,
-        "metadata": n.metadata or {},
+        "metadata": n.extra or {},
         "created_at": n.created_at.isoformat() if n.created_at else None,
     }
 

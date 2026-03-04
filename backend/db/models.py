@@ -179,5 +179,5 @@ class Notification(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     email_sent: Mapped[bool] = mapped_column(Boolean, default=False)
-    metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)   # symbol, broker, trade_id, etc.
+    extra: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)   # symbol, broker, trade_id, etc.
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
