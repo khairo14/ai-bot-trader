@@ -1,0 +1,43 @@
+"""
+Celery application instance.
+Workers: celery -A celery_app worker --loglevel=info
+Beat:    celery -A celery_app beat   --loglevel=info
+"""
+from celery import Celery
+from celery.schedules import crontab
+from config import settings
+
+celery_app = Celery(
+    "ai_bot_trader",
+    broker=settings.redis_url,
+    backend=settings.redis_url,
+    include=["tasks.ml_retrain", "tasks.signal_runner"],
+)
+
+celery_app.conf.update(
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+    timezone="UTC",
+    enable_utc=True,
+    task_track_started=True,
+    task_acks_late=True,
+    worker_prefetch_multiplier=1,
+)
+
+# Scheduled tasks
+celery_app.conf.beat_schedule = {
+    # Run signal engine every 5 minutes during market hours
+    "run-signals-every-5m": {
+        "task": "tasks.signal_runner.run_signals",
+        "schedule": 300,  # every 5 minutes
+    },
+    # Retrain ML models weekly (Sunday midnight UTC)
+    "ml-retrain-weekly": {
+        "task": "tasks.ml_retrain.retrain_all",
+        "schedule": crontab(hour=0, minute=0, day_of_week="sunday"),
+    },
+}
+
+if __name__ == "__main__":
+    celery_app.start()

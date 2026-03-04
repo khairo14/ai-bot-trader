@@ -1,0 +1,93 @@
+# docker-compose.vps.yml
+# VPS/Production overrides — use with:
+#   docker-compose -f docker-compose.yml -f docker-compose.vps.yml up -d
+#
+# Key differences from local:
+#   - No host.docker.internal; IBKR Gateway runs as a service
+#   - Resource limits on all containers
+#   - Restart policies set to unless-stopped
+#   - Traefik labels for optional reverse proxy / HTTPS
+#   - Volumes use explicit named paths
+
+version: "3.9"
+
+services:
+  db:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  redis:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  backend:
+    restart: unless-stopped
+    environment:
+      - IBKR_HOST=ibkr_gateway  # connect to gateway container instead
+    extra_hosts: []              # remove host.docker.internal on VPS
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    # Optional Traefik labels for HTTPS (uncomment if using Traefik):
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.backend.rule=Host(`api.yourdomain.com`)"
+    #   - "traefik.http.routers.backend.tls.certresolver=letsencrypt"
+
+  celery_worker:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  celery_beat:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  frontend:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    # Optional Traefik labels for HTTPS (uncomment if using Traefik):
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.frontend.rule=Host(`yourdomain.com`)"
+    #   - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+
+  # IB Gateway — headless Interactive Brokers connection for VPS
+  # Image: ghcr.io/gnzsnz/ib-gateway:latest  (community headless image)
+  ibkr_gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    restart: unless-stopped
+    environment:
+      - TWS_USERID=${IBKR_USERNAME}
+      - TWS_PASSWORD=${IBKR_PASSWORD}
+      - TRADING_MODE=${IBKR_TRADING_MODE:-paper}      # paper | live
+      - READ_ONLY_API=no
+      - VNC_SERVER_PASSWORD=${VNC_PASSWORD:-changeme}
+    ports:
+      - "4001:4001"   # live trading port
+      - "4002:4002"   # paper trading port
+      - "5900:5900"   # VNC for debugging
+    volumes:
+      - ibkr_settings:/home/ibgateway/Jts
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+volumes:
+  ibkr_settings:
