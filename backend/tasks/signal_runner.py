@@ -17,8 +17,18 @@ _HIGHER_TF: dict[str, list[str]] = {
     "1d":  [],  # already highest common TF — no suppression
     "1w":  [],
 }
-# Minimum fraction of timeframes (including primary) that must agree to allow execution
+# Minimum fraction of timeframes (including primary) that must agree to allow execution.
+# Can be overridden per strategy via parameters["min_confluence"].
+# Sensible per-strategy defaults (used when not set in parameters):
+#   hybrid_macd_rsi    → 0.5  (trend-following: needs alignment)
+#   momentum_breakout  → 0.5  (breakouts confirm across TFs)
+#   mean_reversion_bb  → 0.0  (counter-trend by design — bypass)
 MIN_CONFLUENCE = 0.5
+_STRATEGY_CONFLUENCE_DEFAULTS: dict[str, float] = {
+    "mean_reversion_bb": 0.0,   # counter-trend — higher TFs will always disagree
+    "hybrid_macd_rsi":   0.5,
+    "momentum_breakout": 0.5,
+}
 
 
 async def _confluence_score(
@@ -221,16 +231,24 @@ def run_signals(self):
 
                         # ── UI-02: Multi-timeframe confluence check ──────────────
                         # For actionable signals, verify higher timeframes agree.
-                        # If confluence < MIN_CONFLUENCE, suppress execution but
+                        # If confluence < threshold, suppress execution but
                         # still save the signal (visible on Dashboard as low-conf).
+                        # Threshold is read from strategy params first, then
+                        # per-strategy default, then global MIN_CONFLUENCE.
+                        _strat_default = _STRATEGY_CONFLUENCE_DEFAULTS.get(
+                            strategy_type, MIN_CONFLUENCE
+                        )
+                        _min_conf = float(
+                            params.get("min_confluence", _strat_default)
+                        )
                         allow_execution = True
                         conf = 1.0
-                        if sig.signal in _TRACKABLE_SIGNALS:
+                        if sig.signal in _TRACKABLE_SIGNALS and _min_conf > 0.0:
                             conf = await _confluence_score(
                                 signal_engine, strategy_type, symbol,
                                 strat.broker.value, timeframe, sig.signal,
                             )
-                            if conf < MIN_CONFLUENCE:
+                            if conf < _min_conf:
                                 allow_execution = False
                                 sig.reasons = (sig.reasons or []) + [
                                     f"execution suppressed: low multi-TF confluence ({conf:.0%})"

@@ -197,26 +197,39 @@ See [setup.md](setup.md) for full setup instructions.
 
 | Component | Status | Notes |
 |---|---|---|
-| FastAPI backend | ✅ Running | Port 8000 |
-| React frontend | ✅ Running | Port 5173 (Vite dev) / 3000 (Docker) |
-| PostgreSQL schema | ✅ Migrated | 4 tables: trades, strategies, signals, positions |
-| Redis | ✅ Running | Celery broker |
+| FastAPI backend | ✅ Running | Port 8000, auto-migrates (Alembic) on startup |
+| React frontend | ✅ Running | Port 5173 (Vite dev) / 3000 (Docker nginx) |
+| PostgreSQL schema | ✅ Migrated | trades, strategies, signals, positions, trade_outcomes, users |
+| Redis | ✅ Running | Celery broker + beat scheduler |
 | Binance client | ✅ Connected | Live mode, full spot USDT portfolio value |
-| Alpaca client | ✅ Connected | Paper mode, $100,000 balance |
+| Alpaca client | ✅ Connected | Paper mode, $100,000 balance; DataFrame guard on empty responses |
 | IBKR client | ✅ Connected | Paper mode via IB Gateway, $1,000,000 balance |
 | Portfolio API | ✅ Live | `/api/portfolio/summary` — all 3 brokers parallel |
-| Dashboard UI | ✅ Live | Broker cards, P&L, positions from API |
-| Strategies UI | ✅ Live | List, toggle, mode change via API |
-| Signal Engine | 🔧 Written | `HybridStrategy` (MACD+RSI) ready, Celery wiring next |
-| Forward Engine | 🔧 Written | Paper + live execution logic ready, not yet triggered |
-| Risk Manager | 🔧 Written | Full 5-level hierarchy ready, not yet wired into flow |
-| Celery signal task | 🔧 In progress | Bug fix + scheduling needed |
-| WebSocket | 🔧 Skeleton | Not yet broadcasting signals |
-| Forward Test UI | 🔧 Stub | UI placeholder only |
-| Backtest UI | 🔧 Stub | UI placeholder only |
+| Dashboard UI | ✅ Live | Broker cards, P&L, positions, ML feedback, portfolio weights |
+| Strategies UI | ✅ Live | List, create, edit, toggle, mode change via API + code editor |
+| Signal Engine | ✅ Complete | HybridStrategy, momentum_breakout, mean_reversion_bb — fully wired |
+| Forward Engine | ✅ Complete | Paper + live execution, wall-clock-aligned scheduler, market-hours gate |
+| Risk Manager | ✅ Complete | 5-level hierarchy wired into both Celery and Forward Test paths |
+| Celery signal task | ✅ Complete | `tasks.signal_runner.run_signals`, beat-scheduled, wall-clock aligned |
+| WebSocket | ✅ Complete | `signal` + `trade` events pushed live to Dashboard |
+| Forward Test UI | ✅ Complete | Live paper trading, approve/reject panel, Run Now, per-strategy dedup |
+| Backtest UI | ✅ Complete | Walk-forward, metrics, trade table, equity curve, CSV export |
+| Market Scanner | ✅ Complete | Parallel multi-symbol scan, broker-aware watchlists, confidence ranking |
+| Analytics page | ✅ Complete | Equity curve, monthly returns, win rate by strategy/symbol/hour, Sharpe |
+| Multi-Timeframe page | ✅ Complete | Confluence analysis, batch mode, SignalCard mini-check |
+| Candlestick charts | ✅ Complete | OHLCV + signal markers, EMA/BB/RSI/MACD overlays, all 3 brokers |
+| Strategy code editor | ✅ Complete | Monaco editor, hot-reload, upload, built-in protection |
+| ML model training | ✅ Complete | XGBoost, AUC-gated ≥0.55, auto-retrain Sundays 02:00 UTC |
+| ML inference | ✅ Complete | MLScorer singleton, 60/40 blend, veto at P<0.35 |
+| ML feedback loop | ✅ Complete | TradeOutcome → 24-candle resolve → 3× weighted retrain |
+| Regime detector | ✅ Complete | ADX/ATR/BB/EMA heuristic, all strategies regime-aware |
+| Portfolio optimizer | ✅ Complete | Sharpe-weighted allocation, correlation penalty, weekly rebalance |
+| Trailing stops | ✅ Complete | DB field, outcome resolver updated, Strategies UI input |
+| Auth / login | ✅ Complete | JWT, bcrypt, all /api/* protected, login page |
+| Notification system | ✅ Complete | In-app bell + DB log + Gmail SMTP alerts |
+| Signal deduplication | ✅ Complete | Dedup window per timeframe in Forward Test |
+| Per-strategy confluence | ✅ Complete | mean_reversion_bb bypasses confluence; others default 0.5 |
 
-### Next Steps (Priority Order)
-1. Wire `run_signals` Celery task → `SignalEngine` → `ForwardEngine` → DB
-2. Expose live Forward Test page (start/pause/stop, live P&L, positions table)
-3. WebSocket for real-time signal broadcasts to Dashboard
-4. Connect Backtest page to `BacktestEngine`
+### Pending (Phase 2 remaining)
+- **OPS-01** VPS deployment guide (`docker-compose.prod.yml`, CI/CD, automated DB backup)
+- **EX-01** Options strategies via IBKR (Iron Condor, Covered Call, Bull Call Spread, IV Rank)

@@ -99,9 +99,21 @@ class AlpacaClient(AbstractBroker):
         )
         resp = await loop.run_in_executor(None, lambda: self.data.get_stock_bars(req))
         df: Any = resp.df  # type: ignore[union-attr]
+
+        if df is None or df.empty:
+            raise ValueError(f"No OHLCV data returned from Alpaca for '{symbol}' on {timeframe}")
+
         if isinstance(df.index, pd.MultiIndex):
+            if symbol not in df.index.get_level_values("symbol"):
+                raise ValueError(f"Symbol '{symbol}' not found in Alpaca response")
             df = df.xs(symbol, level="symbol")
+
         df.index = pd.to_datetime(df.index)
+
+        missing = [c for c in ("open", "high", "low", "close", "volume") if c not in df.columns]
+        if missing:
+            raise ValueError(f"Alpaca response for '{symbol}' missing columns: {missing}. Got: {list(df.columns)}")
+
         df = df[["open", "high", "low", "close", "volume"]]
         df.index.name = "timestamp"
         return df

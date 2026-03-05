@@ -19,7 +19,7 @@ router = APIRouter()
 WATCHLISTS: dict[str, list[str]] = {
     "crypto_major": [
         "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
-        "ADA/USDT", "AVAX/USDT", "DOGE/USDT", "DOT/USDT", "MATIC/USDT",
+        "ADA/USDT", "AVAX/USDT", "DOGE/USDT", "DOT/USDT", "POL/USDT",
     ],
     "crypto_mid": [
         "LINK/USDT", "UNI/USDT", "ATOM/USDT", "LTC/USDT", "FIL/USDT",
@@ -33,6 +33,13 @@ WATCHLISTS: dict[str, list[str]] = {
         "COIN", "HOOD", "PLTR", "SQ", "SHOP",
         "NET", "DKNG", "RIVN", "LCID", "SOFI",
     ],
+}
+
+# Watchlists available per broker (keeps crypto off stock brokers and vice-versa)
+BROKER_WATCHLISTS: dict[str, list[str]] = {
+    "binance": ["crypto_major", "crypto_mid"],
+    "alpaca":  ["us_stocks", "us_stocks_mid"],
+    "ibkr":    ["us_stocks", "us_stocks_mid"],
 }
 
 # ─── Request / response models ────────────────────────────────────────────────
@@ -106,8 +113,11 @@ async def _scan_one(
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/watchlists")
-async def get_watchlists():
-    """Return all preset watchlists."""
+async def get_watchlists(broker: Optional[str] = None):
+    """Return preset watchlists, optionally filtered to those valid for `broker`."""
+    if broker and broker in BROKER_WATCHLISTS:
+        allowed = BROKER_WATCHLISTS[broker]
+        return {"watchlists": {k: WATCHLISTS[k] for k in allowed if k in WATCHLISTS}}
     return {"watchlists": WATCHLISTS}
 
 

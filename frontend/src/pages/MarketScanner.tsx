@@ -21,13 +21,21 @@ interface Watchlists {
   [key: string]: string[]
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// Hardcoded fallback — matches STRATEGY_REGISTRY in signal_engine.py
+const DEFAULT_STRATEGIES = ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb']
 
 const BROKERS = [
   { value: 'binance', label: 'Binance (Crypto)' },
   { value: 'alpaca', label: 'Alpaca (Stocks)' },
   { value: 'ibkr', label: 'IBKR (Stocks/Options)' },
 ]
+
+// Which watchlist keys are valid for each broker
+const BROKER_WATCHLISTS: Record<string, string[]> = {
+  binance: ['crypto_major', 'crypto_mid'],
+  alpaca:  ['us_stocks', 'us_stocks_mid'],
+  ibkr:    ['us_stocks', 'us_stocks_mid'],
+}
 
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '2h', '4h', '1d']
 
@@ -68,7 +76,7 @@ const fmtPrice = (n: number | null) =>
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function MarketScanner() {
-  const [strategies, setStrategies] = useState<string[]>([])
+  const [strategies, setStrategies] = useState<string[]>(DEFAULT_STRATEGIES)
   const [watchlists, setWatchlists] = useState<Watchlists>({})
   const [form, setForm] = useState({
     strategy: 'momentum_breakout',
@@ -90,12 +98,23 @@ export default function MarketScanner() {
       axios.get('/api/scanner/strategies'),
       axios.get('/api/scanner/watchlists'),
     ]).then(([strRes, wlRes]) => {
-      if (strRes.status === 'fulfilled') setStrategies(strRes.value.data.strategies ?? [])
+      if (strRes.status === 'fulfilled' && strRes.value.data.strategies?.length)
+        setStrategies(strRes.value.data.strategies)
       if (wlRes.status === 'fulfilled')  setWatchlists(wlRes.value.data.watchlists ?? {})
     })
   }, [])
 
   const set = (k: keyof typeof form, v: string) => setForm(f => ({ ...f, [k]: v }))
+
+  // When broker changes, reset watchlist to first valid one for that broker
+  const setBroker = (broker: string) => {
+    const validWatchlists = BROKER_WATCHLISTS[broker] ?? Object.keys(watchlists)
+    const firstValid = validWatchlists[0] ?? 'custom'
+    setForm(f => ({ ...f, broker, watchlist: firstValid }))
+  }
+
+  // Watchlist keys valid for currently selected broker
+  const validWatchlistKeys = BROKER_WATCHLISTS[form.broker] ?? Object.keys(watchlists)
 
   const runScan = useCallback(async () => {
     setScanning(true)
@@ -193,7 +212,7 @@ export default function MarketScanner() {
             <div className="relative">
               <select
                 value={form.broker}
-                onChange={e => set('broker', e.target.value)}
+                onChange={e => setBroker(e.target.value)}
                 className="w-full appearance-none bg-dark-700 border border-dark-500 text-white text-sm rounded-lg px-3 py-2 pr-8 focus:outline-none focus:border-brand-500"
               >
                 {BROKERS.map(b => (
@@ -233,7 +252,7 @@ export default function MarketScanner() {
                 onChange={e => set('watchlist', e.target.value)}
                 className="w-full appearance-none bg-dark-700 border border-dark-500 text-white text-sm rounded-lg px-3 py-2 pr-8 focus:outline-none focus:border-brand-500"
               >
-                {Object.keys(watchlists).map(k => (
+                {validWatchlistKeys.filter(k => k in watchlists).map(k => (
                   <option key={k} value={k}>{WATCHLIST_LABELS[k] ?? k}</option>
                 ))}
                 <option value="custom">Custom symbols</option>

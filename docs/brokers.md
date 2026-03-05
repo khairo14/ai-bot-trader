@@ -115,6 +115,13 @@ ALPACA_BASE_URL=https://paper-api.alpaca.markets   # Change to live URL when rea
 - For backtesting, free tier is sufficient (historical data has no delay)
 - For live trading signals, real-time data is strongly recommended
 
+### OHLCV Data Guard
+`get_ohlcv()` includes defensive guards for Alpaca-specific edge cases:
+- **Empty response** (symbol not covered, free-tier restrictions): raises `ValueError` with clear message instead of cryptic pandas crash
+- **MultiIndex response** (symbol not in returned data): raises `ValueError` naming the missing symbol
+- **Missing columns** (incomplete bar data): raises `ValueError` listing exactly which OHLCV columns are absent
+All errors surface as human-readable messages in the Scanner errors panel and Forward Test logs.
+
 ### Rate Limits
 - REST: 200 requests/minute
 - WebSocket: Unlimited subscription to price updates
@@ -210,6 +217,18 @@ IB Gateway supports headless (no GUI) operation via `ibgateway` command. This is
 | US stocks | Alpaca | Commission-free, excellent API, easy setup |
 | US options | IBKR | Best options API, full Greeks, multi-leg support |
 | International stocks | IBKR | Global market access |
+
+### Broker-Watchlist Filtering (Market Scanner)
+
+The Market Scanner enforces a broker-to-watchlist mapping so crypto watchlists are never sent to stock brokers and vice-versa:
+
+| Broker | Available Watchlists |
+|---|---|
+| `binance` | `crypto_major`, `crypto_mid` |
+| `alpaca` | `us_stocks`, `us_stocks_mid` |
+| `ibkr` | `us_stocks`, `us_stocks_mid` |
+
+This is enforced in both the backend (`GET /api/scanner/watchlists?broker=binance`) and the frontend (`BROKER_WATCHLISTS` constant in `MarketScanner.tsx`).
 
 ---
 

@@ -84,6 +84,66 @@ Instead of trading each strategy at equal size, this feature computes Sharpe-wei
 
 ---
 
+## SC-01 · Market Scanner ✅ COMPLETE
+
+**What it is:**
+Scan an entire watchlist of symbols in parallel using any strategy, rank results by confidence, and surface the best opportunities instantly — without waiting for the scheduler.
+
+**What was built:**
+- `backend/api/routes/scanner.py`:
+  - `POST /api/scanner/scan` — runs any registered strategy across  all watchlist symbols concurrently via `asyncio.gather`; returns non-HOLD signals ranked by confidence
+  - `GET /api/scanner/watchlists` — returns preset symbol lists; accepts optional `broker` query param to filter to only broker-valid watchlists
+  - `GET /api/scanner/strategies` — returns all registered strategy names from `STRATEGY_REGISTRY`
+  - `WATCHLISTS` dict: `crypto_major` (10 pairs), `crypto_mid` (10 pairs), `us_stocks` (10 tickers), `us_stocks_mid` (10 tickers)
+  - `BROKER_WATCHLISTS` dict: maps each broker to its valid watchlist keys (Binance → crypto, Alpaca/IBKR → stocks) — prevents cross-broker errors
+  - `MATIC/USDT` updated to `POL/USDT` (Polygon network rebranded in late 2024)
+- `frontend/src/pages/MarketScanner.tsx`:
+  - `BROKER_WATCHLISTS` constant mirrors backend mapping
+  - `setBroker()` function: changes broker AND auto-resets watchlist to first valid one for that broker
+  - `validWatchlistKeys` computed value filters watchlist dropdown to broker-appropriate options only
+  - Results table: symbol, signal badge, confidence bar, entry/SL/TP, regime chip, reasons panel
+  - Error column surfaces per-symbol scanner errors (e.g. Alpaca empty data) inline
+  - Route `/market-scanner`, sidebar nav item with `Scan` icon
+
+---
+
+## SC-02 · Robustness Improvements ✅ COMPLETE
+
+A set of production hardening fixes discovered during live testing.
+
+### Signal Deduplication (Forward Test)
+**Problem:** Clicking "Run Now" twice within seconds saved duplicate signals to the DB.
+**Fix:** `api/routes/forward_test.py` — before `session.add(db_signal)`, queries for any existing signal with the same symbol + strategy + signal type + timeframe that is not dismissed and was created within a per-timeframe dedup window:
+```python
+_TF_DEDUP_MINUTES = {"1m":2, "5m":10, "15m":20, "30m":45, "1h":75, "2h":150, "4h":300, "1d":1440}
+```
+If a match exists within the window, the save is skipped and logged.
+
+### Per-Strategy Confluence Defaults
+**Problem:** `mean_reversion_bb` is a counter-trend strategy by design. It fires when the 1h chart shows oversold/overbought while 4h + 1d are trending — which always produces low confluence, suppressing valid signals.
+**Fix:** `tasks/signal_runner.py` and `api/routes/forward_test.py` — three-level confluence threshold lookup:
+1. `strategy.parameters["min_confluence"]` (DB override, takes priority)
+2. `_STRATEGY_CONFLUENCE_DEFAULTS[strategy_type]` (per-strategy default)
+3. `MIN_CONFLUENCE` (global fallback = 0.5)
+
+`_STRATEGY_CONFLUENCE_DEFAULTS`:
+```python
+{"mean_reversion_bb": 0.0,   # counter-trend — bypass entirely
+ "hybrid_macd_rsi":   0.5,
+ "momentum_breakout": 0.5}
+```
+When `_min_conf == 0.0`, the asyncio confluence calls are skipped entirely for performance.
+
+### Alpaca Empty DataFrame Guard
+**Problem:** When Alpaca returns no data for a symbol (free tier, delisted, out-of-hours), a bare `df[["open",...]]` crash produced a cryptic pandas error in the Scanner errors panel.
+**Fix:** `backend/brokers/alpaca_client.py` — `get_ohlcv()` now checks:
+1. `df is None or df.empty` → raises `ValueError` with clear message
+2. `isinstance(df.index, pd.MultiIndex)` and symbol not present → raises `ValueError`
+3. Missing OHLCV columns → raises `ValueError` listing exactly which columns are missing
+All paths produce human-readable errors surfaced in the Scanner / Forward Test errors panel.
+
+---
+
 ## EX-01 · Options Strategy Execution (IBKR)
 
 **What it is:**
@@ -266,9 +326,11 @@ A professional candlestick chart for every symbol/timeframe being traded, showin
 | 3 | **OPS-01** VPS deployment | Low | High |
 | 4 | ~~**OPS-02** Auth / login~~ ✅ | Low | High (required for VPS) |
 | 5 | ~~**ML-02** Regime detector~~ ✅ | High | High |
-| 6 | **UI-03** Strategy code editor | Medium | High |
-| 7 | **UI-01** Analytics dashboard | Medium | Medium |
+| 6 | ~~**UI-03** Strategy code editor~~ ✅ | Medium | High |
+| 7 | ~~**UI-01** Analytics dashboard~~ ✅ | Medium | Medium |
 | 8 | **EX-01** Options execution | High | Medium |
 | 9 | ~~**EX-02** Trailing stops~~ ✅ | Low | Medium |
 | 10 | ~~**UI-02** Multi-timeframe~~ ✅ | Medium | Medium |
 | 11 | ~~**ML-03** Portfolio optimization~~ ✅ | High | Medium |
+| 12 | ~~**SC-01** Market Scanner~~ ✅ | Medium | High |
+| 13 | ~~**SC-02** Robustness improvements~~ ✅ | Low | High |

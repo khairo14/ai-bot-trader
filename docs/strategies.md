@@ -232,6 +232,33 @@ Weekly retraining on new data
 
 ---
 
+## Multi-Timeframe Confluence
+
+Before any non-HOLD signal can reach the execution engine, it must pass a multi-timeframe agreement check. The primary timeframe's signal is compared against the two standard higher timeframes (e.g. 1h → checks 4h + 1d).
+
+```
+confluence_score = (agreeing timeframes) / (total timeframes checked)
+```
+
+If `confluence_score < min_confluence`, execution is suppressed and the reason is recorded in the signal's reasons list.
+
+### Per-Strategy Confluence Defaults
+
+| Strategy | Default `min_confluence` | Rationale |
+|---|---|---|
+| `hybrid_macd_rsi` | `0.5` | Trend-following — benefits from higher-TF alignment |
+| `momentum_breakout` | `0.5` | Breakouts confirm better when multiple TFs agree |
+| `mean_reversion_bb` | `0.0` | **Counter-trend by design** — always disagrees with higher TFs; bypass entirely |
+
+The threshold is a three-level lookup:
+1. `strategy.parameters["min_confluence"]` — DB-level override (highest priority)
+2. `_STRATEGY_CONFLUENCE_DEFAULTS[strategy_type]` — per-strategy default
+3. `MIN_CONFLUENCE` (0.5) — global fallback
+
+When `min_confluence == 0.0`, the higher-TF API calls are skipped entirely for performance.
+
+---
+
 ## Regime Detection
 
 The regime detector runs continuously and classifies the current market state. Strategies are weighted accordingly.

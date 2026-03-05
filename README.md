@@ -31,6 +31,9 @@ A production-grade algorithmic trading system with AI-assisted entry/exit signal
 | ML model training | ✅ Complete | XGBoost trainer — yfinance OHLCV → AUC-gated model |
 | ML inference | ✅ Complete | MLScorer wired into HybridStrategy (60/40 blend) |
 | Strategy library | ✅ Complete | 3 strategies: hybrid, momentum_breakout, mean_reversion_bb |
+| Market Scanner | ✅ Complete | Parallel multi-symbol scan, confidence ranking, broker-aware watchlists |
+| Signal deduplication | ✅ Complete | Dedup window per timeframe prevents double-save on rapid Run Now |
+| Per-strategy confluence | ✅ Complete | mean_reversion_bb bypasses confluence (counter-trend by design) |
 | Notification system | ✅ Complete | In-app bell + DB log + Gmail SMTP alerts |
 | Loading skeletons | ✅ Complete | Dashboard, Strategies, ForwardTest |
 | Health check | ✅ Complete | `GET /health?deep=true` pings DB + Redis |
@@ -112,7 +115,8 @@ docker-compose up --build
 ```
 ┌─────────────────────────────────────────────────────────┐
 │              React Frontend (5173 dev / 3000 prod)        │
-│    Dashboard │ Backtest │ ForwardTest │ Strategies        │
+│  Dashboard │ Backtest │ ForwardTest │ Strategies          │
+│  Market Scanner │ Charts │ Analytics │ Multi-Timeframe   │
 └─────────────────────────┬───────────────────────────────┘
                           │ REST + WebSocket
 ┌─────────────────────────▼───────────────────────────────┐
@@ -161,21 +165,15 @@ Switchable per strategy in the **Strategies** page, or via `PATCH /api/strategie
 
 | Doc | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | System overview, data flow diagrams |
-| [docs/brokers.md](docs/brokers.md) | Broker setup, API details, options support |
-| [docs/setup.md](docs/setup.md) | Full installation and configuration guide |
-| [docs/strategies.md](docs/strategies.md) | Strategy types, ML hybrid, signal format |
-| [docs/execution.md](docs/execution.md) | Execution modes, order flow, paper trading |
-| [docs/backtesting.md](docs/backtesting.md) | Backtest engine, metrics, walk-forward |
-| [docs/risk-management.md](docs/risk-management.md) | Position sizing, circuit breakers, stop logic |
-| [docs/tools.md](docs/tools.md) | Indicator library reference |
-| [docs/phase2.md](docs/phase2.md) | Phase 2 roadmap — ML feedback loop, options, VPS deploy |
-| [docs/strategies.md](docs/strategies.md) | Strategy types, ML features, regime detection |
-| [docs/tools.md](docs/tools.md) | Full tool library reference, custom tool guide |
-| [docs/backtesting.md](docs/backtesting.md) | Backtest engine, metrics, quality checklist |
+| [docs/architecture.md](docs/architecture.md) | System overview, data flow diagrams, component status |
+| [docs/brokers.md](docs/brokers.md) | Broker setup, API details, options support, watchlist filtering |
+| [docs/setup.md](docs/setup.md) | Full installation and configuration guide, VPS deployment |
+| [docs/strategies.md](docs/strategies.md) | Strategy types, ML hybrid, confluence defaults, signal format |
 | [docs/execution.md](docs/execution.md) | Execution modes, order lifecycle, paper trading |
+| [docs/backtesting.md](docs/backtesting.md) | Backtest engine, metrics, walk-forward, quality checklist |
 | [docs/risk-management.md](docs/risk-management.md) | 5-level risk hierarchy, position sizing, circuit breaker |
-| [docs/setup.md](docs/setup.md) | Full setup guide, VPS deployment |
+| [docs/tools.md](docs/tools.md) | Indicator library reference, custom tool guide |
+| [docs/phase2.md](docs/phase2.md) | Phase 2 roadmap — Market Scanner, ML feedback loop, options, VPS deploy |
 
 ---
 

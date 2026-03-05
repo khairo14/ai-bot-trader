@@ -4,7 +4,7 @@ import csv
 import io
 import math as _math
 import time as _time_module
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -382,15 +382,20 @@ async def _run_one_strategy(strat) -> None:
             asset_cls = strat.asset_class
 
         # ── UI-02: Multi-timeframe confluence check ──────────────────────
-        from tasks.signal_runner import _confluence_score, MIN_CONFLUENCE, _TRACKABLE_SIGNALS
+        from tasks.signal_runner import (
+            _confluence_score, MIN_CONFLUENCE,
+            _TRACKABLE_SIGNALS, _STRATEGY_CONFLUENCE_DEFAULTS,
+        )
+        _strat_default = _STRATEGY_CONFLUENCE_DEFAULTS.get(strategy_type, MIN_CONFLUENCE)
+        _min_conf = float(params.get("min_confluence", _strat_default))
         allow_execution = True
         conf = 1.0
-        if sig.signal in _TRACKABLE_SIGNALS:
+        if sig.signal in _TRACKABLE_SIGNALS and _min_conf > 0.0:
             conf = await _confluence_score(
                 signal_engine, strategy_type, symbol,
                 strat.broker.value, timeframe, sig.signal,
             )
-            if conf < MIN_CONFLUENCE:
+            if conf < _min_conf:
                 allow_execution = False
                 sig.reasons = (sig.reasons or []) + [
                     f"execution suppressed: low multi-TF confluence ({conf:.0%})"
@@ -412,6 +417,31 @@ async def _run_one_strategy(strat) -> None:
         async with AsyncSessionLocal() as session:
             # Hydrate engine state from DB before processing (balance, open positions)
             await forward_engine.initialize(session)
+
+            # ── Deduplication: skip if an identical signal already exists within
+            # one timeframe-period window to prevent double-saves on rapid Run Now
+            _TF_DEDUP_MINUTES: dict[str, int] = {
+                "1m": 2, "5m": 10, "15m": 20, "30m": 45,
+                "1h": 75, "2h": 150, "4h": 300, "1d": 1440,
+            }
+            _dedup_window = timedelta(minutes=_TF_DEDUP_MINUTES.get(timeframe, 75))
+            _cutoff = datetime.utcnow() - _dedup_window
+            _existing = await session.execute(
+                select(SignalModel).where(
+                    SignalModel.symbol == sig.symbol,
+                    SignalModel.strategy_name == sig.strategy_name,
+                    SignalModel.signal == sig_type,
+                    SignalModel.timeframe == sig.timeframe,
+                    SignalModel.dismissed == False,  # noqa: E712
+                    SignalModel.created_at >= _cutoff,
+                ).limit(1)
+            )
+            if _existing.scalar_one_or_none() is not None:
+                logger.info(
+                    f"[ForwardTest] ⏭ Skipping duplicate signal: "
+                    f"{sig.signal} {sig.symbol} (already saved within {timeframe} window)"
+                )
+                return
 
             db_signal = SignalModel(
                 symbol=sig.symbol,
