@@ -95,7 +95,14 @@ def run_signals(self):
 
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
-                    select(StrategyModel).where(StrategyModel.is_active == True)
+                    # Exclude paper strategies — they are handled by the
+                    # wall-clock-aligned in-process forward_test scheduler
+                    # (main.py lifespan → _forward_test_scheduler).  Running
+                    # them here too would create duplicate signals + trades.
+                    select(StrategyModel).where(
+                        StrategyModel.is_active == True,
+                        StrategyModel.is_paper == False,
+                    )
                 )
                 active_strategies = result.scalars().all()
 

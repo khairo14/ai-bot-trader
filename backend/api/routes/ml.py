@@ -139,3 +139,20 @@ async def trigger_retrain():
         return {"status": "queued", "task_id": task.id}
     except Exception as exc:
         return {"status": "error", "detail": str(exc)}
+
+
+@router.post("/reload")
+async def reload_model_cache():
+    """
+    Clear the in-process MLScorer model cache so the next prediction reloads
+    the latest trained model from disk.
+
+    Why this exists: ml_retrain runs in a Celery worker process.  Calling
+    ml_scorer.reload() there clears only the worker's memory.  The FastAPI
+    server lives in a separate process and never automatically picks up the
+    freshly trained model.  Call this endpoint after a retrain to flush the
+    server-side cache.
+    """
+    from core.ml_scorer import ml_scorer
+    ml_scorer.reload()
+    return {"status": "ok", "message": "MLScorer cache cleared — next prediction will reload from disk"}

@@ -382,6 +382,34 @@ async def _run_one_strategy(strat) -> None:
         except ValueError:
             asset_cls = strat.asset_class
 
+        # ── UI-02: Multi-timeframe confluence check ──────────────────────
+        from tasks.signal_runner import _confluence_score, MIN_CONFLUENCE, _TRACKABLE_SIGNALS
+        allow_execution = True
+        conf = 1.0
+        if sig.signal in _TRACKABLE_SIGNALS:
+            conf = await _confluence_score(
+                signal_engine, strategy_type, symbol,
+                strat.broker.value, timeframe, sig.signal,
+            )
+            if conf < MIN_CONFLUENCE:
+                allow_execution = False
+                sig.reasons = (sig.reasons or []) + [
+                    f"execution suppressed: low multi-TF confluence ({conf:.0%})"
+                ]
+                logger.info(
+                    f"[ForwardTest] ⚠ Low confluence {conf:.0%} for "
+                    f"{sig.signal} {symbol} on {timeframe} — not executing"
+                )
+
+        # ── ML-03: Portfolio weight multiplier ───────────────────────────
+        port_weight = 1.0
+        try:
+            w = params.get("weight")
+            if w is not None:
+                port_weight = max(0.05, float(w))
+        except (TypeError, ValueError):
+            pass
+
         async with AsyncSessionLocal() as session:
             db_signal = SignalModel(
                 symbol=sig.symbol,
@@ -401,13 +429,37 @@ async def _run_one_strategy(strat) -> None:
             session.add(db_signal)
             await session.flush()
 
-            # Pipe through ForwardEngine
+            # ── ML-01: Create TradeOutcome for feedback loop ──────────────
+            if sig.signal in _TRACKABLE_SIGNALS:
+                from db.models import TradeOutcome as TradeOutcomeModel
+                _trailing = None
+                _t = params.get("trailing_stop_pct")
+                if _t is not None:
+                    try:
+                        _trailing = float(_t)
+                    except (TypeError, ValueError):
+                        pass
+                session.add(TradeOutcomeModel(
+                    signal_id=db_signal.id,
+                    symbol=sig.symbol,
+                    timeframe=sig.timeframe,
+                    strategy_name=sig.strategy_name,
+                    signal_type=sig.signal,
+                    entry_price=sig.entry_price,
+                    stop_loss=sig.stop_loss,
+                    take_profit=sig.take_profit,
+                    trailing_stop_pct=_trailing,
+                    resolved=False,
+                ))
+
+            # ── Pipe through ForwardEngine ────────────────────────────────
             trade = await forward_engine.process_signal(
                 signal=sig,
                 execution_mode=strat.execution_mode.value,
                 is_paper=True,
                 db_session=session,
-            )
+                position_size_multiplier=port_weight,
+            ) if allow_execution else None
 
             if trade is not None:
                 trade.signal_id = db_signal.id
