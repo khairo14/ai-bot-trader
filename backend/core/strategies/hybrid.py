@@ -4,6 +4,7 @@ from loguru import logger
 
 from core.strategies.base import BaseStrategy, Signal
 from core.ml_scorer import ml_scorer
+from core.regime_classifier import regime_classifier
 from tools.basic.rsi import RSI
 from tools.basic.macd import MACD
 from tools.basic.bollinger_bands import BollingerBands
@@ -67,6 +68,13 @@ class HybridStrategy(BaseStrategy):
                 asset_class=self.asset_class, broker=self.broker,
                 reasons=["Insufficient data"]
             )
+
+        # ── Regime classification ─────────────────────────────────────────
+        regime_result = regime_classifier.classify(data)
+        regime_name   = regime_result.regime
+        score_adj     = regime_classifier.score_adjustment(regime_name)
+        atr_mults     = regime_classifier.atr_multipliers(regime_name)
+        logger.debug(f"[{self.name}] Regime: {regime_name} | adj={score_adj}")
 
         # ── Run tools ────────────────────────────────────
         rsi_out = self.rsi.calculate(data, period=14)
@@ -146,7 +154,7 @@ class HybridStrategy(BaseStrategy):
         ML_VETO_BUY  = 0.35   # if P(buy) < this, suppress BUY even if rules agree
         ML_VETO_SHORT = 0.65  # if P(buy) > this, suppress SHORT even if rules agree
 
-        if long_score >= min_score and long_score > short_score:
+        if long_score >= min_score_long and long_score > short_score:
             signal_type = "BUY"
             rule_conf = long_score / total_possible
             if ml_prob is not None:
@@ -161,16 +169,16 @@ class HybridStrategy(BaseStrategy):
                 else:
                     # Blend: 60% rule confidence, 40% ML probability
                     confidence = round(0.6 * rule_conf + 0.4 * ml_prob, 3)
-                    stop_loss = round(current_price - (atr_value * 2.0), 4)
-                    take_profit = round(current_price + (atr_value * 4.0), 4)
-                    reasons = reasons_long + [f"ML confirms: P(buy)={ml_prob:.2f}"]
+                    stop_loss = round(current_price - (atr_value * atr_mults["sl"]), 4)
+                    take_profit = round(current_price + (atr_value * atr_mults["tp"]), 4)
+                    reasons = reasons_long + [f"ML confirms: P(buy)={ml_prob:.2f}", f"Regime: {regime_name}"]
             else:
                 confidence = round(rule_conf, 3)
-                stop_loss = round(current_price - (atr_value * 2.0), 4)
-                take_profit = round(current_price + (atr_value * 4.0), 4)
-                reasons = reasons_long
+                stop_loss = round(current_price - (atr_value * atr_mults["sl"]), 4)
+                take_profit = round(current_price + (atr_value * atr_mults["tp"]), 4)
+                reasons = reasons_long + [f"Regime: {regime_name}"]
 
-        elif short_score >= min_score and short_score > long_score:
+        elif short_score >= min_score_short and short_score > long_score:
             signal_type = "SHORT"
             rule_conf = short_score / total_possible
             if ml_prob is not None:
@@ -186,14 +194,14 @@ class HybridStrategy(BaseStrategy):
                     # For SHORT: high ml_prob means bearish (inverted)
                     ml_short_conf = 1.0 - ml_prob
                     confidence = round(0.6 * rule_conf + 0.4 * ml_short_conf, 3)
-                    stop_loss = round(current_price + (atr_value * 2.0), 4)
-                    take_profit = round(current_price - (atr_value * 4.0), 4)
-                    reasons = reasons_short + [f"ML bearish: P(buy)={ml_prob:.2f}"]
+                    stop_loss = round(current_price + (atr_value * atr_mults["sl"]), 4)
+                    take_profit = round(current_price - (atr_value * atr_mults["tp"]), 4)
+                    reasons = reasons_short + [f"ML bearish: P(buy)={ml_prob:.2f}", f"Regime: {regime_name}"]
             else:
                 confidence = round(rule_conf, 3)
-                stop_loss = round(current_price + (atr_value * 2.0), 4)
-                take_profit = round(current_price - (atr_value * 4.0), 4)
-                reasons = reasons_short
+                stop_loss = round(current_price + (atr_value * atr_mults["sl"]), 4)
+                take_profit = round(current_price - (atr_value * atr_mults["tp"]), 4)
+                reasons = reasons_short + [f"Regime: {regime_name}"]
 
         else:
             signal_type = "HOLD"
@@ -204,7 +212,8 @@ class HybridStrategy(BaseStrategy):
 
         logger.debug(
             f"[{self.name}] {symbol} {timeframe} → {signal_type} "
-            f"(long: {long_score}, short: {short_score}, conf: {confidence}, ml: {ml_prob})"
+            f"(long: {long_score}/{min_score_long}, short: {short_score}/{min_score_short}, "
+            f"conf: {confidence}, ml: {ml_prob}, regime: {regime_name})"
         )
 
         return Signal(
@@ -219,4 +228,5 @@ class HybridStrategy(BaseStrategy):
             asset_class=self.asset_class,
             broker=self.broker,
             reasons=reasons,
+            regime=regime_name,
         )

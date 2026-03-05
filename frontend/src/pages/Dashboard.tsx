@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2 } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
@@ -74,6 +74,22 @@ interface MLStatus {
   models: { symbol: string; trained_date: string | null }[]
 }
 
+interface RegimeInfo {
+  regime: string
+  symbol: string
+  timeframe: string
+  features: { adx: number; atr_norm: number; bb_width: number; ema_slope: number }
+  score_adjustment: { long_delta: number; short_delta: number }
+}
+
+const REGIME_STYLES: Record<string, { label: string; color: string; bg: string; border: string }> = {
+  trending_up:    { label: 'Trending Up',    color: 'text-green-400',  bg: 'bg-green-900/20',  border: 'border-green-700/40' },
+  trending_down:  { label: 'Trending Down',  color: 'text-red-400',    bg: 'bg-red-900/20',    border: 'border-red-700/40' },
+  ranging:        { label: 'Ranging',        color: 'text-yellow-400', bg: 'bg-yellow-900/20', border: 'border-yellow-700/40' },
+  high_volatility:{ label: 'High Volatility',color: 'text-orange-400', bg: 'bg-orange-900/20', border: 'border-orange-700/40' },
+  low_volatility: { label: 'Low Volatility', color: 'text-blue-400',   bg: 'bg-blue-900/20',   border: 'border-blue-700/40' },
+}
+
 
 export default function Dashboard() {
   const [signals, setSignals] = useState<Signal[]>([])
@@ -83,20 +99,23 @@ export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false)
   const [actioning, setActioning] = useState<number | null>(null)
   const [mlStatus, setMlStatus] = useState<MLStatus | null>(null)
+  const [regime, setRegime] = useState<RegimeInfo | null>(null)
 
   const fetchAll = async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     // Fetch independently — a slow broker never blocks signals from loading
-    const [sigResult, portResult, pendingResult, mlResult] = await Promise.allSettled([
+    const [sigResult, portResult, pendingResult, mlResult, regimeResult] = await Promise.allSettled([
       axios.get('/api/signals/?limit=20'),
       axios.get('/api/portfolio/summary'),
       axios.get('/api/signals/pending'),
       axios.get('/api/ml/status'),
+      axios.get('/api/regime?symbol=BTC%2FUSDT&timeframe=1h&broker=binance'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
     if (pendingResult.status === 'fulfilled') setPendingSignals(pendingResult.value.data.signals || [])
     if (mlResult.status === 'fulfilled') setMlStatus(mlResult.value.data)
+    if (regimeResult.status === 'fulfilled') setRegime(regimeResult.value.data)
     setLoading(false)
     setRefreshing(false)
   }
@@ -265,11 +284,24 @@ export default function Dashboard() {
               : <span className="text-xs bg-dark-700 text-gray-500 px-2 py-0.5 rounded-full">Warming up</span>
             }
           </div>
-          {mlStatus?.last_retrain && (
-            <span className="text-xs text-gray-500">
-              Last retrain: {new Date(mlStatus.last_retrain).toLocaleDateString()}
-            </span>
-          )}
+          <div className="flex items-center gap-3">
+            {/* Regime Badge */}
+            {regime && (() => {
+              const rs = REGIME_STYLES[regime.regime] ?? { label: regime.regime, color: 'text-gray-400', bg: 'bg-dark-700', border: 'border-dark-600' }
+              return (
+                <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${rs.bg} ${rs.border}`}>
+                  <BarChart2 size={11} className={rs.color} />
+                  <span className={`text-xs font-semibold ${rs.color}`}>{rs.label}</span>
+                  <span className="text-xs text-gray-500">{regime.symbol} {regime.timeframe}</span>
+                </div>
+              )
+            })()}
+            {mlStatus?.last_retrain && (
+              <span className="text-xs text-gray-500">
+                Last retrain: {new Date(mlStatus.last_retrain).toLocaleDateString()}
+              </span>
+            )}
+          </div>
         </div>
         <div className="grid grid-cols-4 gap-3">
           <div className="bg-dark-700 rounded-lg p-3">

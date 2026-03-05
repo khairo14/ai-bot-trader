@@ -20,6 +20,7 @@ from typing import Optional
 from loguru import logger
 
 from core.strategies.base import BaseStrategy, Signal
+from core.regime_classifier import regime_classifier
 from tools.basic.bollinger_bands import BollingerBands
 from tools.basic.rsi import RSI
 from tools.basic.volume_atr_adx import VolumeAnalysis, ATR
@@ -67,6 +68,15 @@ class MeanReversionBBStrategy(BaseStrategy):
         if len(data) < 30:
             return _hold([f"Insufficient data ({len(data)} < 30 candles)"])
 
+        # ── Regime classification ─────────────────────────────────────────
+        regime_result = regime_classifier.classify(data)
+        regime_name   = regime_result.regime
+        atr_mults     = regime_classifier.atr_multipliers(regime_name)
+        # Mean-reversion works best in ranging / low-vol; suppress in strong trends
+        from core.regime_classifier import REGIME_TRENDING_UP, REGIME_TRENDING_DOWN
+        if regime_name in (REGIME_TRENDING_UP, REGIME_TRENDING_DOWN):
+            return _hold([f"Regime '{regime_name}' — mean-reversion suppressed in trend"])
+
         # ── Compute indicators ──────────────────────────────────────────────
         try:
             bb_out = self.bb.calculate(data, period=20, std_dev=2.0)
@@ -103,12 +113,13 @@ class MeanReversionBBStrategy(BaseStrategy):
             return Signal(
                 symbol=symbol, signal="BUY",
                 entry_price=current_price,
-                stop_loss=round(current_price - self.ATR_STOP_MULT * atr_val, 6),
+                stop_loss=round(current_price - atr_mults["sl"] * atr_val, 6),
                 take_profit=round(mid_band, 6),
                 confidence=round(confidence, 3),
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=reasons,
+                reasons=reasons + [f"Regime: {regime_name}"],
+                regime=regime_name,
             )
 
         if at_upper and rsi_val > self.RSI_OVERBOUGHT:
@@ -125,12 +136,13 @@ class MeanReversionBBStrategy(BaseStrategy):
             return Signal(
                 symbol=symbol, signal="SHORT",
                 entry_price=current_price,
-                stop_loss=round(current_price + self.ATR_STOP_MULT * atr_val, 6),
+                stop_loss=round(current_price + atr_mults["sl"] * atr_val, 6),
                 take_profit=round(mid_band, 6),
                 confidence=round(confidence, 3),
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=reasons,
+                reasons=reasons + [f"Regime: {regime_name}"],
+                regime=regime_name,
             )
 
         hold_reasons = [f"Price mid-band (band_pct={bb_out.value:.3f}), RSI={rsi_val:.1f}"]

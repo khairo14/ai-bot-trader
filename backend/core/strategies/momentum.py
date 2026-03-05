@@ -20,6 +20,7 @@ from typing import Optional
 from loguru import logger
 
 from core.strategies.base import BaseStrategy, Signal
+from core.regime_classifier import regime_classifier
 from tools.basic.volume_atr_adx import VolumeAnalysis, ATR, ADX
 from tools.basic.moving_averages import MovingAverages
 
@@ -69,6 +70,12 @@ class MomentumBreakoutStrategy(BaseStrategy):
             return _hold([f"Insufficient data ({len(data)} < {required} candles)"])
 
         # ── Compute indicators ──────────────────────────────────────────────
+        # ── Regime classification ─────────────────────────────────────────
+        regime_result = regime_classifier.classify(data)
+        regime_name   = regime_result.regime
+        score_adj     = regime_classifier.score_adjustment(regime_name)
+        atr_mults     = regime_classifier.atr_multipliers(regime_name)
+
         try:
             atr_out = self.atr.calculate(data)
             adx_out = self.adx.calculate(data)
@@ -123,20 +130,21 @@ class MomentumBreakoutStrategy(BaseStrategy):
                 short_score += 1
                 reasons_short.append("EMA downtrend confirmed")
 
-        LONG_THRESHOLD = 3
-        SHORT_THRESHOLD = 3
+        LONG_THRESHOLD  = max(1, 3 + score_adj["long_delta"])
+        SHORT_THRESHOLD = max(1, 3 + score_adj["short_delta"])
 
         if broke_up and long_score >= LONG_THRESHOLD:
             confidence = min(long_score / 5, 1.0)
             return Signal(
                 symbol=symbol, signal="BUY",
                 entry_price=current_price,
-                stop_loss=round(current_price - self.ATR_STOP_MULT * atr_val, 6),
-                take_profit=round(current_price + self.ATR_TP_MULT * atr_val, 6),
+                stop_loss=round(current_price - atr_mults["sl"] * atr_val, 6),
+                take_profit=round(current_price + atr_mults["tp"] * atr_val, 6),
                 confidence=round(confidence, 3),
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=reasons_long,
+                reasons=reasons_long + [f"Regime: {regime_name}"],
+                regime=regime_name,
             )
 
         if broke_down and short_score >= SHORT_THRESHOLD:
@@ -144,12 +152,13 @@ class MomentumBreakoutStrategy(BaseStrategy):
             return Signal(
                 symbol=symbol, signal="SHORT",
                 entry_price=current_price,
-                stop_loss=round(current_price + self.ATR_STOP_MULT * atr_val, 6),
-                take_profit=round(current_price - self.ATR_TP_MULT * atr_val, 6),
+                stop_loss=round(current_price + atr_mults["sl"] * atr_val, 6),
+                take_profit=round(current_price - atr_mults["tp"] * atr_val, 6),
                 confidence=round(confidence, 3),
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=reasons_short if broke_down else reasons,
+                reasons=(reasons_short if broke_down else reasons) + [f"Regime: {regime_name}"],
+                regime=regime_name,
             )
 
         hold_reasons = [f"No breakout (high {highest_high:.4f} / low {lowest_low:.4f})"]

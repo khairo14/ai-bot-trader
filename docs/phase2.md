@@ -37,7 +37,7 @@ Better predictions tomorrow
 
 ---
 
-## ML-02 · Market Regime Detector (Automated)
+## ML-02 · Market Regime Detector ✅ COMPLETE
 
 **What it is:**
 The strategy layer hard-codes regime logic (trending / ranging). This feature builds an automated ML regime classifier that detects the current market condition and dynamically weights strategy outputs.
@@ -51,10 +51,14 @@ The strategy layer hard-codes regime logic (trending / ranging). This feature bu
 | High Volatility | VIX spike, wide ATR | Reduce position size, widen stops |
 | Low Volatility | Tight BB, low ATR | Options selling (iron condor) |
 
-**What needs building:**
-- `RegimeClassifier` (HMM or XGBoost on ATR, ADX, VIX, BB width, trend slope)
-- Per-regime strategy weight multipliers applied in `SignalEngine`
-- Regime shown on Dashboard as a badge
+**What was built:**
+- `backend/core/regime_classifier.py` — heuristic RegimeClassifier (deterministic rules on ADX, normalised ATR, BB width, EMA slope); singleton `regime_classifier`
+- Per-regime `min_score` adjustments and ATR multipliers (`REGIME_SCORE_ADJUSTMENTS`, `REGIME_ATR_MULTIPLIERS`)
+- Integrated into `hybrid.py`, `momentum.py`, `mean_reversion.py` — all strategies now call `regime_classifier.classify(data)` and adjust thresholds + SL/TP accordingly
+- Mean-reversion strategy auto-suppressed when regime is `trending_up` or `trending_down`
+- `Signal.regime` field now populated on every signal
+- `backend/api/routes/regime.py` — `GET /api/regime?symbol=&timeframe=&broker=` endpoint
+- Dashboard regime badge in ML Feedback Loop card (colour-coded by regime type)
 
 ---
 
@@ -236,7 +240,7 @@ A professional candlestick chart for every symbol/timeframe being traded, showin
 | 2 | ~~**UI-04** Candlestick chart~~ ✅ | Medium | High |
 | 3 | **OPS-01** VPS deployment | Low | High |
 | 4 | ~~**OPS-02** Auth / login~~ ✅ | Low | High (required for VPS) |
-| 5 | **ML-02** Regime detector | High | High |
+| 5 | **ML-02** Regime detector | High | High | ✅ |
 | 6 | **UI-03** Strategy code editor | Medium | High |
 | 7 | **UI-01** Analytics dashboard | Medium | Medium |
 | 8 | **EX-01** Options execution | High | Medium |
