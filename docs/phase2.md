@@ -106,18 +106,23 @@ The execution engine currently places static stop loss and take profit. This add
 
 ---
 
-## UI-01 · Performance Analytics Dashboard
+## UI-01 · Performance Analytics Dashboard ✅
 
 **What it is:**
 A dedicated analytics page showing historical performance across all strategies and symbols — beyond the basic P&L on the Dashboard.
 
-**Charts to add:**
-- Equity curve (cumulative P&L over time)
-- Monthly return heatmap (calendar view)
-- Win rate by strategy, by symbol, by time-of-day
-- Average MAE/MFE per trade (how far against you before recovering)
-- Rolling Sharpe ratio (30-day window)
-- ML model accuracy over time
+**What was built:**
+- `GET /api/analytics/summary` single endpoint aggregating all analytics from `TradeOutcome` table (resolved trades only)
+- `frontend/src/pages/Analytics.tsx` — full recharts dashboard at `/analytics`:
+  - 6 stat cards: Total Trades, Win Rate, Avg P&L, Total P&L, Best Trade, Worst Trade
+  - Line chart equity curve (cumulative P&L per trade, reference at y=0)
+  - Bar chart monthly returns (color-coded: green >2%, light-green >0%, light-red >-2%, red <=-2%)
+  - Win rate by strategy — horizontal progress bars
+  - Win rate by symbol — horizontal progress bars
+  - Win rate by hour (UTC) — bar chart, green ≥50%, red <50%, reference at y=50
+  - Rolling Sharpe ratio (30-trade window, annualised ×√252), reference lines at y=0 and y=1
+  - Empty state UI when no resolved trade outcomes exist
+- Nav item added to sidebar: `TrendingUp` icon → `/analytics`
 
 ---
 
@@ -165,34 +170,30 @@ JWT-based authentication protecting all `/api/*` routes with a login page on the
 
 ---
 
-## UI-03 · Strategy Code Editor (Upload / Live Edit)
+## UI-03 · Strategy Code Editor (Upload / Live Edit) ✅
 
 **What it is:**
 A built-in code editor in the dashboard where you can write, upload, and hot-reload strategy files without touching the filesystem manually or restarting the server.
 
-**Viability:** ✅ Fully viable for a self-hosted bot. The app runs on your own machine/VPS so there's no multi-tenant security risk with executing uploaded Python code.
+**What was built:**
 
-**What it does:**
-- **Upload tab:** Drop a `.py` file → it's validated, saved to `backend/core/strategies/`, and registered into `STRATEGY_REGISTRY` — live, no restart
-- **Editor tab:** Monaco Editor (same as VS Code) in the browser showing the current strategy source; edit inline and hit Save → hot-reloads
-- **Registry tab:** Shows all currently loaded strategy types, their `name`, `description`, `asset_class`, which strategies in the DB use each one
-- **Validation:** On save/upload, the backend imports the class in a sandboxed try/except; rejects if it doesn't subclass `BaseStrategy` or `generate_signal()` is missing; returns the error message to the UI
+*Backend (`backend/api/routes/strategy_code.py`):*
+- `GET /api/strategy-code/registry` — all STRATEGY_REGISTRY entries + DB usage counts per key
+- `GET /api/strategy-code/{key}` — raw Python source (PlainTextResponse)
+- `PUT /api/strategy-code/{key}` — accepts `{code: str}` JSON; syntax-checks via `compile()`, exec-validates, overwrites file, hot-reloads
+- `POST /api/strategy-code/upload` — multipart `.py` upload; same validation pipeline; saves to `core/strategies/`, hot-reloads
+- `DELETE /api/strategy-code/{key}` — removes file + unregisters; blocks if DB rows reference it; blocks built-in keys
+- Hot-reload: `importlib.reload()` + in-place mutation of `STRATEGY_REGISTRY` dict; no server restart needed
+- Validation: `compile()` syntax check → `exec()` in fresh namespace → exactly one `BaseStrategy` subclass → `generate_signal` method → `name` attribute
+- Built-in protected keys: `hybrid_macd_rsi`, `momentum_breakout`, `mean_reversion_bb` (cannot delete/overwrite)
 
-**What needs building:**
-
-*Backend:*
-- `GET /api/strategy-code/{name}` — returns raw source of a strategy file
-- `POST /api/strategy-code/upload` — accepts `.py` file, validates, writes to disk, hot-reloads registry
-- `PUT /api/strategy-code/{name}` — accepts raw code string, overwrites file, hot-reloads registry
-- `DELETE /api/strategy-code/{name}` — removes file, unregisters (blocks if any DB strategy row uses it)
-- `GET /api/strategy-code/registry` — returns all registered strategy names + metadata
-- Hot-reload: `importlib.reload()` + rebuild `STRATEGY_REGISTRY` dict in-place
-
-*Frontend:*
-- New page `/strategy-editor` with 3 tabs: Upload | Edit | Registry
-- Monaco Editor component (`@monaco-editor/react`) for the Edit tab
-- File drag-and-drop zone for Upload tab
-- Registry tab: table of strategy types with usage count + delete button
+*Frontend (`frontend/src/pages/StrategyEditor.tsx`):*
+- Page at `/strategy-editor` with 3 tabs: **Registry | Editor | Upload**
+- **Registry tab**: card list of all strategies — key, class_name, description, asset_class, broker, builtin badge, DB usage count, Edit/Delete buttons
+- **Editor tab**: Monaco Editor (`@monaco-editor/react`, python language, vs-dark theme, 500px height); strategy selector via Registry→Edit; Save & Hot-Reload button; read-only when no strategy selected; error toasts on validation failure
+- **Upload tab**: drag-and-drop zone + file input for `.py` files; success/error banner; auto-refreshes Registry
+- `@monaco-editor/react` installed via npm
+- Nav item added to sidebar: `Code2` icon → `/strategy-editor`
 
 ---
 

@@ -4,7 +4,8 @@ import { Toaster } from 'react-hot-toast'
 import toast from 'react-hot-toast'
 import {
   LayoutDashboard, FlaskConical, Play, Settings,
-  Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight, BarChart2, LogOut
+  Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight, BarChart2, LogOut,
+  TrendingUp, Code2
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -16,6 +17,8 @@ import Strategies from './pages/Strategies'
 import StrategyLibrary from './pages/StrategyLibrary'
 import SettingsPage from './pages/Settings'
 import ChartPage from './pages/Chart'
+import Analytics from './pages/Analytics'
+import StrategyEditor from './pages/StrategyEditor'
 import Login from './pages/Login'
 import { isAuthenticated, clearAuth, getUsername } from './lib/auth'
 
@@ -26,6 +29,8 @@ const navItems = [
   { to: '/backtest', label: 'Backtest', icon: FlaskConical },
   { to: '/forward-test', label: 'Forward Test', icon: Play },
   { to: '/chart', label: 'Chart', icon: BarChart2 },
+  { to: '/analytics', label: 'Analytics', icon: TrendingUp },
+  { to: '/strategy-editor', label: 'Strategy Editor', icon: Code2 },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
@@ -180,6 +185,8 @@ function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
           <Route path="/backtest" element={<Backtest />} />
           <Route path="/forward-test" element={<ForwardTest />} />
           <Route path="/chart" element={<ChartPage />} />
+          <Route path="/analytics" element={<Analytics />} />
+          <Route path="/strategy-editor" element={<StrategyEditor />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
