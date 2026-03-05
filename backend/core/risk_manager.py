@@ -1,9 +1,15 @@
+import json
+import os
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 from loguru import logger
 
 from config import settings
 from core.strategies.base import Signal
+
+# Persisted risk-state file (circuit breaker + consecutive losses survive restarts)
+_STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "runtime", "risk_state.json")
 
 
 @dataclass
@@ -38,11 +44,53 @@ class RiskManager:
         self.default_rr_ratio = settings.default_rr_ratio
         self.atr_stop_multiplier = settings.atr_stop_multiplier
 
-        # Runtime state (loaded from DB on init)
+        # Runtime state — loaded from persistent JSON so restarts don't clear them
         self.daily_pnl: float = 0.0
         self.open_positions_count: int = 0
         self.consecutive_losses: int = 0
         self._circuit_breaker_active: bool = False
+        self._load_state()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # State persistence helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _load_state(self) -> None:
+        """Restore circuit-breaker and consecutive-loss state from disk."""
+        try:
+            if not os.path.exists(_STATE_FILE):
+                return
+            with open(_STATE_FILE, "r") as fh:
+                state = json.load(fh)
+            # Auto-reset circuit breaker at start of a new calendar day
+            breaker_date = state.get("circuit_breaker_date")
+            if breaker_date == str(date.today()):
+                self._circuit_breaker_active = state.get("circuit_breaker_active", False)
+            else:
+                self._circuit_breaker_active = False  # new day → reset
+            self.consecutive_losses = state.get("consecutive_losses", 0)
+            logger.info(
+                f"[RiskManager] State loaded — circuit_breaker={self._circuit_breaker_active} "
+                f"consecutive_losses={self.consecutive_losses}"
+            )
+        except Exception as exc:
+            logger.warning(f"[RiskManager] Could not load risk state: {exc}")
+
+    def _save_state(self) -> None:
+        """Persist circuit-breaker and consecutive-loss state to disk."""
+        try:
+            os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
+            with open(_STATE_FILE, "w") as fh:
+                json.dump(
+                    {
+                        "circuit_breaker_active": self._circuit_breaker_active,
+                        "circuit_breaker_date": str(date.today()),
+                        "consecutive_losses": self.consecutive_losses,
+                    },
+                    fh,
+                )
+        except Exception as exc:
+            logger.warning(f"[RiskManager] Could not save risk state: {exc}")
 
     def validate(
         self,
@@ -68,6 +116,7 @@ class RiskManager:
             daily_loss_pct = daily_pnl / account_balance
             if daily_loss_pct <= -self.daily_circuit_breaker_pct:
                 self._circuit_breaker_active = True
+                self._save_state()
                 logger.warning(
                     f"[RiskManager] CIRCUIT BREAKER TRIGGERED — "
                     f"daily loss: {daily_loss_pct*100:.2f}%"
@@ -77,6 +126,17 @@ class RiskManager:
                     position_size=0, position_value=0, risk_amount=0, stop_distance=0,
                     reason=f"Circuit breaker triggered: daily loss {daily_loss_pct*100:.2f}%"
                 )
+
+        # ── Level 2: Consecutive losses ──────────────────
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            return RiskValidation(
+                approved=False,
+                position_size=0, position_value=0, risk_amount=0, stop_distance=0,
+                reason=(
+                    f"Consecutive loss limit reached ({self.consecutive_losses}/"
+                    f"{self.max_consecutive_losses}). Manual reset required."
+                ),
+            )
 
         # ── Level 3: Open positions limit ────────────────
         if open_positions_count >= self.max_open_positions:
@@ -152,7 +212,34 @@ class RiskManager:
     def reset_circuit_breaker(self):
         """Manually reset the daily circuit breaker."""
         self._circuit_breaker_active = False
+        self._save_state()
         logger.info("[RiskManager] Circuit breaker reset manually.")
 
     def is_circuit_breaker_active(self) -> bool:
         return self._circuit_breaker_active
+
+    def record_outcome(self, won: bool) -> None:
+        """
+        Call after each trade resolves.
+        Increments consecutive_losses on a loss, resets on a win.
+        State is persisted immediately.
+        """
+        if won:
+            if self.consecutive_losses > 0:
+                logger.info(
+                    f"[RiskManager] Win recorded — resetting consecutive_losses "
+                    f"(was {self.consecutive_losses})"
+                )
+            self.consecutive_losses = 0
+        else:
+            self.consecutive_losses += 1
+            logger.warning(
+                f"[RiskManager] Loss recorded — consecutive_losses={self.consecutive_losses}"
+            )
+        self._save_state()
+
+    def reset_consecutive_losses(self) -> None:
+        """Manually reset the consecutive-loss counter (e.g., after manual review)."""
+        self.consecutive_losses = 0
+        self._save_state()
+        logger.info("[RiskManager] Consecutive-loss counter reset manually.")

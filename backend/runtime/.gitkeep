@@ -1,0 +1,2 @@
+# Runtime state files (circuit breaker, consecutive losses, etc.)
+# These are auto-generated at runtime and should not be committed.

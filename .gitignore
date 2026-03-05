@@ -34,6 +34,7 @@ backend/models/saved/*.joblib
 backend/models/saved/*.pt
 backend/models/saved/*.h5
 backend/models/saved/*.json
+backend/runtime/*.json
 
 # Node
 node_modules/

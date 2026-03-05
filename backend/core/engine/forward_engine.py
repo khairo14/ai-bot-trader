@@ -246,9 +246,20 @@ class ForwardEngine:
     # ──────────────────────────────────────────────────────────────────────────
 
     async def close_position(self, trade: Trade, reason: str = "manual"):
-        """Close an open position."""
+        """Close an open position and compute exit price + realised PnL."""
+        broker = get_broker(trade.broker)
+
+        # ── Fetch current market price (live and paper) ───────────────────
+        exit_price: float = 0.0
+        try:
+            exit_price = await broker.get_price(trade.symbol)
+        except Exception as _price_err:
+            logger.warning(
+                f"[ForwardEngine] Could not fetch exit price for {trade.symbol}: {_price_err}"
+            )
+
+        # ── Send closing market order for live trades ─────────────────────
         if not trade.is_paper:
-            broker = get_broker(trade.broker)
             side = "sell" if trade.side == "buy" else "buy"
             await broker.place_order(
                 symbol=trade.symbol,
@@ -257,11 +268,28 @@ class ForwardEngine:
                 order_type="market",
             )
 
+        # ── Compute realised PnL ──────────────────────────────────────────
+        if exit_price and trade.entry_price:
+            side_mult = 1.0 if trade.side == "buy" else -1.0
+            raw_pnl = (exit_price - trade.entry_price) * trade.quantity * side_mult
+            trade.exit_price = round(exit_price, 8)
+            trade.pnl = round(raw_pnl, 4)
+            cost_basis = trade.entry_price * trade.quantity
+            trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
+
         trade.status = OrderStatus.FILLED
         trade.closed_at = datetime.utcnow()
         # Remove from in-memory cache
         self._paper_positions.pop(trade.symbol, None)
-        logger.info(f"[ForwardEngine] Position closed: {trade.symbol} — reason: {reason}")
+
+        # ── Update consecutive-loss counter ───────────────────────────────
+        if trade.pnl is not None:
+            self.risk_manager.record_outcome(won=trade.pnl > 0)
+
+        logger.info(
+            f"[ForwardEngine] Position closed: {trade.symbol} — reason: {reason} "
+            f"| exit={exit_price} pnl={getattr(trade, 'pnl', None)}"
+        )
 
     async def emergency_stop(self, db_session=None) -> int:
         """

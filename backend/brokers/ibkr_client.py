@@ -313,13 +313,21 @@ class IBKRClient(AbstractBroker):
         for p in raw:
             contract = p.contract
             asset_class = "stock" if contract.secType == "STK" else "option"
+            qty = abs(p.position)
+            entry_price = float(p.avgCost)
+            # Derive current price from market value provided by IB Gateway
+            current_price = (
+                float(p.marketValue) / qty if qty > 0 and hasattr(p, "marketValue") and p.marketValue
+                else 0.0
+            )
+            unrealized_pnl = float(p.unrealizedPNL) if hasattr(p, "unrealizedPNL") and p.unrealizedPNL is not None else 0.0
             positions.append(Position(
                 symbol=contract.symbol,
                 side="long" if p.position > 0 else "short",
-                quantity=abs(p.position),
-                entry_price=float(p.avgCost),
-                current_price=0.0,  # request separately if needed
-                unrealized_pnl=0.0,
+                quantity=qty,
+                entry_price=entry_price,
+                current_price=current_price,
+                unrealized_pnl=unrealized_pnl,
                 asset_class=asset_class,
             ))
         return positions
