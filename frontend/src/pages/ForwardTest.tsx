@@ -3,6 +3,7 @@ import { Play, StopCircle, Activity, RefreshCw, Zap, Download, Clock, Loader2 } 
 import { useWebSocket } from '../hooks/useWebSocket'
 import toast from 'react-hot-toast'
 import { SkeletonLine } from '../components/Skeleton'
+import axios from 'axios'
 
 const API = ''   // relative — proxied by Vite to http://localhost:8000
 const WS_URL = (() => {
@@ -99,14 +100,11 @@ export default function ForwardTest() {
   const fetchAll = useCallback(async () => {
     try {
       const [statusRes, tradesRes] = await Promise.all([
-        fetch(`${API}/api/forward-test/status`),
-        fetch(`${API}/api/forward-test/trades?limit=50`),
+        axios.get(`${API}/api/forward-test/status`),
+        axios.get(`${API}/api/forward-test/trades?limit=50`),
       ])
-      if (statusRes.ok) setStatus(await statusRes.json())
-      if (tradesRes.ok) {
-        const t = await tradesRes.json()
-        setTrades(t.trades ?? [])
-      }
+      setStatus(statusRes.data)
+      setTrades(tradesRes.data.trades ?? [])
       setLastUpdated(new Date())
     } catch (e) {
       console.error('ForwardTest fetch error:', e)
@@ -141,22 +139,20 @@ export default function ForwardTest() {
   const triggerRun = async () => {
     setRunLoading(true)
     try {
-      const res = await fetch(`${API}/api/forward-test/run`, { method: 'POST' })
-      const data = await res.json()
-      if (res.status === 409) {
-        toast.error(data.detail ?? 'A run is already in progress.')
-        setRunLoading(false)
-      } else if (!res.ok) {
-        toast.error(data.detail ?? 'Run failed')
-        setRunLoading(false)
+      const res = await axios.post(`${API}/api/forward-test/run`)
+      const data = res.data
+      toast.success(`Run triggered for ${data.strategies ?? 1} strategy — signals processing…`)
+      // Keep runLoading=true; it will be cleared by run_finished WS event or 90s timeout
+      startAggressivePoll(fetchAll)
+      fetchAll()  // immediate poll
+    } catch (e: any) {
+      const status = e?.response?.status
+      const detail = e?.response?.data?.detail
+      if (status === 409) {
+        toast.error(detail ?? 'A run is already in progress.')
       } else {
-        toast.success(`Run triggered for ${data.strategies ?? 1} strategy — signals processing…`)
-        // Keep runLoading=true; it will be cleared by run_finished WS event or 90s timeout
-        startAggressivePoll(fetchAll)
-        fetchAll()  // immediate poll
+        toast.error(detail ?? 'Run failed')
       }
-    } catch (e) {
-      toast.error('Network error')
       setRunLoading(false)
     }
   }
@@ -173,12 +169,12 @@ export default function ForwardTest() {
               toast.dismiss(t.id)
               setStopLoading(true)
               try {
-                const res = await fetch(`${API}/api/forward-test/emergency-stop`, { method: 'POST' })
-                const data = await res.json()
-                if (res.ok) toast.success(data.message ?? 'Emergency stop executed.')
-                else toast.error(data.detail ?? 'Emergency stop failed.')
+                const res = await axios.post(`${API}/api/forward-test/emergency-stop`)
+                toast.success(res.data.message ?? 'Emergency stop executed.')
                 await fetchAll()
-              } catch { toast.error('Network error') } finally { setStopLoading(false) }
+              } catch (e: any) {
+                toast.error(e?.response?.data?.detail ?? 'Emergency stop failed.')
+              } finally { setStopLoading(false) }
             }}
           >Yes, stop all</button>
           <button
