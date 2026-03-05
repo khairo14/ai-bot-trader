@@ -221,6 +221,21 @@ app.include_router(strategy_code.router, prefix="/api/strategy-code", tags=["Str
 app.include_router(confluence.router, prefix="/api/confluence", tags=["Confluence"], dependencies=_auth)
 app.include_router(portfolio_optimizer.router, prefix="/api/portfolio-optimizer", tags=["PortfolioOptimizer"], dependencies=_auth)
 
+# ── Internal endpoints (Celery workers → FastAPI server, no public auth) ────
+# These are intentionally excluded from the API docs (include_in_schema=False).
+# They are only reachable from localhost / the same machine, never exposed externally.
+
+@app.post("/internal/ml/reload", include_in_schema=False)
+async def _internal_ml_reload():
+    """Flush the in-process MLScorer model cache.
+    Called automatically by the Celery ml_retrain worker after every weekly retrain
+    so the FastAPI server picks up the new model without a manual restart.
+    """
+    from core.ml_scorer import ml_scorer
+    ml_scorer.reload()
+    logger.info("[internal] MLScorer cache flushed via /internal/ml/reload")
+    return {"status": "ok"}
+
 # WebSocket endpoint for real-time signal/trade broadcasts
 app.add_api_websocket_route("/ws", ws_endpoint)
 

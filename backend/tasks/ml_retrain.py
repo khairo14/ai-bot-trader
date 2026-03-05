@@ -21,9 +21,29 @@ def retrain_all(self):
             trainer = ModelTrainer()
             report = await trainer.retrain_all()
             logger.info(f"ML retrain complete: {report}")
-            # Reload scorer so next inference picks up the new model
+
+            # 1. Reload cache in THIS Celery worker process
             ml_scorer.reload()
-            logger.info("MLScorer cache cleared — new model active")
+            logger.info("[ml_retrain] Celery-process MLScorer cache cleared")
+
+            # 2. Tell the FastAPI server process to also reload its cache.
+            #    They are separate processes — in-memory reload above has no effect there.
+            try:
+                import httpx
+                from config import settings
+                resp = httpx.post(
+                    f"{settings.api_internal_url}/internal/ml/reload",
+                    timeout=5.0,
+                )
+                logger.info(
+                    f"[ml_retrain] FastAPI MLScorer cache flush: HTTP {resp.status_code}"
+                )
+            except Exception as _http_err:
+                logger.warning(
+                    f"[ml_retrain] FastAPI cache flush skipped "
+                    f"(server may not be running): {_http_err}"
+                )
+
             return report
 
         report = asyncio.run(_retrain())

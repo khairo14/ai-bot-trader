@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # (1m strat → runs every 60 s, 1h strat → every 3600 s, 1d → every 86400 s).
     forward_test_interval_minutes: int = 1  # non-zero = enabled
 
+    # Internal API — used by Celery workers to call back into the FastAPI server
+    # (e.g. flush MLScorer cache after weekly retrain)
+    api_internal_url: str = "http://127.0.0.1:8000"
+
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:5173"]
 

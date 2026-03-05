@@ -29,8 +29,9 @@ Better predictions tomorrow
 - `TradeOutcome` DB table (`backend/db/models.py`) — created automatically when any non-HOLD signal fires; stores entry, SL/TP, symbol, timeframe, resolved flag
 - `tasks/outcome_resolver.py` — async resolver that walks OHLCV forward from each signal's entry candle, detects SL/TP hits or measures 24-candle forward return; Celery beat task scheduled nightly at 01:30 UTC
 - `models/trainer.py` — `_fetch_live_labels()` blends resolved live outcome rows (3× weighted) with historical yfinance heuristic labels; `MIN_AUC = 0.55` holdout gate before saving new model
-- `tasks/ml_retrain.py` — Celery task scheduled weekly (Sunday 02:00 UTC); calls `ModelTrainer.retrain_all()` then hot-reloads `MLScorer` cache
-- `api/routes/ml.py` — `GET /api/ml/status` (model registry, outcome counts, win rate, avg P&L), `POST /api/ml/resolve` (manual trigger), `POST /api/ml/retrain` (manual trigger)
+- `tasks/ml_retrain.py` — Celery task scheduled weekly (Sunday 02:00 UTC); calls `ModelTrainer.retrain_all()`, reloads MLScorer cache in the worker process, then calls `POST /internal/ml/reload` via httpx to flush the FastAPI server's cache too
+- `api/routes/ml.py` — `GET /api/ml/status` (model registry, outcome counts, win rate, avg P&L), `POST /api/ml/resolve` (manual trigger), `POST /api/ml/retrain` (manual trigger), `POST /api/ml/reload` (flush server-side MLScorer cache — useful after manual retrain)
+- `main.py` — `POST /internal/ml/reload` (no auth, Celery-only internal endpoint that flushes the FastAPI process MLScorer cache)
 - Dashboard shows feedback loop status, win rate, and avg signal P&L once first batch resolves
 
 **Priority:** High — this is the most impactful Phase 2 item.
@@ -74,7 +75,8 @@ Instead of trading each strategy at equal size, this feature computes Sharpe-wei
   - `GET /api/portfolio-optimizer/weights` — returns weighted + unweighted strategies with total, sorted by weight
   - `DELETE /api/portfolio-optimizer/weights` — clears all weight keys
 - `backend/tasks/portfolio_rebalancer.py` — Celery task `tasks.portfolio_rebalancer.rebalance` for scheduled runs
-- `backend/celery_app.py` — added `portfolio-rebalance-weekly` beat task: every Sunday 03:00 UTC
+- `backend/celery_app.py` — `portfolio-rebalance-weekly` beat task: every Sunday 03:00 UTC; `tasks.portfolio_rebalancer` in `include` list
+- Portfolio weight multiplier applied in **both** execution paths: `signal_runner.py` (live) and `forward_test._run_one_strategy()` (paper)
 - `frontend/src/pages/Dashboard.tsx` — **Portfolio Allocation widget** after ML Feedback Loop card:
   - Horizontal bar chart of strategy weights (CSS animated bars, colour-coded)
   - "Optimize Now" button triggers `POST /api/portfolio-optimizer/run` and refreshes weights inline
@@ -109,7 +111,7 @@ The execution engine currently places static stop loss and take profit. This add
 **What was built:**
 - `trailing_stop_pct` field added to `TradeOutcome` DB model (e.g. `2.0` = trail by 2%)
 - Alembic migration `e5f6a7b8c9d0` — `ADD COLUMN trailing_stop_pct FLOAT` to `trade_outcomes`
-- `tasks/signal_runner.py` — reads `strategy.parameters["trailing_stop_pct"]` when creating each `TradeOutcome` row
+- `tasks/signal_runner.py` — reads `strategy.parameters["trailing_stop_pct"]` when creating each `TradeOutcome` row (live strategies); `api/routes/forward_test.py` does the same for paper strategies
 - `tasks/outcome_resolver.py` — `_resolve_outcome()` now tracks `peak_high` / `trough_low` per candle; computes `effective_stop = peak * (1 - pct/100)` for longs (or `trough * (1 + pct/100)` for shorts); uses the better of trailing vs fixed stop; if trailing stop is triggered above entry → resolves as **win** (profit locked)
 - `frontend/src/pages/Strategies.tsx` — "Trailing Stop %" number input in the Create/Edit strategy modal; displays confirmation hint when set; persisted into `strategy.parameters`
 
@@ -145,6 +147,7 @@ Currently signals are generated on one timeframe per strategy. This adds multi-t
   - `GET /api/confluence?symbol&broker&strategy_type&timeframes=1h,4h,1d` — runs `SignalEngine.run()` concurrently for each TF via `asyncio.gather`; returns `{ consensus, confluence_score (0–1), timeframes: [{ timeframe, signal, confidence, regime, reasons, agrees_with_consensus }] }`
   - `GET /api/confluence/batch?symbols=BTC/USDT,ETH/USDT&broker&strategy_type&timeframes` — same for up to 10 symbols
   - `_consensus()` logic: finds plurality direction; score < 50% → "MIXED"; score = fraction of timeframes agreeing
+- Confluence suppression applied in **both** execution paths: `signal_runner.py` (live strategies, Celery) and `forward_test._run_one_strategy()` (paper strategies, in-process scheduler)
 - `frontend/src/pages/MultiTimeframe.tsx` — full `/multi-timeframe` analysis page:
   - Single-symbol mode: broker + strategy + timeframe checkboxes (15m/1h/4h/1d/1w) + symbol input → "Run Confluence Analysis"
   - Batch mode: comma-separated symbols up to 10
@@ -262,7 +265,7 @@ A professional candlestick chart for every symbol/timeframe being traded, showin
 | 2 | ~~**UI-04** Candlestick chart~~ ✅ | Medium | High |
 | 3 | **OPS-01** VPS deployment | Low | High |
 | 4 | ~~**OPS-02** Auth / login~~ ✅ | Low | High (required for VPS) |
-| 5 | **ML-02** Regime detector | High | High | ✅ |
+| 5 | ~~**ML-02** Regime detector~~ ✅ | High | High |
 | 6 | **UI-03** Strategy code editor | Medium | High |
 | 7 | **UI-01** Analytics dashboard | Medium | Medium |
 | 8 | **EX-01** Options execution | High | Medium |
