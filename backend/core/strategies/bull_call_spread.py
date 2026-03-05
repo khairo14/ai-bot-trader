@@ -150,7 +150,7 @@ class BullCallSpreadStrategy(BaseStrategy):
         v_sell  = bs_vega(current_price, sell_strike, T, iv_decimal)
 
         net_delta = d_buy - d_sell       # positive
-        net_theta = t_sell - t_buy       # negative (net buyer)
+        net_theta = t_buy - t_sell       # negative (ATM decays faster than OTM; net buyer hurt)
         net_vega  = v_buy  - v_sell      # positive (long vega)
 
         # Confidence

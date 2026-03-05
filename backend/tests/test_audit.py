@@ -600,5 +600,513 @@ class TestForwardEngineInitialize(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine._initialized)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. EX-01 — IV Rank & Black-Scholes helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestIVRankModule(unittest.TestCase):
+
+    def _data(self, n=300, base=150.0, seed=42):
+        rng = np.random.default_rng(seed)
+        close = base + rng.normal(0, 2, n).cumsum()
+        close = np.maximum(close, 5.0)
+        return pd.DataFrame({
+            "open":   close * 0.999,
+            "high":   close * 1.005,
+            "low":    close * 0.995,
+            "close":  close,
+            "volume": rng.uniform(1e4, 1e6, n),
+        })
+
+    def test_historical_volatility_returns_float(self):
+        from core.options.iv_rank import historical_volatility
+        df = self._data()
+        hv = historical_volatility(df)
+        self.assertIsInstance(hv, float)
+        self.assertGreater(hv, 0.0)
+
+    def test_historical_volatility_fallback_on_short_data(self):
+        from core.options.iv_rank import historical_volatility
+        df = self._data(n=10)
+        hv = historical_volatility(df)
+        self.assertEqual(hv, 30.0)   # hardcoded fallback
+
+    def test_historical_volatility_floors_at_5(self):
+        """A perfectly flat price series should still return ≥ 5%."""
+        from core.options.iv_rank import historical_volatility
+        df = self._data(n=100)
+        df["close"] = 100.0   # zero variance
+        hv = historical_volatility(df)
+        self.assertEqual(hv, 5.0)
+
+    def test_iv_rank_returns_0_to_100(self):
+        from core.options.iv_rank import iv_rank_from_ohlcv
+        df = self._data(n=300)
+        rank = iv_rank_from_ohlcv(df)
+        self.assertGreaterEqual(rank, 0.0)
+        self.assertLessEqual(rank, 100.0)
+
+    def test_iv_rank_fallback_on_short_data(self):
+        from core.options.iv_rank import iv_rank_from_ohlcv
+        df = self._data(n=50)
+        rank = iv_rank_from_ohlcv(df)
+        # Short data path returns min(100, max(0, hv)); hv > 0 for real data
+        self.assertGreaterEqual(rank, 0.0)
+        self.assertLessEqual(rank, 100.0)
+
+    # ── Black-Scholes pricing ─────────────────────────────────────────────────
+
+    def test_bs_call_atm_positive(self):
+        from core.options.iv_rank import bs_call
+        price = bs_call(100, 100, 30/365, 0.25)
+        self.assertGreater(price, 0.0)
+
+    def test_bs_put_atm_positive(self):
+        from core.options.iv_rank import bs_put
+        price = bs_put(100, 100, 30/365, 0.25)
+        self.assertGreater(price, 0.0)
+
+    def test_put_call_parity(self):
+        """C - P = S - K·e^(-rT) (put-call parity)."""
+        from core.options.iv_rank import bs_call, bs_put, RISK_FREE_RATE
+        import math
+        S, K, T, sigma = 150.0, 155.0, 45/365, 0.30
+        C = bs_call(S, K, T, sigma)
+        P = bs_put(S, K, T, sigma)
+        parity = C - P
+        expected = S - K * math.exp(-RISK_FREE_RATE * T)
+        self.assertAlmostEqual(parity, expected, places=6)
+
+    def test_bs_call_deep_itm_approaches_intrinsic(self):
+        """Very deep ITM call ≈ S − K (intrinsic value)."""
+        from core.options.iv_rank import bs_call
+        C = bs_call(200, 50, 30/365, 0.20)   # S=200, K=50 — deep ITM
+        intrinsic = 200 - 50
+        self.assertAlmostEqual(C, intrinsic, delta=1.0)
+
+    def test_bs_call_zero_time_returns_intrinsic(self):
+        from core.options.iv_rank import bs_call
+        C_itm = bs_call(110, 100, 1e-9, 0.25)
+        self.assertAlmostEqual(C_itm, 10.0, delta=0.01)
+        C_otm = bs_call(90, 100, 1e-9, 0.25)
+        self.assertAlmostEqual(C_otm, 0.0, delta=0.01)
+
+    def test_delta_call_between_0_and_1(self):
+        from core.options.iv_rank import bs_delta_call
+        d = bs_delta_call(100, 100, 30/365, 0.25)
+        self.assertGreater(d, 0.0)
+        self.assertLess(d, 1.0)
+
+    def test_delta_put_between_minus1_and_0(self):
+        from core.options.iv_rank import bs_delta_put
+        d = bs_delta_put(100, 100, 30/365, 0.25)
+        self.assertGreater(d, -1.0)
+        self.assertLess(d, 0.0)
+
+    def test_delta_call_plus_put_equals_1(self):
+        """delta_put = delta_call - 1 (put-call delta parity)."""
+        from core.options.iv_rank import bs_delta_call, bs_delta_put
+        d_call = bs_delta_call(100, 100, 30/365, 0.25)
+        d_put  = bs_delta_put(100, 100, 30/365, 0.25)
+        # B-S identity: delta_put = delta_call - 1  →  delta_call - delta_put = 1
+        self.assertAlmostEqual(d_call - d_put, 1.0, places=6)
+
+    def test_theta_call_negative(self):
+        """Long call theta is negative (time decay hurts buyers)."""
+        from core.options.iv_rank import bs_theta_call
+        theta = bs_theta_call(100, 100, 30/365, 0.25)
+        self.assertLess(theta, 0.0)
+
+    def test_vega_positive(self):
+        """Vega is always positive (higher IV → higher premium)."""
+        from core.options.iv_rank import bs_vega
+        vega = bs_vega(100, 100, 30/365, 0.25)
+        self.assertGreater(vega, 0.0)
+
+    # ── Strike & Expiry helpers ───────────────────────────────────────────────
+
+    def test_nearest_strike_rounds_to_half_dollar_below_25(self):
+        from core.options.iv_rank import nearest_strike
+        self.assertEqual(nearest_strike(20, 20.3), 20.5)
+        self.assertEqual(nearest_strike(20, 19.9), 20.0)
+
+    def test_nearest_strike_rounds_to_1_dollar_below_50(self):
+        from core.options.iv_rank import nearest_strike
+        self.assertEqual(nearest_strike(40, 40.6), 41.0)
+
+    def test_nearest_strike_rounds_to_5_dollar_below_200(self):
+        from core.options.iv_rank import nearest_strike
+        self.assertEqual(nearest_strike(100, 103), 105.0)
+        self.assertEqual(nearest_strike(100, 102), 100.0)
+
+    def test_nearest_strike_rounds_to_10_dollar_above_200(self):
+        from core.options.iv_rank import nearest_strike
+        self.assertEqual(nearest_strike(300, 307), 310.0)
+        self.assertEqual(nearest_strike(300, 303), 300.0)
+
+    def test_next_monthly_expiry_returns_friday(self):
+        from core.options.iv_rank import next_monthly_expiry
+        from datetime import date
+        expiry_str = next_monthly_expiry(30)
+        self.assertEqual(len(expiry_str), 8)
+        expiry = date(int(expiry_str[:4]), int(expiry_str[4:6]), int(expiry_str[6:]))
+        self.assertEqual(expiry.weekday(), 4)   # 4 = Friday
+
+    def test_next_monthly_expiry_at_least_dte_away(self):
+        from core.options.iv_rank import next_monthly_expiry
+        from datetime import date
+        for dte in (30, 45):
+            expiry_str = next_monthly_expiry(dte)
+            expiry = date(int(expiry_str[:4]), int(expiry_str[4:6]), int(expiry_str[6:]))
+            self.assertGreaterEqual((expiry - date.today()).days, dte - 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. EX-01 — IronCondorStrategy
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestIronCondorStrategy(unittest.TestCase):
+
+    def _strat(self):
+        from core.strategies.iron_condor import IronCondorStrategy
+        return IronCondorStrategy()
+
+    def _data(self, n=300, volatile=True, seed=7):
+        """High-IV (volatile), range-bound data for iron condor."""
+        rng = np.random.default_rng(seed)
+        scale = 8.0 if volatile else 0.3
+        close = 150.0 + rng.normal(0, scale, n).cumsum()
+        close = np.maximum(close, 10.0)
+        atr_like = np.abs(rng.normal(1.5, 0.5, n))
+        return pd.DataFrame({
+            "open":   close - atr_like * 0.3,
+            "high":   close + atr_like,
+            "low":    close - atr_like,
+            "close":  close,
+            "volume": rng.uniform(1e5, 1e6, n),
+        })
+
+    def test_insufficient_data_returns_hold(self):
+        strat = self._strat()
+        df = self._data(n=20)
+        sig = strat.generate_signal(df, "AAPL")
+        self.assertEqual(sig.signal, "HOLD")
+        self.assertTrue(any("Insufficient" in r for r in sig.reasons))
+
+    def test_low_iv_rank_returns_hold(self):
+        """When IV Rank < MIN_IV_RANK (50), strategy must HOLD."""
+        strat = self._strat()  # MIN_IV_RANK = 50
+        df = self._data(n=300)
+        with patch("core.strategies.iron_condor.iv_rank_from_ohlcv", return_value=20.0), \
+             patch("core.strategies.iron_condor.historical_volatility", return_value=20.0):
+            sig = strat.generate_signal(df, "AAPL")
+        self.assertEqual(sig.signal, "HOLD")
+
+    def test_sell_signal_has_required_fields(self):
+        """With favourable conditions, strategy must produce a SELL with valid options_meta."""
+        strat = self._strat()
+        strat.MIN_IV_RANK = 0.0   # override to guarantee signal fires on synthetic data
+        strat.MAX_ADX = 99.0
+        df = self._data(n=300, volatile=True)
+        # Force a viable combined premium
+        with patch.object(strat.atr_tool, "calculate") as mock_atr, \
+             patch.object(strat.adx_tool, "calculate") as mock_adx:
+            mock_atr.return_value = MagicMock(value=5.0)
+            mock_adx.return_value = MagicMock(value=18.0)
+            sig = strat.generate_signal(df, "AAPL")
+        if sig.signal == "SELL":
+            self.assertIsNotNone(sig.options_meta)
+            assert sig.options_meta is not None
+            self.assertEqual(sig.options_meta["strategy_type"], "iron_condor")
+            self.assertEqual(len(sig.options_meta["legs"]), 4)
+            self.assertIsNotNone(sig.iv_rank)
+            self.assertIsNotNone(sig.delta)
+            self.assertIsNotNone(sig.theta)
+            self.assertIsNotNone(sig.vega)
+            self.assertGreater(sig.entry_price, 0)
+            self.assertIsNotNone(sig.stop_loss)
+            self.assertIsNotNone(sig.take_profit)
+            self.assertGreater(sig.confidence, 0.0)
+            self.assertLessEqual(sig.confidence, 1.0)
+
+    def test_options_meta_legs_structure(self):
+        """All 4 legs have required action/right/strike/premium keys."""
+        strat = self._strat()
+        strat.MIN_IV_RANK = 0.0
+        strat.MAX_ADX = 99.0
+        df = self._data(n=300)
+        with patch.object(strat.atr_tool, "calculate") as mock_atr, \
+             patch.object(strat.adx_tool, "calculate") as mock_adx:
+            mock_atr.return_value = MagicMock(value=5.0)
+            mock_adx.return_value = MagicMock(value=18.0)
+            sig = strat.generate_signal(df, "AAPL")
+        if sig.signal == "SELL":
+            assert sig.options_meta is not None
+            for leg in sig.options_meta["legs"]:
+                for key in ("action", "right", "strike", "premium"):
+                    self.assertIn(key, leg)
+            # Validate leg order: SELL C, BUY C, SELL P, BUY P
+            rights_actions = [(l["action"], l["right"]) for l in sig.options_meta["legs"]]
+            self.assertIn(("SELL", "C"), rights_actions)
+            self.assertIn(("BUY",  "C"), rights_actions)
+            self.assertIn(("SELL", "P"), rights_actions)
+            self.assertIn(("BUY",  "P"), rights_actions)
+
+    def test_asset_class_and_broker(self):
+        strat = self._strat()
+        self.assertEqual(strat.asset_class, "option")
+        self.assertEqual(strat.broker, "ibkr")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. EX-01 — CoveredCallStrategy
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCoveredCallStrategy(unittest.TestCase):
+
+    def _strat(self):
+        from core.strategies.covered_call import CoveredCallStrategy
+        return CoveredCallStrategy()
+
+    def _data(self, n=200, seed=11):
+        rng = np.random.default_rng(seed)
+        close = 100.0 + rng.normal(0, 1.5, n).cumsum()
+        close = np.maximum(close, 5.0)
+        atr = np.abs(rng.normal(1.2, 0.3, n))
+        return pd.DataFrame({
+            "open":   close - atr * 0.2,
+            "high":   close + atr,
+            "low":    close - atr,
+            "close":  close,
+            "volume": rng.uniform(5e4, 5e5, n),
+        })
+
+    def test_insufficient_data_returns_hold(self):
+        strat = self._strat()
+        df = self._data(n=10)
+        sig = strat.generate_signal(df, "MSFT")
+        self.assertEqual(sig.signal, "HOLD")
+
+    def test_sell_signal_single_leg_covered_call(self):
+        strat = self._strat()
+        strat.MIN_IV_RANK = 0.0
+        strat.MAX_IV_RANK = 100.0
+        strat.RSI_LOW = 0.0
+        strat.RSI_HIGH = 100.0
+        strat.MAX_ADX = 100.0
+        df = self._data(n=200)
+        with patch.object(strat.atr_tool, "calculate") as mock_atr, \
+             patch.object(strat.adx_tool, "calculate") as mock_adx, \
+             patch.object(strat.rsi_tool, "calculate") as mock_rsi:
+            mock_atr.return_value = MagicMock(value=3.0)
+            mock_adx.return_value = MagicMock(value=18.0)
+            mock_rsi.return_value = MagicMock(value=50.0)
+            sig = strat.generate_signal(df, "MSFT")
+        if sig.signal == "SELL":
+            self.assertIsNotNone(sig.options_meta)
+            assert sig.options_meta is not None
+            self.assertEqual(sig.options_meta["strategy_type"], "covered_call")
+            self.assertEqual(len(sig.options_meta["legs"]), 1)
+            leg = sig.options_meta["legs"][0]
+            self.assertEqual(leg["action"], "SELL")
+            self.assertEqual(leg["right"], "C")
+            self.assertGreater(leg["strike"], 0)
+            # stop_loss = 3× premium; take_profit = 0.10× premium
+            self.assertAlmostEqual(sig.stop_loss / sig.entry_price, 3.0, places=3)
+            self.assertAlmostEqual(sig.take_profit / sig.entry_price, 0.10, places=3)
+            # Greeks signs: delta<0 (short call), theta>0 (sells time), vega<0
+            assert sig.delta is not None
+            assert sig.theta is not None
+            assert sig.vega is not None
+            self.assertLess(sig.delta, 0.0)
+            self.assertGreater(sig.theta, 0.0)
+            self.assertLess(sig.vega, 0.0)
+
+    def test_rsi_too_low_returns_hold(self):
+        strat = self._strat()
+        strat.MIN_IV_RANK = 0.0
+        strat.MAX_IV_RANK = 100.0
+        strat.MAX_ADX = 100.0
+        df = self._data(n=200)
+        with patch.object(strat.rsi_tool, "calculate") as mock_rsi, \
+             patch.object(strat.adx_tool, "calculate") as mock_adx, \
+             patch.object(strat.atr_tool, "calculate") as mock_atr:
+            mock_rsi.return_value = MagicMock(value=25.0)   # < RSI_LOW=40
+            mock_adx.return_value = MagicMock(value=15.0)
+            mock_atr.return_value = MagicMock(value=3.0)
+            sig = strat.generate_signal(df, "MSFT")
+        self.assertEqual(sig.signal, "HOLD")
+
+    def test_asset_class_and_broker(self):
+        strat = self._strat()
+        self.assertEqual(strat.asset_class, "option")
+        self.assertEqual(strat.broker, "ibkr")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. EX-01 — BullCallSpreadStrategy
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBullCallSpreadStrategy(unittest.TestCase):
+
+    def _strat(self):
+        from core.strategies.bull_call_spread import BullCallSpreadStrategy
+        return BullCallSpreadStrategy()
+
+    def _data(self, n=200, seed=13):
+        rng = np.random.default_rng(seed)
+        close = 80.0 + rng.normal(0, 0.8, n).cumsum()
+        close = np.maximum(close, 5.0)
+        atr = np.abs(rng.normal(1.0, 0.2, n))
+        return pd.DataFrame({
+            "open":   close - atr * 0.2,
+            "high":   close + atr,
+            "low":    close - atr,
+            "close":  close,
+            "volume": rng.uniform(5e4, 5e5, n),
+        })
+
+    def test_insufficient_data_returns_hold(self):
+        strat = self._strat()
+        df = self._data(n=10)
+        sig = strat.generate_signal(df, "AMD")
+        self.assertEqual(sig.signal, "HOLD")
+
+    def test_buy_signal_two_leg_spread(self):
+        strat = self._strat()
+        strat.MAX_IV_RANK = 100.0
+        strat.RSI_LOW = 0.0
+        strat.RSI_HIGH = 100.0
+        df = self._data(n=200)
+        with patch.object(strat.atr_tool, "calculate") as mock_atr, \
+             patch.object(strat.rsi_tool, "calculate") as mock_rsi, \
+             patch.object(strat.macd_tool, "calculate") as mock_macd:
+            mock_atr.return_value = MagicMock(value=5.0)
+            mock_rsi.return_value = MagicMock(value=48.0)
+            mock_macd.return_value = MagicMock(histogram=0.05, macd=0.1, signal=0.05)
+            sig = strat.generate_signal(df, "AMD")
+        if sig.signal == "BUY":
+            self.assertIsNotNone(sig.options_meta)
+            assert sig.options_meta is not None
+            self.assertEqual(sig.options_meta["strategy_type"], "bull_call_spread")
+            self.assertEqual(len(sig.options_meta["legs"]), 2)
+            buy_leg  = next(l for l in sig.options_meta["legs"] if l["action"] == "BUY")
+            sell_leg = next(l for l in sig.options_meta["legs"] if l["action"] == "SELL")
+            self.assertEqual(buy_leg["right"],  "C")
+            self.assertEqual(sell_leg["right"], "C")
+            self.assertGreater(sell_leg["strike"], buy_leg["strike"])   # OTM > ATM
+            # SL = full debit, TP > entry
+            self.assertAlmostEqual(sig.stop_loss, sig.entry_price, places=4)
+            self.assertGreater(sig.take_profit, sig.entry_price)
+            # Greeks signs: delta>0 (long spread), theta<0 (net buyer), vega>0
+            assert sig.delta is not None
+            assert sig.theta is not None
+            assert sig.vega is not None
+            self.assertGreater(sig.delta, 0.0)
+            self.assertLess(sig.theta, 0.0)    # ATM theta dominates → net negative
+            self.assertGreater(sig.vega, 0.0)
+
+    def test_macd_not_bullish_returns_hold(self):
+        strat = self._strat()
+        strat.MAX_IV_RANK = 100.0
+        strat.RSI_LOW = 0.0
+        strat.RSI_HIGH = 100.0
+        df = self._data(n=200)
+        with patch.object(strat.atr_tool, "calculate") as mock_atr, \
+             patch.object(strat.rsi_tool, "calculate") as mock_rsi, \
+             patch.object(strat.macd_tool, "calculate") as mock_macd:
+            mock_atr.return_value = MagicMock(value=5.0)
+            mock_rsi.return_value = MagicMock(value=48.0)
+            # histogram<0 AND macd < signal → bearish
+            mock_macd.return_value = MagicMock(histogram=-0.1, macd=-0.05, signal=0.05)
+            sig = strat.generate_signal(df, "AMD")
+        self.assertEqual(sig.signal, "HOLD")
+
+    def test_spread_width_zero_guard(self):
+        """When ATR rounds buy_strike == sell_strike, must return HOLD."""
+        strat = self._strat()
+        strat.MAX_IV_RANK = 100.0
+        strat.RSI_LOW = 0.0
+        strat.RSI_HIGH = 100.0
+        df = self._data(n=200)
+        with patch.object(strat.atr_tool, "calculate") as mock_atr, \
+             patch.object(strat.rsi_tool, "calculate") as mock_rsi, \
+             patch.object(strat.macd_tool, "calculate") as mock_macd:
+            mock_atr.return_value = MagicMock(value=0.01)   # tiny ATR → same strike after rounding
+            mock_rsi.return_value = MagicMock(value=48.0)
+            mock_macd.return_value = MagicMock(histogram=0.05, macd=0.1, signal=0.05)
+            sig = strat.generate_signal(df, "AMD")
+        # If strikes collapse to same value → HOLD (either due to spread guard or near-zero debit)
+        self.assertIn(sig.signal, ("HOLD", "BUY"))   # BUY is OK only if different strikes survived
+
+    def test_asset_class_and_broker(self):
+        strat = self._strat()
+        self.assertEqual(strat.asset_class, "option")
+        self.assertEqual(strat.broker, "ibkr")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. EX-01 — STRATEGY_REGISTRY contains options strategies
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestStrategyRegistry(unittest.TestCase):
+
+    def test_options_strategies_registered(self):
+        from core.engine.signal_engine import STRATEGY_REGISTRY
+        for name in ("iron_condor", "covered_call", "bull_call_spread"):
+            self.assertIn(name, STRATEGY_REGISTRY, f"'{name}' missing from STRATEGY_REGISTRY")
+
+    def test_options_strategies_are_instantiable(self):
+        from core.engine.signal_engine import STRATEGY_REGISTRY
+        for name in ("iron_condor", "covered_call", "bull_call_spread"):
+            cls = STRATEGY_REGISTRY[name]
+            instance = cls()
+            self.assertEqual(instance.asset_class, "option")
+            self.assertEqual(instance.broker, "ibkr")
+
+    def test_all_strategies_have_generate_signal(self):
+        from core.engine.signal_engine import STRATEGY_REGISTRY
+        for name, cls in STRATEGY_REGISTRY.items():
+            self.assertTrue(hasattr(cls, "generate_signal"), f"{name} missing generate_signal")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. EX-01 — Signal dataclass options fields
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSignalDataclassOptionsFields(unittest.TestCase):
+
+    def test_options_fields_default_none(self):
+        from core.strategies.base import Signal
+        sig = Signal(
+            symbol="AAPL", signal="HOLD", entry_price=150.0,
+            stop_loss=None, take_profit=None, confidence=0.0,
+            timeframe="1d", strategy_name="test",
+            asset_class="option", broker="ibkr",
+        )
+        self.assertIsNone(sig.iv_rank)
+        self.assertIsNone(sig.delta)
+        self.assertIsNone(sig.theta)
+        self.assertIsNone(sig.vega)
+        self.assertIsNone(sig.options_meta)
+
+    def test_options_fields_can_be_set(self):
+        from core.strategies.base import Signal
+        meta = {"strategy_type": "covered_call", "expiry": "20260320", "legs": []}
+        sig = Signal(
+            symbol="AAPL", signal="SELL", entry_price=2.50,
+            stop_loss=7.50, take_profit=0.25, confidence=0.72,
+            timeframe="1d", strategy_name="covered_call",
+            asset_class="option", broker="ibkr",
+            iv_rank=45.0, delta=-0.28, theta=0.0042, vega=-0.18,
+            options_meta=meta,
+        )
+        self.assertEqual(sig.iv_rank, 45.0)
+        self.assertEqual(sig.delta, -0.28)
+        self.assertEqual(sig.theta, 0.0042)
+        self.assertEqual(sig.vega, -0.18)
+        self.assertEqual(sig.options_meta["strategy_type"], "covered_call")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

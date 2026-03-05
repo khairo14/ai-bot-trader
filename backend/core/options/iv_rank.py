@@ -95,6 +95,8 @@ def _d1d2(
     S: float, K: float, T: float, sigma: float, r: float = RISK_FREE_RATE
 ) -> Tuple[float, float]:
     """Shared d1/d2 terms for Black-Scholes."""
+    if S <= 0 or K <= 0:
+        raise ValueError(f"_d1d2: S and K must be positive (got S={S}, K={K})")
     sq_T = math.sqrt(T)
     d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sq_T)
     d2 = d1 - sigma * sq_T
@@ -104,6 +106,8 @@ def _d1d2(
 def bs_call(S: float, K: float, T: float, sigma: float, r: float = RISK_FREE_RATE) -> float:
     """Black-Scholes European call price.  T in years, sigma as decimal (0.30 = 30%)."""
     if T <= 1e-6 or sigma <= 1e-6:
+        return max(0.0, S - K)
+    if S <= 0 or K <= 0:
         return max(0.0, S - K)
     d1, d2 = _d1d2(S, K, T, sigma, r)
     return S * _ncdf(d1) - K * math.exp(-r * T) * _ncdf(d2)
@@ -121,6 +125,8 @@ def bs_delta_call(S: float, K: float, T: float, sigma: float, r: float = RISK_FR
     """Delta of a European call (0–1)."""
     if T <= 1e-6 or sigma <= 1e-6:
         return 1.0 if S > K else 0.0
+    if S <= 0 or K <= 0:
+        return 1.0 if S > K else 0.0
     d1, _ = _d1d2(S, K, T, sigma, r)
     return _ncdf(d1)
 
@@ -134,6 +140,8 @@ def bs_theta_call(S: float, K: float, T: float, sigma: float, r: float = RISK_FR
     """Per-day theta for a long call (negative = option value decays each day)."""
     if T <= 1e-6 or sigma <= 1e-6:
         return 0.0
+    if S <= 0 or K <= 0:
+        return 0.0
     d1, d2 = _d1d2(S, K, T, sigma, r)
     term1 = -(S * _npdf(d1) * sigma) / (2.0 * math.sqrt(T))
     term2 = -r * K * math.exp(-r * T) * _ncdf(d2)
@@ -144,6 +152,8 @@ def bs_theta_put(S: float, K: float, T: float, sigma: float, r: float = RISK_FRE
     """Per-day theta for a long put (negative = value decays each day)."""
     if T <= 1e-6 or sigma <= 1e-6:
         return 0.0
+    if S <= 0 or K <= 0:
+        return 0.0
     d1, d2 = _d1d2(S, K, T, sigma, r)
     term1 = -(S * _npdf(d1) * sigma) / (2.0 * math.sqrt(T))
     term2 = r * K * math.exp(-r * T) * _ncdf(-d2)
@@ -153,6 +163,8 @@ def bs_theta_put(S: float, K: float, T: float, sigma: float, r: float = RISK_FRE
 def bs_vega(S: float, K: float, T: float, sigma: float, r: float = RISK_FREE_RATE) -> float:
     """Vega: $ change per 1% move in IV (standard convention; divide raw vega by 100)."""
     if T <= 1e-6 or sigma <= 1e-6:
+        return 0.0
+    if S <= 0 or K <= 0:
         return 0.0
     d1, _ = _d1d2(S, K, T, sigma, r)
     return S * _npdf(d1) * math.sqrt(T) / 100.0

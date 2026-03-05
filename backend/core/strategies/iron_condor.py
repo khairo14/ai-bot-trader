@@ -122,6 +122,10 @@ class IronCondorStrategy(BaseStrategy):
         if long_put >= short_put:
             long_put = short_put - nearest_strike(current_price, atr)
 
+        # Guard: all strikes must be positive (low-price symbols can produce zero strikes)
+        if any(s <= 0 for s in (long_put, short_put, short_call, long_call)):
+            return _hold(["Iron condor strikes non-positive (underlying price too low for wing width)"])
+
         # ── Black-Scholes premium estimation ──────────────────────────────────
         expiry = next_monthly_expiry(self.DTE)
         T = self.DTE / 365.0
