@@ -3,6 +3,25 @@ import { TrendingUp, TrendingDown, Minus, Clock, AlertTriangle, GitBranch } from
 import axios from 'axios'
 import toast from 'react-hot-toast'
 
+interface OptionsLeg {
+  action: string   // BUY | SELL
+  right: string    // C | P
+  strike: number
+  premium: number
+}
+
+interface OptionsMeta {
+  strategy_type?: string            // iron_condor | covered_call | bull_call_spread
+  expiry?: string                   // YYYYMMDD
+  legs?: OptionsLeg[]
+  underlying_price?: number
+  spread_width?: number
+  max_profit?: number
+  max_loss?: number
+  strike?: number                   // single-leg
+  right?: string
+}
+
 interface Signal {
   id: number
   symbol: string
@@ -13,9 +32,16 @@ interface Signal {
   confidence: number
   timeframe: string
   strategy_name: string
+  asset_class?: string
   broker: string
   reasons: string
   created_at: string
+  // Options fields (undefined for equity signals)
+  iv_rank?: number
+  delta?: number
+  theta?: number
+  vega?: number
+  options_meta?: OptionsMeta
 }
 
 interface Props {
@@ -158,6 +184,78 @@ export default function SignalCard({ signal }: Props) {
           />
         </div>
       </div>
+
+      {/* Options Section — shown for option asset_class */}
+      {signal.asset_class === 'option' && (signal.iv_rank != null || signal.options_meta) && (
+        <div className="bg-dark-700 rounded-lg p-3 space-y-2 border border-purple-900/30">
+          {/* Strategy type badge + IV Rank */}
+          <div className="flex items-center justify-between">
+            {signal.options_meta?.strategy_type && (
+              <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300 bg-purple-900/30 border border-purple-900/50 px-2 py-0.5 rounded">
+                {
+                  signal.options_meta.strategy_type === 'iron_condor'    ? '🦅 Iron Condor' :
+                  signal.options_meta.strategy_type === 'covered_call'   ? '📞 Covered Call' :
+                  signal.options_meta.strategy_type === 'bull_call_spread' ? '📈 Bull Call Spread' :
+                  signal.options_meta.strategy_type
+                }
+              </span>
+            )}
+            {signal.iv_rank != null && (
+              <div className="flex items-center gap-1.5 ml-auto">
+                <span className="text-[10px] text-gray-500">IV Rank</span>
+                <div className="w-20 h-1.5 bg-dark-600 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-purple-500 transition-all duration-500"
+                    style={{ width: `${signal.iv_rank}%` }}
+                  />
+                </div>
+                <span className="text-[10px] font-mono text-purple-300">{signal.iv_rank.toFixed(0)}%</span>
+              </div>
+            )}
+          </div>
+
+          {/* Greeks chips */}
+          {(signal.delta != null || signal.theta != null || signal.vega != null) && (
+            <div className="flex gap-1.5 flex-wrap">
+              {signal.delta != null && (
+                <span className="text-[10px] font-mono bg-blue-900/20 text-blue-300 border border-blue-900/40 px-1.5 py-0.5 rounded">
+                  Δ {signal.delta > 0 ? '+' : ''}{signal.delta.toFixed(2)}
+                </span>
+              )}
+              {signal.theta != null && (
+                <span className="text-[10px] font-mono bg-amber-900/20 text-amber-300 border border-amber-900/40 px-1.5 py-0.5 rounded">
+                  Θ {signal.theta > 0 ? '+' : ''}{signal.theta.toFixed(4)}/d
+                </span>
+              )}
+              {signal.vega != null && (
+                <span className="text-[10px] font-mono bg-teal-900/20 text-teal-300 border border-teal-900/40 px-1.5 py-0.5 rounded">
+                  V {signal.vega > 0 ? '+' : ''}{signal.vega.toFixed(4)}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Legs summary */}
+          {signal.options_meta?.legs && signal.options_meta.legs.length > 0 && (
+            <div className="space-y-0.5">
+              {signal.options_meta.legs.map((leg, i) => {
+                const expiry = signal.options_meta?.expiry
+                const expFmt = expiry ? `${expiry.slice(0,4)}-${expiry.slice(4,6)}-${expiry.slice(6)}` : '—'
+                return (
+                  <p key={i} className="text-[10px] font-mono text-gray-400">
+                    <span className={leg.action === 'BUY' ? 'text-green-400' : 'text-orange-400'}>
+                      {leg.action}
+                    </span>
+                    {' '}{leg.strike.toFixed(1)} {leg.right}
+                    {' '}@ <span className="text-white">${leg.premium.toFixed(2)}</span>
+                    {i === 0 && expiry ? <span className="text-gray-600"> · Exp: {expFmt}</span> : null}
+                  </p>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Reasons */}
       {reasons.length > 0 && (

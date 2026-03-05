@@ -194,6 +194,22 @@ class ForwardEngine:
             # We catch all broker errors here so the scheduler never crashes.
             # A FAILED trade record is written to the DB so you have a full audit trail.
             side = "buy" if signal.signal == "BUY" else "sell"
+            # ── Options extra kwargs (single-leg only; multi-leg is paper-only) ──
+            option_kwargs: dict = {}
+            meta = getattr(signal, "options_meta", None)
+            if meta and isinstance(meta, dict):
+                legs = meta.get("legs", [])
+                if len(legs) == 1:
+                    option_kwargs = {
+                        "option_expiry": meta.get("expiry"),
+                        "option_strike": legs[0].get("strike"),
+                        "option_right":  legs[0].get("right"),
+                    }
+                elif len(legs) > 1:
+                    logger.warning(
+                        f"[ForwardEngine] Multi-leg option ({meta.get('strategy_type', '?')}) for "
+                        f"{signal.symbol} — live execution not supported; switch to paper mode."
+                    )
             try:
                 result = await broker.place_order(
                     symbol=signal.symbol,
@@ -202,6 +218,7 @@ class ForwardEngine:
                     order_type="market",
                     stop_price=signal.stop_loss,
                     take_profit_price=signal.take_profit,
+                    **option_kwargs,
                 )
                 trade.broker_order_id = result.order_id
                 trade.status = OrderStatus.OPEN

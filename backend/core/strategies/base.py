@@ -20,6 +20,12 @@ class Signal:
     broker: str
     regime: Optional[str] = None
     reasons: List[str] = field(default_factory=list)
+    # Options-specific fields (None for equity/crypto signals)
+    iv_rank: Optional[float] = None          # 0–100: IV Rank from historical volatility
+    delta:   Optional[float] = None          # net delta of the position
+    theta:   Optional[float] = None          # net daily theta
+    vega:    Optional[float] = None          # net vega
+    options_meta: Optional[dict] = None      # {strategy_type, expiry, legs, strikes, …}
 
 
 class BaseStrategy(ABC):

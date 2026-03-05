@@ -6,13 +6,19 @@ from core.strategies.base import Signal, BaseStrategy
 from core.strategies.hybrid import HybridStrategy
 from core.strategies.momentum import MomentumBreakoutStrategy
 from core.strategies.mean_reversion import MeanReversionBBStrategy
+from core.strategies.iron_condor import IronCondorStrategy
+from core.strategies.covered_call import CoveredCallStrategy
+from core.strategies.bull_call_spread import BullCallSpreadStrategy
 from brokers import get_broker
 
 
 STRATEGY_REGISTRY = {
-    "hybrid_macd_rsi": HybridStrategy,
+    "hybrid_macd_rsi":   HybridStrategy,
     "momentum_breakout": MomentumBreakoutStrategy,
     "mean_reversion_bb": MeanReversionBBStrategy,
+    "iron_condor":       IronCondorStrategy,
+    "covered_call":      CoveredCallStrategy,
+    "bull_call_spread":  BullCallSpreadStrategy,
 }
 
 

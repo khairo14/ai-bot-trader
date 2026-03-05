@@ -90,6 +90,12 @@ class Signal(Base):
     acted_on: Mapped[bool] = mapped_column(Boolean, default=False)
     dismissed: Mapped[bool] = mapped_column(Boolean, default=False)  # hidden from Recent Signals UI
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
+    # ── Options-specific fields (NULL for equity / crypto signals) ───────────
+    iv_rank: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # 0–100
+    delta:   Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    theta:   Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vega:    Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    options_meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True) # strikes, expiry, legs
 
     trade: Mapped[Optional[Trade]] = relationship("Trade", back_populates="signal", uselist=False)
     outcome: Mapped[Optional[TradeOutcome]] = relationship("TradeOutcome", back_populates="signal", uselist=False)

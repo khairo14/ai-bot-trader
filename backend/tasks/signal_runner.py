@@ -170,6 +170,12 @@ def run_signals(self):
                             execution_mode=strat.execution_mode.value,
                             reasons=sig.reasons,
                             acted_on=False,
+                            # Options fields (None for non-options signals)
+                            iv_rank=getattr(sig, "iv_rank", None),
+                            delta=getattr(sig, "delta", None),
+                            theta=getattr(sig, "theta", None),
+                            vega=getattr(sig, "vega", None),
+                            options_meta=getattr(sig, "options_meta", None),
                         )
                         session.add(db_signal)
                         await session.flush()   # get db_signal.id

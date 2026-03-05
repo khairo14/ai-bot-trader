@@ -29,6 +29,12 @@ def _signal_dict(s: Signal) -> dict:
         "acted_on": s.acted_on,
         "dismissed": s.dismissed,
         "created_at": s.created_at.isoformat() if s.created_at else None,
+        # Options fields (None for equity signals)
+        "iv_rank":      s.iv_rank,
+        "delta":        s.delta,
+        "theta":        s.theta,
+        "vega":         s.vega,
+        "options_meta": s.options_meta,
     }
 
 
@@ -135,6 +141,12 @@ async def approve_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
         broker=sig_row.broker.value if hasattr(sig_row.broker, "value") else sig_row.broker,
         regime=sig_row.regime,
         reasons=sig_row.reasons or [],
+        # Restore options fields so ForwardEngine can pass IBKR option kwargs
+        iv_rank=sig_row.iv_rank,
+        delta=sig_row.delta,
+        theta=sig_row.theta,
+        vega=sig_row.vega,
+        options_meta=sig_row.options_meta,
     )
 
     engine = ForwardEngine()
