@@ -48,7 +48,10 @@ class SignalEngine:
         """
         if data is None:
             broker = get_broker(broker_name)
-            data = await broker.get_ohlcv(symbol, timeframe, limit)
+            try:
+                data = await broker.get_ohlcv(symbol, timeframe, limit)
+            finally:
+                await broker.close()
 
         strategy = self.get_strategy(strategy_name)
         signal = strategy.generate_signal(data, symbol=symbol, timeframe=timeframe)

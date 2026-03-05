@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react'
-import { Play, StopCircle, Activity, RefreshCw, Zap, Download } from 'lucide-react'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { Play, StopCircle, Activity, RefreshCw, Zap, Download, Clock, Loader2 } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import toast from 'react-hot-toast'
 import { SkeletonLine } from '../components/Skeleton'
@@ -22,6 +22,14 @@ interface ForwardStatus {
   total_closed_trades: number
   days_running: number
   is_running: boolean
+  // Execution state
+  is_executing: boolean
+  executing_strategy: string | null
+  executing_trigger: 'manual' | 'scheduler' | null
+  execution_started_at: string | null
+  // Scheduler
+  next_scheduled: { strategy: string; timeframe: string; next_fire: string } | null
+  schedule_details: { strategy: string; timeframe: string; next_fire: string }[]
 }
 
 interface PaperTrade {
@@ -63,6 +71,31 @@ export default function ForwardTest() {
   const [wsEvents, setWsEvents] = useState<WsMessage[]>([])
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
+  // After triggering a run, poll every 2 s for up to 60 s so the UI reflects
+  // is_executing quickly without waiting for the 30-second background poll.
+  const aggressivePollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const runTimeoutRef    = useRef<ReturnType<typeof setTimeout>  | null>(null)
+
+  const stopAggressivePoll = useCallback(() => {
+    if (aggressivePollRef.current) { clearInterval(aggressivePollRef.current); aggressivePollRef.current = null }
+    if (runTimeoutRef.current)    { clearTimeout(runTimeoutRef.current);     runTimeoutRef.current    = null }
+  }, [])
+
+  const startAggressivePoll = useCallback((fetchFn: () => void) => {
+    stopAggressivePoll()
+    let ticks = 0
+    aggressivePollRef.current = setInterval(() => {
+      fetchFn()
+      ticks++
+      if (ticks >= 30) stopAggressivePoll()  // stop after 60 s
+    }, 2000)
+    // Hard fallback — clear run loading after 90 s no matter what
+    runTimeoutRef.current = setTimeout(() => {
+      setRunLoading(false)
+      stopAggressivePoll()
+    }, 90_000)
+  }, [stopAggressivePoll])
+
   const fetchAll = useCallback(async () => {
     try {
       const [statusRes, tradesRes] = await Promise.all([
@@ -86,10 +119,15 @@ export default function ForwardTest() {
   useWebSocket(WS_URL, {
     onMessage: (raw) => {
       const msg = raw as WsMessage
-      if (['signal', 'trade', 'emergency_stop'].includes(msg.type)) {
+      if (['signal', 'trade', 'emergency_stop', 'run_started', 'run_finished'].includes(msg.type)) {
         setWsEvents((prev) => [msg, ...prev].slice(0, 20))
-        // Refresh data on relevant events
         fetchAll()
+        if (msg.type === 'run_finished') {
+          toast.success('Signal run complete.')
+          setRunLoading(false)
+          stopAggressivePoll()
+          fetchAll()
+        }
       }
     },
   })
@@ -97,19 +135,28 @@ export default function ForwardTest() {
   useEffect(() => {
     fetchAll()
     const t = setInterval(fetchAll, 30_000) // poll every 30s as backup
-    return () => clearInterval(t)
-  }, [fetchAll])
+    return () => { clearInterval(t); stopAggressivePoll() }
+  }, [fetchAll, stopAggressivePoll])
 
   const triggerRun = async () => {
     setRunLoading(true)
     try {
       const res = await fetch(`${API}/api/forward-test/run`, { method: 'POST' })
       const data = await res.json()
-      if (!res.ok) toast.error(data.detail ?? 'Run failed')
-      else setTimeout(fetchAll, 2000) // re-fetch after brief delay for background task
+      if (res.status === 409) {
+        toast.error(data.detail ?? 'A run is already in progress.')
+        setRunLoading(false)
+      } else if (!res.ok) {
+        toast.error(data.detail ?? 'Run failed')
+        setRunLoading(false)
+      } else {
+        toast.success(`Run triggered for ${data.strategies ?? 1} strategy — signals processing…`)
+        // Keep runLoading=true; it will be cleared by run_finished WS event or 90s timeout
+        startAggressivePoll(fetchAll)
+        fetchAll()  // immediate poll
+      }
     } catch (e) {
       toast.error('Network error')
-    } finally {
       setRunLoading(false)
     }
   }
@@ -144,7 +191,17 @@ export default function ForwardTest() {
   }
 
   const isRunning = status?.is_running ?? false
+  const isExecuting = status?.is_executing ?? false
   const totalPnl = status?.total_pnl ?? 0
+
+  /** How many minutes until the next scheduled fire (rounded). */
+  const nextRunLabel = (() => {
+    if (!status?.next_scheduled) return null
+    const diff = new Date(status.next_scheduled.next_fire).getTime() - Date.now()
+    if (diff <= 0) return 'any moment'
+    const mins = Math.ceil(diff / 60_000)
+    return `${status.next_scheduled.timeframe} · ${mins < 60 ? `${mins}m` : `${Math.round(mins / 60)}h`} away`
+  })()
 
   return (
     <div className="p-6 space-y-6">
@@ -164,7 +221,10 @@ export default function ForwardTest() {
       {/* Status Banner */}
       <div className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className={`w-2 h-2 rounded-full ${isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-600'}`} />
+          <div className={`w-2 h-2 rounded-full ${
+            isExecuting || runLoading ? 'bg-yellow-400 animate-pulse' :
+            isRunning ? 'bg-green-500 animate-pulse' : 'bg-gray-600'
+          }`} />
           <div>
             <p className="text-sm font-medium text-white">
               {isRunning
@@ -178,23 +238,47 @@ export default function ForwardTest() {
             </p>
           </div>
         </div>
-        <div className="flex gap-2">
-          <button
-            onClick={triggerRun}
-            disabled={runLoading || !isRunning}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500/10 text-brand-500 hover:bg-brand-500/20 text-sm font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {runLoading ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />}
-            Run Now
-          </button>
-          <button
-            onClick={emergencyStop}
-            disabled={stopLoading || !isRunning}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-red-400 hover:bg-red-500/10 text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {stopLoading ? <RefreshCw size={14} className="animate-spin" /> : <StopCircle size={14} />}
-            Emergency Stop
-          </button>
+
+        <div className="flex flex-col items-end gap-1.5">
+          {/* Currently executing indicator */}
+          {(isExecuting || runLoading) && (
+            <div className="flex items-center gap-1.5 text-xs text-yellow-400">
+              <Loader2 size={11} className="animate-spin" />
+              <span>
+                {isExecuting
+                  ? (<>Running: <span className="font-medium">{status!.executing_strategy ?? '…'}</span>
+                    {status!.executing_trigger && <span className="text-gray-500 ml-1">({status!.executing_trigger})</span>}</>)
+                  : 'Starting signal run…'
+                }
+              </span>
+            </div>
+          )}
+          {/* Next scheduled */}
+          {isRunning && nextRunLabel && !isExecuting && !runLoading && (
+            <div className="flex items-center gap-1 text-xs text-gray-500">
+              <Clock size={10} />
+              <span>Next: {nextRunLabel}</span>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <button
+              onClick={triggerRun}
+              disabled={runLoading || isExecuting || !isRunning}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500/10 text-brand-500 hover:bg-brand-500/20 text-sm font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {runLoading || isExecuting ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />}
+              {isExecuting ? 'Running…' : runLoading ? 'Starting…' : 'Run Now'}
+            </button>
+            <button
+              onClick={emergencyStop}
+              disabled={stopLoading || !isRunning}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-red-400 hover:bg-red-500/10 text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {stopLoading ? <RefreshCw size={14} className="animate-spin" /> : <StopCircle size={14} />}
+              Emergency Stop
+            </button>
+          </div>
         </div>
       </div>
 
@@ -323,13 +407,18 @@ export default function ForwardTest() {
                     <span className={`font-medium ${
                       evt.type === 'signal' ? 'text-brand-400' :
                       evt.type === 'trade' ? 'text-green-400' :
+                      evt.type === 'run_started' ? 'text-yellow-400' :
+                      evt.type === 'run_finished' ? 'text-blue-400' :
                       'text-red-400'
-                    }`}>{evt.type.toUpperCase()}</span>
+                    }`}>{evt.type.toUpperCase().replace('_', ' ')}</span>
                     {evt.type === 'signal' && (
                       <span className="text-white">{String(evt.data.symbol)} → {String(evt.data.signal)}</span>
                     )}
                     {evt.type === 'trade' && (
                       <span className="text-white">{String(evt.data.symbol)} {String(evt.data.side).toUpperCase()}</span>
+                    )}
+                    {(evt.type === 'run_started' || evt.type === 'run_finished') && (
+                      <span className="text-gray-400">{String(evt.data.trigger)} · {String(evt.data.strategies)} strateg{Number(evt.data.strategies) === 1 ? 'y' : 'ies'}</span>
                     )}
                   </div>
                   {evt.type === 'signal' && (

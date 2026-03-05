@@ -101,9 +101,8 @@ class _IBKRManager:
     # ── balance fetch ─────────────────────────────────────────────────────────
 
     async def _fetch_async(self) -> Balance:
-        fallback = self._cached or Balance(total=0.0, available=0.0, currency="USD")
         if not await self._ensure_connected():
-            return fallback
+            raise ConnectionError("IBKR Gateway is not reachable")
 
         total = available = 0.0
         assert self._ib is not None

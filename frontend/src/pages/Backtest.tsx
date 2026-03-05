@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { FlaskConical, Play, AlertTriangle, Download, BookOpen, TrendingUp } from 'lucide-react'
+import { FlaskConical, Play, AlertTriangle, Download, BookOpen, TrendingUp, History, Eye, X, ChevronUp, ChevronDown } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 
@@ -16,8 +16,14 @@ interface SavedStrategy {
 }
 
 interface BacktestResult {
+  id?: number
   strategy_name: string
   symbol: string
+  timeframe?: string
+  start_date?: string
+  end_date?: string
+  initial_capital?: number
+  final_capital?: number
   total_return_pct: number
   annualized_return_pct: number
   max_drawdown_pct: number
@@ -28,6 +34,7 @@ interface BacktestResult {
   avg_win: number
   avg_loss: number
   rr_ratio: number
+  created_at?: string
 }
 
 const MetricRow = ({ label, value, positive }: { label: string, value: string, positive?: boolean }) => (
@@ -56,12 +63,65 @@ export default function Backtest() {
   const [backtestId, setBacktestId] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
   const [errorDetail, setErrorDetail] = useState<string | null>(null)
+  const [history, setHistory] = useState<BacktestResult[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [modalResult, setModalResult] = useState<BacktestResult | null>(null)
+  const [sortKey, setSortKey] = useState<string>('id')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [page, setPage] = useState(1)
+  const PAGE_SIZE = 10
 
-  // Load saved strategies from DB on mount
+  const toggleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortKey(key)
+      setSortDir('desc')
+    }
+    setPage(1)
+  }
+
+  const SortIcon = ({ col }: { col: string }) =>
+    sortKey !== col
+      ? <span className="text-gray-600 ml-0.5 text-[10px]">↕</span>
+      : sortDir === 'asc'
+        ? <ChevronUp size={10} className="inline ml-0.5" />
+        : <ChevronDown size={10} className="inline ml-0.5" />
+
+  const sortedHistory = [...history].sort((a, b) => {
+    const av = (a as any)[sortKey] ?? 0
+    const bv = (b as any)[sortKey] ?? 0
+    if (av < bv) return sortDir === 'asc' ? -1 : 1
+    if (av > bv) return sortDir === 'asc' ? 1 : -1
+    return 0
+  })
+  const totalPages = Math.max(1, Math.ceil(sortedHistory.length / PAGE_SIZE))
+  const pagedHistory = sortedHistory.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  const fetchHistory = async () => {
+    setHistoryLoading(true)
+    try {
+      const res = await axios.get('/api/backtest/results')
+      const list: BacktestResult[] = res.data.results || []
+      setHistory(list)
+      // Restore the most recent result if nothing is currently shown
+      if (list.length > 0) {
+        setResult(prev => prev ?? list[0])
+        setBacktestId(prev => prev ?? (list[0].id ?? null))
+      }
+    } catch {
+      // silently ignore — history is non-critical
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  // Load saved strategies + history on mount
   useEffect(() => {
     axios.get('/api/strategies/').then(res => {
       setSavedStrategies(res.data.strategies || [])
     }).catch(() => {})
+    fetchHistory()
   }, [])
 
   // Auto-fill form when a saved strategy is selected
@@ -89,6 +149,7 @@ export default function Backtest() {
       setResult(res.data.result)
       if (res.data.backtest_id) setBacktestId(res.data.backtest_id)
       toast.success('Backtest completed!')
+      fetchHistory()
     } catch (e: any) {
       const detail = e?.response?.data?.detail || e?.message || 'Backtest failed'
       setErrorDetail(typeof detail === 'string' ? detail : JSON.stringify(detail))
@@ -203,7 +264,25 @@ export default function Backtest() {
         {/* Results */}
         <div className="bg-dark-800 border border-dark-600 rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-sm font-semibold text-gray-300">Results</h2>
+            <div>
+              <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">Results</p>
+              {result ? (
+                <>
+                  <h2 className="text-base font-bold text-white mt-0.5">
+                    {result.symbol}
+                    <span className="ml-2 text-xs font-normal text-gray-500">{result.timeframe ?? ''} · {result.strategy_name}</span>
+                  </h2>
+                  {result.created_at && (
+                    <p className="text-xs text-gray-600 mt-0.5">
+                      Run {new Date(result.created_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
+                      {backtestId ? ` · #${backtestId}` : ''}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <h2 className="text-sm font-semibold text-gray-400 mt-0.5">—</h2>
+              )}
+            </div>
             <div className="flex items-center gap-2">
               {backtestId && (
                 <a
@@ -266,6 +345,252 @@ export default function Backtest() {
           )}
         </div>
       </div>
+
+      {/* Backtest History Table */}
+      <div className="bg-dark-800 border border-dark-600 rounded-xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <History size={16} className="text-brand-400" />
+            <h2 className="text-sm font-semibold text-gray-300">Backtest History</h2>
+            {historyLoading && <span className="text-xs text-gray-500">loading…</span>}
+            {!historyLoading && <span className="text-xs text-gray-600">({history.length} run{history.length !== 1 ? 's' : ''})</span>}
+          </div>
+          <a
+            href="/api/backtest/results/export/all"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 text-xs transition-all"
+          >
+            <Download size={12} /> Export All CSV
+          </a>
+        </div>
+
+        {history.length === 0 && !historyLoading ? (
+          <p className="text-sm text-gray-600 text-center py-8">No backtest runs recorded yet.</p>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-500 border-b border-dark-600">
+                    {([
+                      { key: 'id', label: '#', align: 'left' },
+                      { key: 'strategy_name', label: 'Strategy', align: 'left' },
+                      { key: 'symbol', label: 'Symbol', align: 'left' },
+                      { key: 'timeframe', label: 'TF', align: 'left' },
+                      { key: 'total_return_pct', label: 'Return', align: 'right' },
+                      { key: 'max_drawdown_pct', label: 'Drawdown', align: 'right' },
+                      { key: 'sharpe_ratio', label: 'Sharpe', align: 'right' },
+                      { key: 'win_rate_pct', label: 'Win %', align: 'right' },
+                      { key: 'total_trades', label: 'Trades', align: 'right' },
+                      { key: 'profit_factor', label: 'P.Factor', align: 'right' },
+                      { key: 'created_at', label: 'Date', align: 'left' },
+                    ] as { key: string; label: string; align: string }[]).map(col => (
+                      <th
+                        key={col.key}
+                        onClick={() => toggleSort(col.key)}
+                        className={`py-2 pr-3 font-medium cursor-pointer select-none hover:text-gray-300 transition-colors text-${col.align}`}
+                      >
+                        {col.label}<SortIcon col={col.key} />
+                      </th>
+                    ))}
+                    <th className="text-right py-2 font-medium">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedHistory.map((h, idx) => {
+                    const isActive = h.id != null && h.id === backtestId
+                    return (
+                      <tr
+                        key={h.id ?? idx}
+                        className={`border-b border-dark-700 hover:bg-dark-700/40 transition-colors ${isActive ? 'bg-brand-500/5 border-brand-500/20' : ''}`}
+                      >
+                        <td className="py-2 pr-3 text-gray-500">{h.id ?? '—'}</td>
+                        <td className="py-2 pr-3 text-gray-300 font-medium">{h.strategy_name}</td>
+                        <td className="py-2 pr-3 text-gray-300">{h.symbol}</td>
+                        <td className="py-2 pr-3 text-gray-400">{h.timeframe ?? '—'}</td>
+                        <td className={`py-2 pr-3 text-right font-medium ${(h.total_return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {h.total_return_pct?.toFixed(1)}%
+                        </td>
+                        <td className={`py-2 pr-3 text-right ${(h.max_drawdown_pct ?? 0) < -20 ? 'text-red-400' : 'text-yellow-400'}`}>
+                          {h.max_drawdown_pct?.toFixed(1)}%
+                        </td>
+                        <td className={`py-2 pr-3 text-right ${(h.sharpe_ratio ?? 0) >= 1 ? 'text-green-400' : 'text-gray-400'}`}>
+                          {h.sharpe_ratio?.toFixed(2)}
+                        </td>
+                        <td className={`py-2 pr-3 text-right ${(h.win_rate_pct ?? 0) >= 50 ? 'text-green-400' : 'text-red-400'}`}>
+                          {h.win_rate_pct?.toFixed(1)}%
+                        </td>
+                        <td className="py-2 pr-3 text-right text-gray-300">{h.total_trades}</td>
+                        <td className={`py-2 pr-3 text-right ${(h.profit_factor ?? 0) >= 1.5 ? 'text-green-400' : 'text-gray-400'}`}>
+                          {h.profit_factor?.toFixed(2)}
+                        </td>
+                        <td className="py-2 pr-3 text-gray-500">
+                          {h.created_at ? new Date(h.created_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '—'}
+                        </td>
+                        <td className="py-2 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => setModalResult(h)}
+                              className="flex items-center gap-1 px-2 py-1 rounded bg-dark-600 hover:bg-brand-500/20 hover:text-brand-400 text-gray-400 transition-all"
+                              title="View this result"
+                            >
+                              <Eye size={11} /> View
+                            </button>
+                            {h.id && (
+                              <a
+                                href={`/api/backtest/results/${h.id}/export`}
+                                className="flex items-center gap-1 px-2 py-1 rounded bg-dark-600 hover:bg-green-500/20 hover:text-green-400 text-gray-400 transition-all"
+                                title="Download trades CSV"
+                              >
+                                <Download size={11} /> CSV
+                              </a>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination */}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between mt-4 pt-3 border-t border-dark-700">
+                <span className="text-xs text-gray-500">
+                  Page {page} of {totalPages} &middot; {history.length} total runs
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setPage(1)}
+                    disabled={page === 1}
+                    className="px-2 py-1 rounded text-xs bg-dark-700 text-gray-400 hover:bg-dark-600 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                  >«</button>
+                  <button
+                    onClick={() => setPage(p => Math.max(1, p - 1))}
+                    disabled={page === 1}
+                    className="px-2 py-1 rounded text-xs bg-dark-700 text-gray-400 hover:bg-dark-600 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                  >‹</button>
+                  {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                    const start = Math.max(1, Math.min(page - 2, totalPages - 4))
+                    const p = start + i
+                    return (
+                      <button
+                        key={p}
+                        onClick={() => setPage(p)}
+                        className={`px-2.5 py-1 rounded text-xs transition-all ${
+                          p === page
+                            ? 'bg-brand-500 text-black font-semibold'
+                            : 'bg-dark-700 text-gray-400 hover:bg-dark-600'
+                        }`}
+                      >{p}</button>
+                    )
+                  })}
+                  <button
+                    onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                    disabled={page === totalPages}
+                    className="px-2 py-1 rounded text-xs bg-dark-700 text-gray-400 hover:bg-dark-600 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                  >›</button>
+                  <button
+                    onClick={() => setPage(totalPages)}
+                    disabled={page === totalPages}
+                    className="px-2 py-1 rounded text-xs bg-dark-700 text-gray-400 hover:bg-dark-600 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                  >»</button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Result Detail Modal */}
+      {modalResult && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setModalResult(null)}
+        >
+          <div
+            className="bg-dark-800 border border-dark-600 rounded-xl p-6 w-full max-w-md mx-4 shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal header */}
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h3 className="text-sm font-semibold text-white">
+                  {modalResult.strategy_name} · {modalResult.symbol}
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {modalResult.timeframe ?? '—'}
+                  {modalResult.start_date ? ` · ${modalResult.start_date}` : ''}
+                  {modalResult.end_date ? ` → ${modalResult.end_date}` : ''}
+                  {modalResult.id ? ` · #${modalResult.id}` : ''}
+                </p>
+                {modalResult.created_at && (
+                  <p className="text-xs text-gray-600 mt-0.5">
+                    Run {new Date(modalResult.created_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={() => setModalResult(null)}
+                className="text-gray-500 hover:text-white transition-colors ml-4 shrink-0"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Metrics */}
+            <div className="space-y-0.5">
+              <MetricRow label="Total Return" value={`${modalResult.total_return_pct?.toFixed(2)}%`} positive={modalResult.total_return_pct > 0} />
+              <MetricRow label="Annualized Return" value={`${modalResult.annualized_return_pct?.toFixed(2)}%`} positive={modalResult.annualized_return_pct > 0} />
+              <MetricRow label="Max Drawdown" value={`${modalResult.max_drawdown_pct?.toFixed(2)}%`} positive={modalResult.max_drawdown_pct > -20} />
+              <MetricRow label="Sharpe Ratio" value={modalResult.sharpe_ratio?.toFixed(2)} positive={modalResult.sharpe_ratio > 1} />
+              <MetricRow label="Profit Factor" value={modalResult.profit_factor?.toFixed(2)} positive={modalResult.profit_factor > 1.5} />
+              <MetricRow label="Win Rate" value={`${modalResult.win_rate_pct?.toFixed(1)}%`} positive={modalResult.win_rate_pct > 50} />
+              <MetricRow label="Total Trades" value={String(modalResult.total_trades)} />
+              <MetricRow label="Avg Win" value={`$${modalResult.avg_win?.toFixed(2)}`} positive />
+              <MetricRow label="Avg Loss" value={`$${modalResult.avg_loss?.toFixed(2)}`} />
+              <MetricRow label="R:R Ratio" value={modalResult.rr_ratio?.toFixed(2)} positive={modalResult.rr_ratio > 1.5} />
+              {modalResult.initial_capital != null && (
+                <MetricRow label="Initial Capital" value={`$${modalResult.initial_capital?.toLocaleString()}`} />
+              )}
+              {modalResult.final_capital != null && (
+                <MetricRow label="Final Capital" value={`$${modalResult.final_capital?.toFixed(2)}`} positive={modalResult.final_capital > (modalResult.initial_capital ?? 0)} />
+              )}
+            </div>
+
+            {/* Warning / pass */}
+            {modalResult.max_drawdown_pct < -20 || modalResult.sharpe_ratio < 1 ? (
+              <div className="flex items-start gap-2 mt-4 p-3 bg-yellow-900/20 border border-yellow-900/40 rounded-lg">
+                <AlertTriangle size={14} className="text-yellow-500 mt-0.5 shrink-0" />
+                <p className="text-xs text-yellow-400">Results below recommended thresholds.</p>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2 mt-4 p-3 bg-green-900/20 border border-green-900/40 rounded-lg">
+                <TrendingUp size={14} className="text-green-400 mt-0.5 shrink-0" />
+                <p className="text-xs text-green-400">Strategy passes quality checks.</p>
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex gap-2 mt-4">
+              {modalResult.id && (
+                <a
+                  href={`/api/backtest/results/${modalResult.id}/export`}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-dark-700 text-gray-400 hover:text-green-400 hover:bg-green-500/10 text-xs transition-all"
+                >
+                  <Download size={12} /> Download Trades CSV
+                </a>
+              )}
+              <button
+                onClick={() => setModalResult(null)}
+                className="flex-1 py-2 rounded-lg bg-dark-700 text-gray-400 hover:text-white text-xs transition-all"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,6 +1,9 @@
 """Forward Test API — paper trading control, status and trade history."""
+import asyncio as _asyncio
 import csv
 import io
+import math as _math
+import time as _time_module
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -20,6 +23,23 @@ from db.models import (
 )
 
 router = APIRouter()
+
+# ── Execution-state guard (prevents concurrent Run-Now / Scheduler overlap) ──
+_exec_lock: "_asyncio.Lock | None" = None
+_exec_state: dict = {
+    "active": False,
+    "strategy": None,   # strategy name currently being processed
+    "trigger": None,    # "manual" | "scheduler"
+    "started_at": None, # datetime UTC
+}
+
+
+def _get_exec_lock() -> "_asyncio.Lock":
+    """Return (or lazily create) the module-level execution lock."""
+    global _exec_lock
+    if _exec_lock is None:
+        _exec_lock = _asyncio.Lock()
+    return _exec_lock
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,6 +161,23 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         days_running = max(0, (now - first_opened).days)
 
+    # Next scheduled fire per strategy
+    now_ts = _time_module.time()
+    schedule_details = []
+    for strat in active_strategies:
+        params = strat.parameters or {}
+        tf = params.get("timeframe", "1h")
+        interval = timeframe_to_seconds(tf)
+        last_close = _math.floor(now_ts / interval) * interval
+        next_close_ts = last_close + interval
+        next_fire_ts = next_close_ts + 30  # 30-second candle-close buffer
+        schedule_details.append({
+            "strategy": strat.name,
+            "timeframe": tf,
+            "next_fire": datetime.fromtimestamp(next_fire_ts, tz=timezone.utc).isoformat(),
+        })
+    next_scheduled = min(schedule_details, key=lambda x: x["next_fire"]) if schedule_details else None
+
     return {
         "active_strategies": len(active_strategies),
         "strategy_names": [s.name for s in active_strategies],
@@ -153,6 +190,14 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         "total_closed_trades": len(closed_trades),
         "days_running": days_running,
         "is_running": len(active_strategies) > 0,
+        # Execution state
+        "is_executing": _exec_state["active"],
+        "executing_strategy": _exec_state["strategy"],
+        "executing_trigger": _exec_state["trigger"],
+        "execution_started_at": _exec_state["started_at"].isoformat() if _exec_state["started_at"] else None,
+        # Scheduler
+        "next_scheduled": next_scheduled,
+        "schedule_details": schedule_details,
     }
 
 
@@ -257,6 +302,14 @@ async def trigger_run(
     Manually trigger the signal engine for all active paper strategies right now.
     Runs in background so the request returns immediately.
     """
+    if _exec_state["active"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A signal run is already in progress "
+                   f"({_exec_state.get('trigger','?')} — {_exec_state.get('strategy','?')}). "
+                   f"Please wait for it to finish.",
+        )
+
     strat_q = await db.execute(
         select(StrategyModel).where(
             StrategyModel.is_active == True,
@@ -313,15 +366,12 @@ async def _run_one_strategy(strat) -> None:
             limit=limit,
         )
 
-        # Skip HOLD signals — no value persisting noise, keep DB clean
-        if sig.signal.upper() == "HOLD":
-            logger.info(
-                f"[ForwardTest] HOLD {strat.name} | {symbol} "
-                f"(conf={sig.confidence:.2f}) — skipped"
-            )
-            return
+        logger.info(
+            f"[ForwardTest] {sig.signal} {strat.name} | {symbol} "
+            f"(conf={sig.confidence:.2f})"
+        )
 
-        # Persist signal
+        # Persist signal (including HOLD — useful for review and ML training)
         try:
             sig_type = SignalType(sig.signal)
         except ValueError:
@@ -398,20 +448,54 @@ async def _run_one_strategy(strat) -> None:
 
 async def _run_signals_background():
     """Run signal engine for ALL active paper strategies (used by 'Run Now' button)."""
+    lock = _get_exec_lock()
+    if lock.locked():
+        logger.info("[ForwardTest] Run Now skipped — a run is already in progress.")
+        return
+
     from db.database import AsyncSessionLocal
     from sqlalchemy import select as sa_select
 
-    async with AsyncSessionLocal() as session:
-        strat_q = await session.execute(
-            sa_select(StrategyModel).where(
-                StrategyModel.is_active == True,
-                StrategyModel.is_paper == True,
-            )
-        )
-        strategies = strat_q.scalars().all()
+    async with lock:
+        _exec_state.update({
+            "active": True,
+            "trigger": "manual",
+            "started_at": datetime.now(timezone.utc),
+        })
+        try:
+            from api.websocket import manager as _ws_manager
+            from db.database import AsyncSessionLocal
+            from sqlalchemy import select as sa_select
 
-    for strat in strategies:
-        await _run_one_strategy(strat)
+            async with AsyncSessionLocal() as session:
+                strat_q = await session.execute(
+                    sa_select(StrategyModel).where(
+                        StrategyModel.is_active == True,
+                        StrategyModel.is_paper == True,
+                    )
+                )
+                strategies = strat_q.scalars().all()
+
+            await _ws_manager.broadcast("run_started", {
+                "trigger": "manual",
+                "strategies": len(strategies),
+            })
+
+            for strat in strategies:
+                _exec_state["strategy"] = strat.name
+                await _run_one_strategy(strat)
+
+            await _ws_manager.broadcast("run_finished", {
+                "trigger": "manual",
+                "strategies": len(strategies),
+            })
+        finally:
+            _exec_state.update({
+                "active": False,
+                "strategy": None,
+                "trigger": None,
+                "started_at": None,
+            })
 
 
 @router.post("/emergency-stop")

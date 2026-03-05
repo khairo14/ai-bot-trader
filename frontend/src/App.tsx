@@ -1,9 +1,10 @@
+import { useState } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import toast from 'react-hot-toast'
 import {
   LayoutDashboard, FlaskConical, Play, Settings,
-  Layers, Zap, ShieldAlert, BookOpen
+  Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -25,17 +26,52 @@ const navItems = [
 ]
 
 export default function App() {
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('nav-collapsed') === 'true' } catch { return false }
+  })
+
+  const toggleCollapsed = () => {
+    setCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem('nav-collapsed', String(next)) } catch {}
+      return next
+    })
+  }
+
   return (
     <div className="flex h-screen overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-56 bg-dark-800 border-r border-dark-600 flex flex-col">
-        {/* Logo */}
-        <div className="px-4 py-5 border-b border-dark-600">
-          <div className="flex items-center gap-2">
-            <Zap className="text-brand-500" size={22} />
-            <span className="font-bold text-white text-sm tracking-wide">AI Bot Trader</span>
-          </div>
-          <p className="text-xs text-gray-500 mt-0.5">v0.1.0 — Phase 1</p>
+      <aside
+        className={clsx(
+          'bg-dark-800 border-r border-dark-600 flex flex-col transition-all duration-200 shrink-0',
+          collapsed ? 'w-14' : 'w-56'
+        )}
+      >
+        {/* Logo + collapse toggle */}
+        <div className={clsx(
+          'border-b border-dark-600 flex items-center',
+          collapsed ? 'px-2 py-4 justify-center' : 'px-4 py-5 justify-between'
+        )}>
+          {!collapsed && (
+            <div>
+              <div className="flex items-center gap-2">
+                <Zap className="text-brand-500 shrink-0" size={22} />
+                <span className="font-bold text-white text-sm tracking-wide">AI Bot Trader</span>
+              </div>
+              <p className="text-xs text-gray-500 mt-0.5">v0.1.0 — Phase 1</p>
+            </div>
+          )}
+          {collapsed && <Zap className="text-brand-500" size={22} />}
+          <button
+            onClick={toggleCollapsed}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            className={clsx(
+              'rounded-lg p-1.5 text-gray-500 hover:text-gray-200 hover:bg-dark-700 transition-all',
+              collapsed ? 'mt-4' : ''
+            )}
+          >
+            {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+          </button>
         </div>
 
         {/* Nav */}
@@ -45,28 +81,34 @@ export default function App() {
               key={to}
               to={to}
               end={end}
+              title={collapsed ? label : undefined}
               className={({ isActive }) => clsx(
-                'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all',
+                'w-full flex items-center rounded-lg text-sm transition-all',
+                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2.5',
                 isActive
                   ? 'bg-brand-500/10 text-brand-500 font-medium'
                   : 'text-gray-400 hover:bg-dark-700 hover:text-gray-200'
               )}
             >
-              <Icon size={16} />
-              {label}
+              <Icon size={16} className="shrink-0" />
+              {!collapsed && label}
             </NavLink>
           ))}
         </nav>
 
         {/* Notification Bell */}
         <div className="px-2 pb-2">
-          <NotificationBell />
+          <NotificationBell collapsed={collapsed} />
         </div>
 
         {/* Emergency Stop */}
         <div className="px-2 pb-4">
           <button
-            className="w-full flex items-center gap-2 px-3 py-2.5 rounded-lg bg-red-900/30 text-red-400 hover:bg-red-900/50 hover:text-red-300 text-sm font-medium transition-all border border-red-900/50"
+            title="Emergency Stop"
+            className={clsx(
+              'w-full flex items-center rounded-lg bg-red-900/30 text-red-400 hover:bg-red-900/50 hover:text-red-300 text-sm font-medium transition-all border border-red-900/50',
+              collapsed ? 'justify-center py-2.5' : 'gap-2 px-3 py-2.5'
+            )}
             onClick={() => {
               toast.custom((t) => (
                 <div className="flex flex-col gap-3 p-4 bg-dark-800 border border-red-900/50 rounded-xl text-sm shadow-xl">
@@ -91,8 +133,8 @@ export default function App() {
               ), { duration: Infinity })
             }}
           >
-            <ShieldAlert size={16} />
-            Emergency Stop
+            <ShieldAlert size={16} className="shrink-0" />
+            {!collapsed && 'Emergency Stop'}
           </button>
         </div>
       </aside>

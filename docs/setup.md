@@ -297,6 +297,43 @@ Instructions for Nginx + Certbot SSL are in `nginx/README.md`.
 
 ---
 
+## Features Overview
+
+### Dashboard
+- Portfolio summary across all connected brokers (Binance, Alpaca, IBKR)
+- Recent signals and trade activity
+- Broker connection status — shows **Disconnected** if IB Gateway is offline or unreachable
+- Quick overview after signal runs have already completed
+
+### Forward Testing
+- **Automatic scheduling** — the backend scheduler fires each active strategy at its configured timeframe boundary (e.g., every 4h), completely independent of the browser. Runs happen whether or not you have the page open.
+- **Run Now** — triggers a one-shot signal evaluation immediately (fetches candles, runs strategy logic, saves signals). Completes in seconds, then the scheduler resumes as normal.
+- **Live Feed** — real-time WebSocket stream of `RUN STARTED`, `SIGNAL`, `RUN FINISHED`, and `TRADE` events. Only visible while the page is open.
+- **Status banner** — shows the currently executing strategy and trigger source (`manual` or `scheduler`), plus the next scheduled run time.
+- **Paper trades** — all BUY/SELL signals are recorded as paper trades with PnL tracking. No real money moves until you switch to live mode.
+
+> **Flow:** Wait on the Forward Testing page (or leave it running in background) → scheduler fires at each timeframe → signals appear in the live feed → paper trades are recorded automatically.
+
+### Backtesting
+- Run historical backtests with configurable symbol, timeframe, strategy, date range, and capital
+- Results panel shows full performance metrics (Sharpe ratio, max drawdown, win rate, etc.) with a quality grade
+- History table with column sorting and pagination (10 rows/page)
+- Click any history row to open a detail modal with all metrics and a CSV download option
+
+### Strategies
+- Create and edit strategies with configurable parameters
+- Each strategy tracks its own timeframe, symbols, and signal history
+
+### Notifications
+- Bell icon in the sidebar shows unread trade/signal alerts
+- Dropdown repositions automatically based on sidebar collapsed/expanded state
+
+### Navigation
+- Sidebar is collapsible — click `‹/›` to toggle. State is remembered across page reloads (stored in `localStorage`).
+- When collapsed, nav items show icons only with tooltips on hover
+
+---
+
 ## Troubleshooting
 
 ### Bot can't connect to IBKR

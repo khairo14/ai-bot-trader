@@ -38,11 +38,13 @@ async def _forward_test_scheduler():
     import math
     import time
     from api.routes.forward_test import (
-        timeframe_to_seconds, _run_one_strategy, is_market_open
+        timeframe_to_seconds, _run_one_strategy, is_market_open,
+        _get_exec_lock, _exec_state,
     )
     from db.database import AsyncSessionLocal
     from db.models import Strategy as StrategyModel
     from sqlalchemy import select
+    from datetime import datetime, timezone as _tz
 
     last_fired: dict = {}   # strategy_id → UTC epoch of last candle close we fired on
     CLOSE_BUFFER = 30       # seconds after candle close before we fire
@@ -90,6 +92,14 @@ async def _forward_test_scheduler():
                     continue  # last_fired intentionally NOT updated
 
                 # ── Fire! ──────────────────────────────────
+                lock = _get_exec_lock()
+                if lock.locked():
+                    logger.debug(
+                        f"[Scheduler] {strat.name} ({tf}) — "
+                        f"skipping, another run already in progress"
+                    )
+                    continue
+
                 from datetime import datetime, timezone
                 close_dt = datetime.fromtimestamp(
                     last_close, tz=timezone.utc
@@ -98,7 +108,33 @@ async def _forward_test_scheduler():
                     f"[Scheduler] {strat.name} ({tf}) — "
                     f"candle closed at {close_dt}, running now"
                 )
-                await _run_one_strategy(strat)
+                async with lock:
+                    _exec_state.update({
+                        "active": True,
+                        "strategy": strat.name,
+                        "trigger": "scheduler",
+                        "started_at": datetime.now(timezone.utc),
+                    })
+                    try:
+                        from api.websocket import manager as _ws_mgr
+                        await _ws_mgr.broadcast("run_started", {
+                            "trigger": "scheduler",
+                            "strategies": 1,
+                            "strategy": strat.name,
+                        })
+                        await _run_one_strategy(strat)
+                        await _ws_mgr.broadcast("run_finished", {
+                            "trigger": "scheduler",
+                            "strategies": 1,
+                            "strategy": strat.name,
+                        })
+                    finally:
+                        _exec_state.update({
+                            "active": False,
+                            "strategy": None,
+                            "trigger": None,
+                            "started_at": None,
+                        })
                 last_fired[strat.id] = last_close
 
         except Exception as exc:

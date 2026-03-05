@@ -48,9 +48,11 @@ function timeAgo(iso: string): string {
 interface Props {
   /** WebSocket data — parent passes WS messages down so the bell reacts instantly */
   wsMessage?: { type: string; data: unknown } | null
+  /** When true the sidebar is collapsed — render icon-only button */
+  collapsed?: boolean
 }
 
-export default function NotificationBell({ wsMessage }: Props) {
+export default function NotificationBell({ wsMessage, collapsed }: Props) {
   const [open, setOpen] = useState(false)
   const [notifications, setNotifications] = useState<Notif[]>([])
   const [unread, setUnread] = useState(0)
@@ -119,12 +121,17 @@ export default function NotificationBell({ wsMessage }: Props) {
       {/* Bell button */}
       <button
         onClick={() => { setOpen(o => !o); if (!open) fetchNotifications() }}
-        className="relative w-full flex items-center gap-2 px-3 py-2.5 rounded-lg text-gray-400 hover:bg-dark-700 hover:text-gray-200 text-sm transition-all"
+        title={collapsed ? 'Notifications' : undefined}
+        className={`relative w-full flex items-center rounded-lg text-gray-400 hover:bg-dark-700 hover:text-gray-200 text-sm transition-all ${
+          collapsed ? 'justify-center px-3 py-2.5' : 'gap-2 px-3 py-2.5'
+        }`}
       >
-        <Bell size={16} />
-        <span>Notifications</span>
+        <Bell size={16} className="shrink-0" />
+        {!collapsed && <span>Notifications</span>}
         {unread > 0 && (
-          <span className="ml-auto min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-brand-500 text-white text-[10px] font-bold px-1">
+          <span className={`min-w-[18px] h-[18px] flex items-center justify-center rounded-full bg-brand-500 text-white text-[10px] font-bold px-1 ${
+            collapsed ? 'absolute -top-1 -right-1' : 'ml-auto'
+          }`}>
             {unread > 99 ? '99+' : unread}
           </span>
         )}
@@ -132,7 +139,9 @@ export default function NotificationBell({ wsMessage }: Props) {
 
       {/* Dropdown */}
       {open && (
-        <div className="absolute bottom-full left-0 mb-2 w-80 bg-dark-800 border border-dark-600 rounded-xl shadow-2xl z-50 overflow-hidden">
+        <div className={`absolute w-80 bg-dark-800 border border-dark-600 rounded-xl shadow-2xl z-50 overflow-hidden ${
+          collapsed ? 'left-full ml-2 bottom-0' : 'bottom-full left-0 mb-2'
+        }`}>
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-dark-600">
             <span className="text-sm font-semibold text-white">Notifications</span>
