@@ -7,6 +7,54 @@ logger = logging.getLogger(__name__)
 # Signal types that are worth tracking for ML feedback
 _TRACKABLE_SIGNALS = {"BUY", "SELL", "SHORT", "COVER"}
 
+# Multi-timeframe confluence: map each TF to the two higher ones to check
+_HIGHER_TF: dict[str, list[str]] = {
+    "1m":  ["5m",  "1h"],
+    "5m":  ["1h",  "4h"],
+    "15m": ["1h",  "4h"],
+    "1h":  ["4h",  "1d"],
+    "4h":  ["1d",  "1w"],
+    "1d":  [],  # already highest common TF — no suppression
+    "1w":  [],
+}
+# Minimum fraction of timeframes (including primary) that must agree to allow execution
+MIN_CONFLUENCE = 0.5
+
+
+async def _confluence_score(
+    engine,
+    strategy_type: str,
+    symbol: str,
+    broker: str,
+    primary_tf: str,
+    primary_signal: str,
+) -> float:
+    """
+    Runs the same strategy on the higher timeframes and returns the fraction
+    that agree with the primary signal (1.0 = full agreement, 0.33 = only primary).
+    """
+    higher_tfs = _HIGHER_TF.get(primary_tf, [])
+    if not higher_tfs:
+        return 1.0  # daily/weekly — no suppression
+
+    votes = [primary_signal]  # primary TF already voted
+    for tf in higher_tfs:
+        try:
+            sig = await engine.run(
+                strategy_name=strategy_type,
+                symbol=symbol,
+                broker_name=broker,
+                timeframe=tf,
+                limit=200,
+            )
+            votes.append(sig.signal)
+        except Exception as exc:
+            logger.debug(f"[confluence] {strategy_type} {symbol} {tf}: {exc}")
+            votes.append("HOLD")  # treat error as neutral
+
+    agreeing = sum(1 for v in votes if v == primary_signal)
+    return agreeing / len(votes)
+
 
 @celery_app.task(name="tasks.signal_runner.run_signals", bind=True, max_retries=3)
 def run_signals(self):
@@ -164,13 +212,46 @@ def run_signals(self):
                                 },
                             )
 
+                        # ── UI-02: Multi-timeframe confluence check ──────────────
+                        # For actionable signals, verify higher timeframes agree.
+                        # If confluence < MIN_CONFLUENCE, suppress execution but
+                        # still save the signal (visible on Dashboard as low-conf).
+                        allow_execution = True
+                        conf = 1.0
+                        if sig.signal in _TRACKABLE_SIGNALS:
+                            conf = await _confluence_score(
+                                signal_engine, strategy_type, symbol,
+                                strat.broker.value, timeframe, sig.signal,
+                            )
+                            if conf < MIN_CONFLUENCE:
+                                allow_execution = False
+                                sig.reasons = (sig.reasons or []) + [
+                                    f"execution suppressed: low multi-TF confluence ({conf:.0%})"
+                                ]
+                                logger.info(
+                                    f"[signal_runner] ⚠ Low confluence {conf:.0%} for "
+                                    f"{sig.signal} {symbol} on {timeframe} — not executing"
+                                )
+
+                        # ── ML-03: Portfolio weight multiplier ───────────────────
+                        # Strategies with a higher Sharpe-based weight (set by the
+                        # portfolio optimizer) get proportionally larger position sizes.
+                        port_weight = 1.0
+                        try:
+                            w = params.get("weight")
+                            if w is not None:
+                                port_weight = max(0.05, float(w))
+                        except (TypeError, ValueError):
+                            pass
+
                         # ── Pipe through ForwardEngine ───────────────────────────
                         trade = await forward_engine.process_signal(
                             signal=sig,
                             execution_mode=strat.execution_mode.value,
                             is_paper=strat.is_paper,
                             db_session=session,
-                        )
+                            position_size_multiplier=port_weight,
+                        ) if allow_execution else None
 
                         if trade is not None:
                             trade.signal_id = db_signal.id

@@ -6,7 +6,7 @@ from loguru import logger
 
 from config import settings
 from db.database import init_db
-from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications, ml, charts, auth as auth_routes, regime, analytics, strategy_code
+from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications, ml, charts, auth as auth_routes, regime, analytics, strategy_code, confluence, portfolio_optimizer
 from api.websocket import ws_endpoint
 from core.auth import get_current_user
 
@@ -218,6 +218,8 @@ app.include_router(charts.router, prefix="/api/charts", tags=["Charts"], depende
 app.include_router(regime.router, prefix="/api/regime", tags=["Regime"], dependencies=_auth)
 app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"], dependencies=_auth)
 app.include_router(strategy_code.router, prefix="/api/strategy-code", tags=["StrategyCode"], dependencies=_auth)
+app.include_router(confluence.router, prefix="/api/confluence", tags=["Confluence"], dependencies=_auth)
+app.include_router(portfolio_optimizer.router, prefix="/api/portfolio-optimizer", tags=["PortfolioOptimizer"], dependencies=_auth)
 
 # WebSocket endpoint for real-time signal/trade broadcasts
 app.add_api_websocket_route("/ws", ws_endpoint)

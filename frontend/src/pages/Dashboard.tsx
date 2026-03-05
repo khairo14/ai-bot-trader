@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2 } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
@@ -82,6 +82,20 @@ interface RegimeInfo {
   score_adjustment: { long_delta: number; short_delta: number }
 }
 
+interface WeightEntry {
+  strategy_name: string
+  weight: number
+  symbol?: string
+  timeframe?: string
+}
+
+interface WeightsData {
+  weighted_strategies: WeightEntry[]
+  unweighted_strategies: WeightEntry[]
+  total_weight: number
+  optimized: boolean
+}
+
 const REGIME_STYLES: Record<string, { label: string; color: string; bg: string; border: string }> = {
   trending_up:    { label: 'Trending Up',    color: 'text-green-400',  bg: 'bg-green-900/20',  border: 'border-green-700/40' },
   trending_down:  { label: 'Trending Down',  color: 'text-red-400',    bg: 'bg-red-900/20',    border: 'border-red-700/40' },
@@ -100,22 +114,26 @@ export default function Dashboard() {
   const [actioning, setActioning] = useState<number | null>(null)
   const [mlStatus, setMlStatus] = useState<MLStatus | null>(null)
   const [regime, setRegime] = useState<RegimeInfo | null>(null)
+  const [portfolioWeights, setPortfolioWeights] = useState<WeightsData | null>(null)
+  const [optimizing, setOptimizing] = useState(false)
 
   const fetchAll = async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     // Fetch independently — a slow broker never blocks signals from loading
-    const [sigResult, portResult, pendingResult, mlResult, regimeResult] = await Promise.allSettled([
+    const [sigResult, portResult, pendingResult, mlResult, regimeResult, weightsResult] = await Promise.allSettled([
       axios.get('/api/signals/?limit=20'),
       axios.get('/api/portfolio/summary'),
       axios.get('/api/signals/pending'),
       axios.get('/api/ml/status'),
       axios.get('/api/regime?symbol=BTC%2FUSDT&timeframe=1h&broker=binance'),
+      axios.get('/api/portfolio-optimizer/weights'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
     if (pendingResult.status === 'fulfilled') setPendingSignals(pendingResult.value.data.signals || [])
     if (mlResult.status === 'fulfilled') setMlStatus(mlResult.value.data)
     if (regimeResult.status === 'fulfilled') setRegime(regimeResult.value.data)
+    if (weightsResult.status === 'fulfilled') setPortfolioWeights(weightsResult.value.data)
     setLoading(false)
     setRefreshing(false)
   }
@@ -334,6 +352,66 @@ export default function Dashboard() {
         {!mlStatus?.feedback_loop_active && (
           <p className="text-xs text-gray-600 mt-3">
             Outcomes are collected as the bot fires signals. The resolver runs nightly to measure win/loss. After the first batch resolves, win rate and model accuracy will appear here.
+          </p>
+        )}
+      </div>
+
+      {/* Portfolio Optimizer Weights (ML-03) */}
+      <div className="bg-dark-800 border border-dark-600 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Layers size={14} className="text-brand-400" />
+            <span className="text-sm font-semibold text-gray-300">Strategy Allocation</span>
+            {portfolioWeights?.optimized && (
+              <span className="text-xs bg-brand-500/15 text-brand-400 px-2 py-0.5 rounded-full">Sharpe-optimized</span>
+            )}
+          </div>
+          <button
+            disabled={optimizing}
+            onClick={async () => {
+              setOptimizing(true)
+              try {
+                await axios.post('/api/portfolio-optimizer/run')
+                toast.success('Portfolio weights updated')
+                const r = await axios.get('/api/portfolio-optimizer/weights')
+                setPortfolioWeights(r.data)
+              } catch (e: any) {
+                toast.error(e?.response?.data?.detail || 'Optimization failed')
+              }
+              setOptimizing(false)
+            }}
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white px-3 py-1.5 bg-dark-700 border border-dark-600 rounded-lg transition-colors disabled:opacity-50"
+          >
+            <RefreshCw size={11} className={optimizing ? 'animate-spin' : ''} />
+            {optimizing ? 'Optimizing…' : 'Optimize Now'}
+          </button>
+        </div>
+        {portfolioWeights && portfolioWeights.weighted_strategies.length > 0 ? (
+          <div className="space-y-2">
+            {portfolioWeights.weighted_strategies.map(s => {
+              const pct = Math.round(s.weight * 100)
+              return (
+                <div key={s.strategy_name} className="flex items-center gap-3">
+                  <span className="text-xs text-gray-400 w-44 truncate" title={s.strategy_name}>{s.strategy_name}</span>
+                  <div className="flex-1 h-1.5 bg-dark-700 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-brand-500 transition-all duration-700"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-mono text-gray-300 w-8 text-right">{pct}%</span>
+                </div>
+              )
+            })}
+            {portfolioWeights.unweighted_strategies.length > 0 && (
+              <p className="text-xs text-gray-600 pt-1">
+                {portfolioWeights.unweighted_strategies.length} strateg{portfolioWeights.unweighted_strategies.length > 1 ? 'ies' : 'y'} without enough history for optimization
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-gray-600">
+            No optimization data yet — click "Optimize Now" to compute Sharpe-weighted allocations from trade history.
           </p>
         )}
       </div>

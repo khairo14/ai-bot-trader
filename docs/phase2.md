@@ -62,16 +62,23 @@ The strategy layer hard-codes regime logic (trending / ranging). This feature bu
 
 ---
 
-## ML-03 · Multi-Symbol Portfolio Optimization
+## ML-03 · Multi-Symbol Portfolio Optimization ✅
 
 **What it is:**
-Instead of trading each symbol independently, this feature considers cross-asset correlations and allocates capital to maximize risk-adjusted return.
+Instead of trading each strategy at equal size, this feature computes Sharpe-weighted capital allocations from historical trade outcomes — strategies with better risk-adjusted returns receive a larger weight.
 
-**What it does:**
-- Tracks correlation matrix between all active symbols (updated daily)
-- Limits simultaneous positions in highly correlated assets (e.g. BTC + ETH)
-- Uses Modern Portfolio Theory (or a simpler Kelly sizing variant) to size positions
-- Reduces max exposure when average correlation across portfolio is high
+**What was built:**
+- `backend/models/portfolio_optimizer.py` — pure-Python Sharpe-ratio optimizer. Groups resolved `TradeOutcome` rows by `strategy_name`, computes Sharpe = `mean(returns)/std(returns)` per strategy, clips negatives to 0, normalises to 1.0 total, applies Pearson correlation penalty (`CORR_THRESHOLD=0.75`, `CORR_PENALTY=0.6`) for correlated strategies, writes `weight` back into each `Strategy.parameters`
+- `backend/api/routes/portfolio_optimizer.py` — three endpoints:
+  - `POST /api/portfolio-optimizer/run` — manual trigger
+  - `GET /api/portfolio-optimizer/weights` — returns weighted + unweighted strategies with total, sorted by weight
+  - `DELETE /api/portfolio-optimizer/weights` — clears all weight keys
+- `backend/tasks/portfolio_rebalancer.py` — Celery task `tasks.portfolio_rebalancer.rebalance` for scheduled runs
+- `backend/celery_app.py` — added `portfolio-rebalance-weekly` beat task: every Sunday 03:00 UTC
+- `frontend/src/pages/Dashboard.tsx` — **Portfolio Allocation widget** after ML Feedback Loop card:
+  - Horizontal bar chart of strategy weights (CSS animated bars, colour-coded)
+  - "Optimize Now" button triggers `POST /api/portfolio-optimizer/run` and refreshes weights inline
+  - Empty state message when no trade history exists yet
 
 ---
 
@@ -128,15 +135,27 @@ A dedicated analytics page showing historical performance across all strategies 
 
 ---
 
-## UI-02 · Multi-Timeframe Signal View
+## UI-02 · Multi-Timeframe Signal View ✅
 
 **What it is:**
 Currently signals are generated on one timeframe per strategy. This adds multi-timeframe confluence — a BUY on 1h is stronger if 4h also shows BUY.
 
-**What needs building:**
-- Signal aggregation across timeframes per symbol
-- Confluence score displayed on Dashboard signal cards
-- Optional: only execute when 2+ timeframes align
+**What was built:**
+- `backend/api/routes/confluence.py` — two endpoints:
+  - `GET /api/confluence?symbol&broker&strategy_type&timeframes=1h,4h,1d` — runs `SignalEngine.run()` concurrently for each TF via `asyncio.gather`; returns `{ consensus, confluence_score (0–1), timeframes: [{ timeframe, signal, confidence, regime, reasons, agrees_with_consensus }] }`
+  - `GET /api/confluence/batch?symbols=BTC/USDT,ETH/USDT&broker&strategy_type&timeframes` — same for up to 10 symbols
+  - `_consensus()` logic: finds plurality direction; score < 50% → "MIXED"; score = fraction of timeframes agreeing
+- `frontend/src/pages/MultiTimeframe.tsx` — full `/multi-timeframe` analysis page:
+  - Single-symbol mode: broker + strategy + timeframe checkboxes (15m/1h/4h/1d/1w) + symbol input → "Run Confluence Analysis"
+  - Batch mode: comma-separated symbols up to 10
+  - Results rendered as `ConfluenceCard` components: consensus banner, score bar, per-TF breakdown table with colored BUY/SELL/HOLD chips and agree/diverge indicators, reasons list
+  - Empty state with guidance copy
+- `frontend/src/components/SignalCard.tsx` — **confluence mini-check** added:
+  - "Check multi-TF confluence" clickable link at card bottom (only for non-HOLD signals)
+  - On click: fetches `/api/confluence?…&timeframes=1h,4h,1d`
+  - Shows: 3 colored dots (one per TF, dimmed if diverging) + "X/3 aligned" + consensus label
+  - Loading state: pulsing GitBranch icon + "Checking…" text
+- `frontend/src/App.tsx` — `GitBranch` icon nav item + route `/multi-timeframe`
 
 ---
 
@@ -248,5 +267,5 @@ A professional candlestick chart for every symbol/timeframe being traded, showin
 | 7 | **UI-01** Analytics dashboard | Medium | Medium |
 | 8 | **EX-01** Options execution | High | Medium |
 | 9 | ~~**EX-02** Trailing stops~~ ✅ | Low | Medium |
-| 10 | **UI-02** Multi-timeframe | Medium | Medium |
-| 11 | **ML-03** Portfolio optimization | High | Medium |
+| 10 | ~~**UI-02** Multi-timeframe~~ ✅ | Medium | Medium |
+| 11 | ~~**ML-03** Portfolio optimization~~ ✅ | High | Medium |

@@ -42,6 +42,11 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.ml_retrain.retrain_all",
         "schedule": crontab(hour=2, minute=0, day_of_week="sunday"),
     },
+    # Rebalance portfolio weights weekly (Sunday 03:00 UTC — after ML retrain)
+    "portfolio-rebalance-weekly": {
+        "task": "tasks.portfolio_rebalancer.rebalance",
+        "schedule": crontab(hour=3, minute=0, day_of_week="sunday"),
+    },
 }
 
 if __name__ == "__main__":

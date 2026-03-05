@@ -1,4 +1,5 @@
-import { TrendingUp, TrendingDown, Minus, Clock, AlertTriangle } from 'lucide-react'
+import { useState } from 'react'
+import { TrendingUp, TrendingDown, Minus, Clock, AlertTriangle, GitBranch } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 
@@ -29,9 +30,49 @@ const SIGNAL_CONFIG: Record<string, { color: string; bg: string; border: string;
   HOLD:  { color: 'text-gray-400',   bg: 'bg-dark-700',      border: 'border-dark-600',      Icon: Minus },
 }
 
+const TF_DOT_COLORS: Record<string, string> = {
+  BUY:   'bg-green-400',
+  SELL:  'bg-orange-400',
+  SHORT: 'bg-red-400',
+  COVER: 'bg-blue-400',
+  HOLD:  'bg-gray-600',
+  MIXED: 'bg-yellow-400',
+}
+
 export default function SignalCard({ signal }: Props) {
   const cfg = SIGNAL_CONFIG[signal.signal] ?? SIGNAL_CONFIG.HOLD
   const { Icon } = cfg
+
+  // Confluence mini-check (on demand, to avoid auto-firing N broker API calls)
+  const [confluenceLoading, setConfluenceLoading] = useState(false)
+  const [confluence, setConfluence] = useState<{ consensus: string; score: number; tfs: { timeframe: string; signal: string; agrees: boolean }[] } | null>(null)
+
+  const checkConfluence = async () => {
+    setConfluenceLoading(true)
+    try {
+      const r = await axios.get('/api/confluence', {
+        params: {
+          symbol: signal.symbol,
+          broker: signal.broker,
+          strategy_type: signal.strategy_name,
+          timeframes: '1h,4h,1d',
+        },
+      })
+      const data = r.data
+      setConfluence({
+        consensus: data.consensus,
+        score: data.confluence_score,
+        tfs: (data.timeframes || []).map((t: any) => ({
+          timeframe: t.timeframe,
+          signal: t.signal,
+          agrees: t.agrees_with_consensus,
+        })),
+      })
+    } catch {
+      toast.error('Confluence check failed')
+    }
+    setConfluenceLoading(false)
+  }
 
   const rr = signal.stop_loss && signal.take_profit && signal.entry_price
     ? Math.abs((signal.take_profit - signal.entry_price) / (signal.entry_price - signal.stop_loss))
@@ -148,6 +189,48 @@ export default function SignalCard({ signal }: Props) {
           >
             {isStale ? `Stale (${ageMin}m ago) — Run Now first` : 'Execute Signal'}
           </button>
+        </div>
+      )}
+
+      {/* Confluence mini-check */}
+      {signal.signal !== 'HOLD' && (
+        <div className="border-t border-dark-600 pt-3">
+          {confluence ? (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <GitBranch size={11} className="text-gray-500" />
+                {confluence.tfs.map(t => (
+                  <span
+                    key={t.timeframe}
+                    title={`${t.timeframe}: ${t.signal}`}
+                    className={`inline-block w-2.5 h-2.5 rounded-full ${TF_DOT_COLORS[t.signal] ?? 'bg-gray-600'} ${t.agrees ? 'opacity-100' : 'opacity-40'}`}
+                  />
+                ))}
+                <span className="text-xs text-gray-500 ml-1">
+                  {confluence.tfs.filter(t => t.agrees).length}/{confluence.tfs.length} aligned
+                </span>
+                <span className={`text-xs font-semibold ${TF_DOT_COLORS[confluence.consensus] ? '' : 'text-gray-400'} ${
+                  confluence.consensus === 'BUY' ? 'text-green-400' :
+                  confluence.consensus === 'SELL' || confluence.consensus === 'SHORT' ? 'text-red-400' :
+                  confluence.consensus === 'MIXED' ? 'text-yellow-400' : 'text-gray-400'
+                }`}>
+                  {confluence.consensus}
+                </span>
+              </div>
+              <button onClick={checkConfluence} className="text-[10px] text-gray-600 hover:text-gray-400 transition-colors">
+                refresh
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={checkConfluence}
+              disabled={confluenceLoading}
+              className="flex items-center gap-1.5 text-xs text-gray-600 hover:text-gray-400 transition-colors w-full"
+            >
+              <GitBranch size={11} className={confluenceLoading ? 'animate-pulse text-brand-400' : ''} />
+              {confluenceLoading ? 'Checking 1h · 4h · 1d…' : 'Check multi-TF confluence'}
+            </button>
+          )}
         </div>
       )}
     </div>

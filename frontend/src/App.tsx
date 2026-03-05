@@ -5,7 +5,7 @@ import toast from 'react-hot-toast'
 import {
   LayoutDashboard, FlaskConical, Play, Settings,
   Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight, BarChart2, LogOut,
-  TrendingUp, Code2
+  TrendingUp, Code2, GitBranch
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -19,6 +19,7 @@ import SettingsPage from './pages/Settings'
 import ChartPage from './pages/Chart'
 import Analytics from './pages/Analytics'
 import StrategyEditor from './pages/StrategyEditor'
+import MultiTimeframe from './pages/MultiTimeframe'
 import Login from './pages/Login'
 import { isAuthenticated, clearAuth, getUsername } from './lib/auth'
 
@@ -31,6 +32,7 @@ const navItems = [
   { to: '/chart', label: 'Chart', icon: BarChart2 },
   { to: '/analytics', label: 'Analytics', icon: TrendingUp },
   { to: '/strategy-editor', label: 'Strategy Editor', icon: Code2 },
+  { to: '/multi-timeframe', label: 'Multi-TF', icon: GitBranch },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
@@ -187,6 +189,7 @@ function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/strategy-editor" element={<StrategyEditor />} />
+          <Route path="/multi-timeframe" element={<MultiTimeframe />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>

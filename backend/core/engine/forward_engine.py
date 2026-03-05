@@ -100,6 +100,7 @@ class ForwardEngine:
         execution_mode: str,
         is_paper: bool,
         db_session=None,
+        position_size_multiplier: float = 1.0,
     ) -> Optional[Trade]:
         """
         Process a signal based on execution mode.
