@@ -4,7 +4,7 @@ import { Toaster } from 'react-hot-toast'
 import toast from 'react-hot-toast'
 import {
   LayoutDashboard, FlaskConical, Play, Settings,
-  Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight
+  Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight, BarChart2
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -15,6 +15,7 @@ import ForwardTest from './pages/ForwardTest'
 import Strategies from './pages/Strategies'
 import StrategyLibrary from './pages/StrategyLibrary'
 import SettingsPage from './pages/Settings'
+import ChartPage from './pages/Chart'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -22,6 +23,7 @@ const navItems = [
   { to: '/strategy-library', label: 'Library', icon: BookOpen },
   { to: '/backtest', label: 'Backtest', icon: FlaskConical },
   { to: '/forward-test', label: 'Forward Test', icon: Play },
+  { to: '/chart', label: 'Chart', icon: BarChart2 },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
@@ -147,6 +149,7 @@ export default function App() {
           <Route path="/strategy-library" element={<StrategyLibrary />} />
           <Route path="/backtest" element={<Backtest />} />
           <Route path="/forward-test" element={<ForwardTest />} />
+          <Route path="/chart" element={<ChartPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>

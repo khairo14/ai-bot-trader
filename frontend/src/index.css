@@ -2,6 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Hide lightweight-charts TradingView attribution ── */
+a[href*="tradingview"] {
+  display: none !important;
+}
+
 @layer base {
   body {
     @apply bg-dark-900 text-gray-100 font-sans;
