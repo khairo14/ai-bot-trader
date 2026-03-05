@@ -118,14 +118,17 @@ export default function ForwardTest() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [statusRes, tradesRes, pendingRes] = await Promise.all([
+      const [statusRes, tradesRes, pendingRes] = await Promise.allSettled([
         axios.get(`${API}/api/forward-test/status`),
         axios.get(`${API}/api/forward-test/trades?limit=50`),
         axios.get(`${API}/api/forward-test/pending-signals`),
       ])
-      setStatus(statusRes.data)
-      setTrades(tradesRes.data.trades ?? [])
-      setPendingSignals(pendingRes.data.pending_signals ?? [])
+      if (statusRes.status === 'fulfilled') setStatus(statusRes.value.data)
+      else console.error('ForwardTest status error:', statusRes.reason)
+      if (tradesRes.status === 'fulfilled') setTrades(tradesRes.value.data.trades ?? [])
+      else console.error('ForwardTest trades error:', tradesRes.reason)
+      if (pendingRes.status === 'fulfilled') setPendingSignals(pendingRes.value.data.pending_signals ?? [])
+      else console.error('ForwardTest pending-signals error:', pendingRes.reason)
       setLastUpdated(new Date())
     } catch (e) {
       console.error('ForwardTest fetch error:', e)
