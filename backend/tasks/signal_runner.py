@@ -250,9 +250,9 @@ def run_signals(self):
                             )
                             if conf < _min_conf:
                                 allow_execution = False
-                                sig.reasons = (sig.reasons or []) + [
-                                    f"execution suppressed: low multi-TF confluence ({conf:.0%})"
-                                ]
+                                _note = f"execution suppressed: low multi-TF confluence ({conf:.0%})"
+                                sig.reasons = (sig.reasons or []) + [_note]
+                                db_signal.reasons = sig.reasons  # sync to already-flushed DB record
                                 logger.info(
                                     f"[signal_runner] ⚠ Low confluence {conf:.0%} for "
                                     f"{sig.signal} {symbol} on {timeframe} — not executing"
