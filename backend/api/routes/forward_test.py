@@ -299,7 +299,7 @@ async def trigger_run(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Manually trigger the signal engine for all active paper strategies right now.
+    Manually trigger the signal engine for all active strategies right now.
     Runs in background so the request returns immediately.
     """
     if _exec_state["active"]:
@@ -313,21 +313,20 @@ async def trigger_run(
     strat_q = await db.execute(
         select(StrategyModel).where(
             StrategyModel.is_active == True,
-            StrategyModel.is_paper == True,
         )
     )
     active = strat_q.scalars().all()
     if not active:
         raise HTTPException(
             status_code=400,
-            detail="No active paper strategies. Activate a strategy in paper mode first.",
+            detail="No active strategies. Activate at least one strategy first.",
         )
 
     background_tasks.add_task(_run_signals_background)
     return {
         "status": "triggered",
         "strategies": len(active),
-        "message": f"Signal run triggered for {len(active)} paper strategie(s).",
+        "message": f"Signal run triggered for {len(active)} strateg{'y' if len(active)==1 else 'ies'}.",
     }
 
 
@@ -459,7 +458,7 @@ async def _run_one_strategy(strat) -> None:
             trade = await forward_engine.process_signal(
                 signal=sig,
                 execution_mode=strat.execution_mode.value,
-                is_paper=True,
+                is_paper=strat.is_paper,
                 db_session=session,
                 position_size_multiplier=port_weight,
             ) if allow_execution else None
@@ -489,7 +488,7 @@ async def _run_one_strategy(strat) -> None:
                 "entry_price": trade.entry_price,
                 "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
                 "strategy_name": trade.strategy_name,
-                "is_paper": True,
+                "is_paper": strat.is_paper,
             })
 
         logger.info(
@@ -526,7 +525,6 @@ async def _run_signals_background():
                 strat_q = await session.execute(
                     sa_select(StrategyModel).where(
                         StrategyModel.is_active == True,
-                        StrategyModel.is_paper == True,
                     )
                 )
                 strategies = strat_q.scalars().all()
@@ -592,4 +590,144 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
         "status": "emergency_stop_executed",
         "closed_trades": len(open_trades),
         "message": f"Closed {len(open_trades)} open paper trade(s) and deactivated all paper strategies.",
+    }
+
+
+@router.get("/pending-signals")
+async def get_pending_signals(db: AsyncSession = Depends(get_db)):
+    """
+    Return unacted, non-HOLD signals from active suggestion / semi-auto strategies
+    created in the last 6 hours.  These are the signals awaiting manual execution.
+    """
+    from datetime import timedelta
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=6)
+
+    # Active strategies in suggestion or semi-auto mode
+    strat_q = await db.execute(
+        select(StrategyModel).where(
+            StrategyModel.is_active == True,
+            StrategyModel.execution_mode.in_(["suggestion", "semi-auto", "SUGGESTION", "SEMI_AUTO"]),
+        )
+    )
+    active_strats = {s.name: s for s in strat_q.scalars().all()}
+    if not active_strats:
+        return {"pending_signals": []}
+
+    sig_q = await db.execute(
+        select(SignalModel).where(
+            SignalModel.acted_on == False,
+            SignalModel.dismissed == False,
+            SignalModel.signal != SignalType.HOLD,
+            SignalModel.strategy_name.in_(list(active_strats.keys())),
+            SignalModel.created_at >= since,
+        ).order_by(desc(SignalModel.created_at))
+    )
+    signals = sig_q.scalars().all()
+
+    result = []
+    for s in signals:
+        strat = active_strats.get(s.strategy_name)
+        result.append({
+            "id": s.id,
+            "symbol": s.symbol,
+            "signal": s.signal.value if hasattr(s.signal, "value") else s.signal,
+            "entry_price": s.entry_price,
+            "stop_loss": s.stop_loss,
+            "take_profit": s.take_profit,
+            "confidence": s.confidence,
+            "timeframe": s.timeframe,
+            "strategy_name": s.strategy_name,
+            "regime": s.regime,
+            "execution_mode": strat.execution_mode.value if strat and hasattr(strat.execution_mode, "value") else (strat.execution_mode if strat else None),
+            "is_paper": strat.is_paper if strat else True,
+            "reasons": s.reasons or [],
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        })
+    return {"pending_signals": result}
+
+
+@router.post("/execute-signal/{signal_id}")
+async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Manually execute a pending signal (suggestion or semi-auto mode).
+    Forces full-auto execution regardless of the strategy's execution_mode setting.
+    Called when the user clicks 'Execute' / 'Confirm' on the pending signal panel.
+    """
+    from core.strategies.base import Signal as SignalDataclass
+    from core.engine.forward_engine import ForwardEngine
+    from api.websocket import manager
+
+    # Fetch signal
+    sig_q = await db.execute(select(SignalModel).where(SignalModel.id == signal_id))
+    db_signal = sig_q.scalar_one_or_none()
+    if not db_signal:
+        raise HTTPException(status_code=404, detail="Signal not found.")
+    if db_signal.acted_on:
+        raise HTTPException(status_code=409, detail="Signal already executed.")
+    if db_signal.signal == SignalType.HOLD:
+        raise HTTPException(status_code=400, detail="Cannot execute a HOLD signal.")
+
+    # Find strategy to know is_paper
+    strat_q = await db.execute(
+        select(StrategyModel).where(
+            StrategyModel.name == db_signal.strategy_name,
+            StrategyModel.is_active == True,
+        )
+    )
+    strat = strat_q.scalar_one_or_none()
+    is_paper = strat.is_paper if strat else True
+
+    # Reconstruct Signal dataclass from DB record
+    sig = SignalDataclass(
+        symbol=db_signal.symbol,
+        signal=db_signal.signal.value if hasattr(db_signal.signal, "value") else db_signal.signal,
+        entry_price=db_signal.entry_price,
+        stop_loss=db_signal.stop_loss,
+        take_profit=db_signal.take_profit,
+        confidence=db_signal.confidence or 0.0,
+        timeframe=db_signal.timeframe,
+        strategy_name=db_signal.strategy_name,
+        asset_class=db_signal.asset_class.value if hasattr(db_signal.asset_class, "value") else db_signal.asset_class,
+        broker=db_signal.broker.value if hasattr(db_signal.broker, "value") else db_signal.broker,
+        regime=db_signal.regime,
+        reasons=db_signal.reasons or [],
+    )
+
+    # Force full-auto execution
+    engine = ForwardEngine()
+    await engine.initialize(db)
+    trade = await engine.process_signal(
+        signal=sig,
+        execution_mode="full-auto",
+        is_paper=is_paper,
+        db_session=db,
+    )
+
+    if trade is None:
+        raise HTTPException(status_code=400, detail="Trade rejected by risk manager (position limits, daily loss cap, or insufficient balance).")
+
+    # Mark signal acted on
+    db_signal.acted_on = True
+    await db.commit()
+
+    # Broadcast
+    await manager.broadcast("trade", {
+        "symbol": trade.symbol,
+        "side": trade.side,
+        "quantity": trade.quantity,
+        "entry_price": trade.entry_price,
+        "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
+        "strategy_name": trade.strategy_name,
+        "is_paper": is_paper,
+        "triggered_by": "manual_execute",
+    })
+
+    return {
+        "status": "executed",
+        "trade_id": trade.id,
+        "symbol": trade.symbol,
+        "side": trade.side,
+        "quantity": trade.quantity,
+        "entry_price": trade.entry_price,
+        "is_paper": is_paper,
     }

@@ -59,7 +59,6 @@ async def _forward_test_scheduler():
                 q = await session.execute(
                     select(StrategyModel).where(
                         StrategyModel.is_active == True,
-                        StrategyModel.is_paper == True,
                     )
                 )
                 strategies = q.scalars().all()

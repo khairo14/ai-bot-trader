@@ -57,6 +57,23 @@ interface WsMessage {
   data: Record<string, unknown>
 }
 
+interface PendingSignal {
+  id: number
+  symbol: string
+  signal: string
+  entry_price: number
+  stop_loss: number | null
+  take_profit: number | null
+  confidence: number | null
+  timeframe: string
+  strategy_name: string
+  regime: string | null
+  execution_mode: string
+  is_paper: boolean
+  reasons: string[]
+  created_at: string | null
+}
+
 const fmtUSD = (n: number) =>
   n >= 0 ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `-$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
@@ -66,6 +83,8 @@ const fmtPct = (n: number | null) =>
 export default function ForwardTest() {
   const [status, setStatus] = useState<ForwardStatus | null>(null)
   const [trades, setTrades] = useState<PaperTrade[]>([])
+  const [pendingSignals, setPendingSignals] = useState<PendingSignal[]>([])
+  const [executingSignal, setExecutingSignal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [runLoading, setRunLoading] = useState(false)
   const [stopLoading, setStopLoading] = useState(false)
@@ -99,12 +118,14 @@ export default function ForwardTest() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [statusRes, tradesRes] = await Promise.all([
+      const [statusRes, tradesRes, pendingRes] = await Promise.all([
         axios.get(`${API}/api/forward-test/status`),
         axios.get(`${API}/api/forward-test/trades?limit=50`),
+        axios.get(`${API}/api/forward-test/pending-signals`),
       ])
       setStatus(statusRes.data)
       setTrades(tradesRes.data.trades ?? [])
+      setPendingSignals(pendingRes.data.pending_signals ?? [])
       setLastUpdated(new Date())
     } catch (e) {
       console.error('ForwardTest fetch error:', e)
@@ -184,6 +205,19 @@ export default function ForwardTest() {
         </div>
       </div>
     ), { duration: Infinity })
+  }
+
+  const executeSignal = async (sig: PendingSignal) => {
+    setExecutingSignal(sig.id)
+    try {
+      const res = await axios.post(`${API}/api/forward-test/execute-signal/${sig.id}`)
+      toast.success(`${res.data.side.toUpperCase()} ${res.data.symbol} — trade placed${sig.is_paper ? ' (paper)' : ' (LIVE)'}!`)
+      await fetchAll()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Execution failed')
+    } finally {
+      setExecutingSignal(null)
+    }
   }
 
   const isRunning = status?.is_running ?? false
@@ -310,6 +344,71 @@ export default function ForwardTest() {
           </div>
         ))}
       </div>
+
+      {/* Pending Signals — suggestion / semi-auto modes */}
+      {pendingSignals.length > 0 && (
+        <div className="bg-dark-800 border border-yellow-900/40 rounded-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-dark-600 flex items-center gap-2">
+            <div className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
+            <span className="text-sm font-medium text-white">Pending Actions</span>
+            <span className="text-xs text-gray-500 ml-1">{pendingSignals.length} signal{pendingSignals.length !== 1 ? 's' : ''} awaiting your decision</span>
+          </div>
+          <div className="divide-y divide-dark-700">
+            {pendingSignals.map((sig) => (
+              <div key={sig.id} className="px-4 py-3 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                    sig.signal === 'BUY' || sig.signal === 'COVER' ? 'bg-green-500/15 text-green-400' : 'bg-red-500/15 text-red-400'
+                  }`}>{sig.signal}</span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-white">{sig.symbol}</p>
+                    <p className="text-xs text-gray-500 truncate">{sig.strategy_name} · {sig.timeframe}{sig.regime ? ` · ${sig.regime}` : ''}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-6 text-xs text-gray-400 shrink-0">
+                  <div className="text-right">
+                    <p className="text-white font-medium">${sig.entry_price.toFixed(2)}</p>
+                    <p className="text-gray-600">entry</p>
+                  </div>
+                  {sig.stop_loss && (
+                    <div className="text-right">
+                      <p className="text-red-400">${sig.stop_loss.toFixed(2)}</p>
+                      <p className="text-gray-600">stop</p>
+                    </div>
+                  )}
+                  {sig.take_profit && (
+                    <div className="text-right">
+                      <p className="text-green-400">${sig.take_profit.toFixed(2)}</p>
+                      <p className="text-gray-600">target</p>
+                    </div>
+                  )}
+                  {sig.confidence != null && (
+                    <div className="text-right">
+                      <p className="text-brand-400">{(sig.confidence * 100).toFixed(0)}%</p>
+                      <p className="text-gray-600">conf</p>
+                    </div>
+                  )}
+                  <span className={`text-xs px-1.5 py-0.5 rounded border ${
+                    sig.is_paper
+                      ? 'bg-blue-900/20 text-blue-400 border-blue-900/40'
+                      : 'bg-yellow-900/20 text-yellow-400 border-yellow-900/40'
+                  }`}>{sig.is_paper ? 'Paper' : 'LIVE'}</span>
+                  <button
+                    onClick={() => executeSignal(sig)}
+                    disabled={executingSignal === sig.id}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-400 text-white text-xs font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {executingSignal === sig.id
+                      ? <><Loader2 size={12} className="animate-spin" /> Executing…</>
+                      : <><Play size={12} /> {sig.execution_mode === 'semi-auto' || sig.execution_mode === 'SEMI_AUTO' ? 'Confirm' : 'Execute'}</>
+                    }
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Trades table + WS events */}
       <div className="grid grid-cols-3 gap-4">
