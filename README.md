@@ -16,11 +16,18 @@ A production-grade algorithmic trading system with AI-assisted entry/exit signal
 | Alpaca connection | ✅ Paper | $100,000 paper balance |
 | IBKR connection | ✅ Paper | $1,000,000 paper balance via IB Gateway |
 | Dashboard portfolio | ✅ Live data | All 3 broker cards from API |
-| Signal pipeline | ✅ Complete | Celery task → SignalEngine → ForwardEngine → DB |
+| Signal pipeline | ✅ Complete | SignalEngine → ForwardEngine → DB |
+| Auto-scheduler | ✅ Complete | Per-strategy, wall-clock candle-close aligned |
+| Market hours gate | ✅ Complete | Stocks: NYSE 09:30–16:00 ET only; Crypto: 24/7 |
+| NYSE holiday calendar | ✅ Complete | All US market holidays via `pandas_market_calendars` |
+| Order rejection safety | ✅ Complete | REJECTED trade record saved on broker error; no crash |
 | Forward Test page | ✅ Complete | Live paper trading, approve/reject panel |
-| Backtest page | ✅ Complete | Full walk-forward + metrics + CSV export |
+| Backtest page | ✅ Complete | Full walk-forward + paginated OHLCV + metrics + CSV export |
 | WebSocket broadcasts | ✅ Complete | `signal` + `trade` events pushed to dashboard |
 | Semi-auto execution | ✅ Complete | Pending Approvals banner on Dashboard |
+| Signal dismissal | ✅ Complete | "Clear Expired" clears HOLDs + stale signals from UI |
+| Strategy editing | ✅ Complete | Pencil icon opens edit modal on Strategies page |
+| Staleness protection | ✅ Complete | SignalCard blocks execution if signal > 5 min old |
 | ML model training | ✅ Complete | XGBoost trainer — yfinance OHLCV → AUC-gated model |
 | ML inference | ✅ Complete | MLScorer wired into HybridStrategy (60/40 blend) |
 | Strategy library | ✅ Complete | 3 strategies: hybrid, momentum_breakout, mean_reversion_bb |
@@ -179,6 +186,15 @@ RISK_PER_TRADE_PCT=2.0          # 2% of account per trade
 MAX_OPEN_POSITIONS=5            # max concurrent positions
 DAILY_CIRCUIT_BREAKER_PCT=5.0   # halt trading after 5% daily loss
 MIN_RR_RATIO=1.5                # minimum reward:risk ratio
+```
+
+## Auto-Scheduler (`.env`)
+
+```
+FORWARD_TEST_INTERVAL_MINUTES=1   # 0 = disabled (manual "Run Now" only)
+                                  # any non-zero = enabled
+                                  # actual interval per strategy = its timeframe
+                                  # (1h strategy fires every hour at candle close)
 ```
 
 ---

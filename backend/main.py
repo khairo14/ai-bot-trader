@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,102 @@ from config import settings
 from db.database import init_db
 from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications
 from api.websocket import ws_endpoint
+
+
+async def _forward_test_scheduler():
+    """
+    Wall-clock-aligned, market-hours-aware scheduler.
+
+    Tick: every 60 s.
+    Fire rule (per strategy):
+      1. UTC candle close has passed + 30 s buffer
+      2. We haven't already fired for this candle close
+      3. The broker's market is currently open
+         - Crypto (Binance): always open (24/7)
+         - Stocks (Alpaca) / Options (IBKR): NYSE 09:30–16:00 ET, Mon–Fri
+
+    Stock intraday (e.g. 1h):
+      Fires at each hour close during the session — 09:30:30, 10:00:30 … 15:00:30 ET.
+
+    Stock daily (1d):
+      The UTC midnight candle-close epoch (00:00 UTC) passes while the market is
+      closed.  `last_fired` is NOT updated when the market is closed, so the
+      strategy fires at the very first scheduler tick after market opens
+      (09:30 ET) on the next trading day — using yesterday’s fully closed
+      daily candle, which is exactly what backtests use.
+
+    Crypto:
+      Fires at every UTC candle-close boundary (1h → 01:00, 02:00 … UTC).
+    """
+    import math
+    import time
+    from api.routes.forward_test import (
+        timeframe_to_seconds, _run_one_strategy, is_market_open
+    )
+    from db.database import AsyncSessionLocal
+    from db.models import Strategy as StrategyModel
+    from sqlalchemy import select
+
+    last_fired: dict = {}   # strategy_id → UTC epoch of last candle close we fired on
+    CLOSE_BUFFER = 30       # seconds after candle close before we fire
+
+    logger.info("[Scheduler] Wall-clock-aligned, market-hours-aware scheduler started.")
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            async with AsyncSessionLocal() as session:
+                q = await session.execute(
+                    select(StrategyModel).where(
+                        StrategyModel.is_active == True,
+                        StrategyModel.is_paper == True,
+                    )
+                )
+                strategies = q.scalars().all()
+
+            now = time.time()
+            for strat in strategies:
+                params       = strat.parameters or {}
+                tf           = params.get("timeframe", "1h")
+                interval     = timeframe_to_seconds(tf)
+                broker_name  = strat.broker.value
+
+                # Last closed candle boundary (UTC epoch)
+                last_close   = math.floor(now / interval) * interval
+                already_fired = last_fired.get(strat.id, 0)
+
+                if not (now >= last_close + CLOSE_BUFFER and already_fired < last_close):
+                    continue  # candle hasn't closed yet, or already handled
+
+                # ── Market-hours gate ─────────────────────────────
+                # Do NOT mark last_fired if market is closed — we want to retry
+                # each minute until the session opens (covers overnight + weekends).
+                if not is_market_open(broker_name):
+                    from datetime import datetime, timezone
+                    now_et_str = datetime.now(
+                        tz=__import__('zoneinfo').ZoneInfo('America/New_York')
+                    ).strftime("%a %H:%M ET")
+                    logger.debug(
+                        f"[Scheduler] {strat.name} ({tf}) — "
+                        f"market closed ({now_et_str}), will retry when open"
+                    )
+                    continue  # last_fired intentionally NOT updated
+
+                # ── Fire! ──────────────────────────────────
+                from datetime import datetime, timezone
+                close_dt = datetime.fromtimestamp(
+                    last_close, tz=timezone.utc
+                ).strftime("%H:%M UTC")
+                logger.info(
+                    f"[Scheduler] {strat.name} ({tf}) — "
+                    f"candle closed at {close_dt}, running now"
+                )
+                await _run_one_strategy(strat)
+                last_fired[strat.id] = last_close
+
+        except Exception as exc:
+            logger.error(f"[Scheduler] Tick error: {exc}", exc_info=True)
+            logger.error(f"[Scheduler] Tick error: {exc}", exc_info=True)
 
 
 @asynccontextmanager
@@ -30,7 +127,22 @@ async def lifespan(app: FastAPI):
 
     await init_db()
     logger.info("Database initialized.")
+
+    # Start auto-scheduler (skip if interval set to 0 — manual-only mode)
+    scheduler_task = None
+    if settings.forward_test_interval_minutes > 0:
+        scheduler_task = asyncio.create_task(_forward_test_scheduler())
+    else:
+        logger.info("[Scheduler] Auto forward-test disabled (FORWARD_TEST_INTERVAL_MINUTES=0).")
+
     yield
+
+    if scheduler_task:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
     logger.info("Shutting down AI Bot Trader backend...")
 
 

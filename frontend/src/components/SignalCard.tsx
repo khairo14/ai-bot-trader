@@ -1,4 +1,4 @@
-import { TrendingUp, TrendingDown, Minus, List, Clock } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Clock, AlertTriangle } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 
@@ -41,9 +41,18 @@ export default function SignalCard({ signal }: Props) {
     try { return JSON.parse(signal.reasons || '[]') } catch { return signal.reasons ? [signal.reasons] : [] }
   })()
 
+  // Staleness: warn if signal is older than 5 minutes (price levels are no longer reliable)
+  const ageMs = Date.now() - new Date(signal.created_at).getTime()
+  const ageMin = Math.floor(ageMs / 60000)
+  const isStale = ageMs > 5 * 60 * 1000
+
   const executeSignal = async () => {
+    if (isStale) {
+      toast.error(`Signal is ${ageMin}m old — price levels may be invalid. Run Now to get a fresh signal.`)
+      return
+    }
     try {
-      await axios.post('/api/signals/execute', { signal_id: signal.id })
+      await axios.post(`/api/signals/${signal.id}/approve`)
       toast.success(`Order submitted for ${signal.symbol}`)
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || 'Execution failed')
@@ -122,12 +131,24 @@ export default function SignalCard({ signal }: Props) {
 
       {/* Execute Button (shown only for non-HOLD signals) */}
       {signal.signal !== 'HOLD' && (
-        <button
-          onClick={executeSignal}
-          className={`w-full py-1.5 text-xs font-semibold rounded-lg transition-all ${cfg.bg} ${cfg.color} border ${cfg.border} hover:opacity-80`}
-        >
-          Execute Signal
-        </button>
+        <div className="space-y-1.5">
+          {isStale && (
+            <div className="flex items-center gap-1.5 text-xs text-yellow-400">
+              <AlertTriangle size={11} />
+              <span>Signal is {ageMin}m old — price levels may be stale. Click "Run Now" for a fresh signal.</span>
+            </div>
+          )}
+          <button
+            onClick={executeSignal}
+            className={`w-full py-1.5 text-xs font-semibold rounded-lg transition-all border ${
+              isStale
+                ? 'bg-dark-700 text-gray-500 border-dark-500 cursor-not-allowed opacity-50'
+                : `${cfg.bg} ${cfg.color} ${cfg.border} hover:opacity-80`
+            }`}
+          >
+            {isStale ? `Stale (${ageMin}m ago) — Run Now first` : 'Execute Signal'}
+          </button>
+        </div>
       )}
     </div>
   )

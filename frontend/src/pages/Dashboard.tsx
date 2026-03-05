@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2 } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
@@ -21,6 +21,7 @@ interface Signal {
   execution_mode: string | null
   reasons: string
   acted_on: boolean
+  dismissed: boolean
   created_at: string
 }
 
@@ -288,7 +289,28 @@ export default function Dashboard() {
 
       {/* Recent Signals */}
       <div>
-        <h2 className="text-sm font-semibold text-gray-300 mb-3">Recent Signals</h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-gray-300">Recent Signals</h2>
+          {signals.length > 0 && (
+            <button
+              onClick={async () => {
+                try {
+                  const res = await axios.post('/api/signals/dismiss-expired')
+                  toast.success(res.data.message || 'Expired signals cleared')
+                  const updated = await axios.get('/api/signals/')
+                  setSignals(updated.data.signals || [])
+                } catch {
+                  toast.error('Failed to clear expired signals')
+                }
+              }}
+              className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-red-400 transition-colors"
+              title="Clear HOLD signals and signals older than 24 h"
+            >
+              <Trash2 size={13} />
+              Clear Expired
+            </button>
+          )}
+        </div>
         {loading ? (
           <SkeletonList rows={3} />
         ) : signals.length === 0 ? (

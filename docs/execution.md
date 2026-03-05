@@ -13,8 +13,12 @@ The execution engine is responsible for translating signals into actual orders (
 | Paper fill simulation | ✅ Complete | Uses real-time prices + slippage |
 | Execution mode logic | ✅ Complete | suggestion / semi-auto / full-auto |
 | Emergency stop | ✅ Complete | Queries DB, closes all open trades, fires email alert |
-| Celery signal task | ✅ Complete | `signal_runner.py` loops active strategies, pipes to ForwardEngine |
-| Celery schedule | ✅ Complete | Beat schedule in Docker + `start-dev.ps1` for local dev |
+| Auto-scheduler | ✅ Complete | `main.py` — wall-clock aligned, per-strategy timeframe |
+| Market hours gate | ✅ Complete | NYSE 09:30–16:00 ET (stocks); 24/7 (crypto) |
+| NYSE holiday calendar | ✅ Complete | All 10 US market holidays via `pandas_market_calendars` |
+| Order rejection safety | ✅ Complete | REJECTED status + notes saved; never crashes on broker error |
+| Signal dismissal | ✅ Complete | "Clear Expired" hides HOLDs + stale signals from Recent Signals |
+| Signal staleness guard | ✅ Complete | SignalCard blocks execution if signal > 5 min old |
 | WebSocket signal push | ✅ Complete | `signal` + `trade` events broadcast after every fill |
 | Semi-auto approve/reject | ✅ Complete | `POST /api/signals/{id}/approve` + `/reject` + Dashboard panel |
 | ML inference | ✅ Complete | `MLScorer` blends into HybridStrategy (60% rule / 40% ML) |
@@ -130,6 +134,142 @@ Paper trading mode uses the same execution flow as live trading, but instead of 
 - Initial paper balance configured in `.env` (default: $10,000)
 - Paper positions and P&L tracked separately from any live account
 - Can run paper and live simultaneously on different strategies
+
+---
+
+## Auto-Scheduler
+
+The forward test scheduler runs automatically in the background without any user interaction. It fires each strategy at the correct candle-close boundary for its configured timeframe.
+
+### How It Works
+
+```
+Every 60 seconds:
+  For each active paper strategy:
+    1. Calculate last candle-close epoch:
+          last_close = floor(now / interval) * interval
+    2. Wait 30 s buffer after close (ensures exchange has finalised candle)
+    3. Check: already fired for this candle close? → skip
+    4. Check: is market open for this broker?
+         Crypto  → always open
+         Stocks  → NYSE session only (see Market Hours below)
+         If closed → skip, do NOT update last_fired
+                     (retries every minute until market opens)
+    5. Fire: _run_one_strategy(strat)
+    6. Mark last_fired[strategy_id] = last_close
+```
+
+### Timing examples
+
+| Strategy timeframe | Fires at |
+|---|---|
+| `1m` | Every minute (00:30, 01:30 … UTC) |
+| `1h` | 00:00:30, 01:00:30, 02:00:30 … UTC |
+| `4h` | 00:00:30, 04:00:30, 08:00:30 … UTC |
+| `1d` | First scheduler tick ≥ 30 s after UTC midnight |
+
+> **Daily stock strategies:** `1d` candle closes at UTC midnight while the NYSE is closed. The scheduler keeps retrying until 09:30 ET the next trading day, then fires once using the previous day's fully-closed candle — exactly the same data a backtest would use.
+
+### Configuration (`.env`)
+
+```
+FORWARD_TEST_INTERVAL_MINUTES=1   # 0 = disabled; any non-zero = enabled
+                                  # actual interval is derived from strategy timeframe
+```
+
+---
+
+## Market Hours & Holiday Calendar
+
+Stock/options brokers (Alpaca, IBKR) are gated to NYSE regular session hours only. Crypto (Binance) trades 24/7.
+
+### Stock Market Gate
+
+| Condition | Behaviour |
+|---|---|
+| NYSE session 09:30–16:00 ET, Mon–Fri, non-holiday | ✅ Signal fires normally |
+| Before 09:30 ET | ⏳ Signal held; retries every minute |
+| After 16:00 ET | ⏳ Signal held until next session |
+| Weekend | ⏳ Signal held until Monday morning |
+| US market holiday | ⏳ Signal held until next trading day |
+
+### Holidays Blocked
+
+All NYSE market holidays are blocked automatically via `pandas_market_calendars`:
+
+- New Year's Day
+- Martin Luther King Jr. Day
+- Presidents' Day
+- Good Friday
+- Memorial Day
+- Juneteenth National Independence Day
+- Independence Day (July 4th)
+- Labor Day
+- Thanksgiving Day
+- Christmas Day
+
+DST (daylight saving time) is handled automatically using `ZoneInfo("America/New_York")`.
+
+---
+
+## Order Rejection Handling
+
+When a live broker rejects an order or the exchange halts trading, the execution engine handles the failure gracefully — it never crashes the server.
+
+### Causes of Rejection
+
+- **NYSE circuit breakers:** L1 (7% drop), L2 (13%), L3 (20%) — entire market halted
+- **LULD halts:** Individual stock limits-up/limits-down pause
+- **Crypto maintenance windows:** Exchange scheduled downtime
+- **Insufficient margin:** Account balance too low after market move
+- **Invalid symbol:** Symbol delisted or renamed
+
+### What Happens
+
+```
+live broker.place_order()
+  ↓
+  Success → trade.status = OPEN, broker_order_id saved
+  ↓
+  Exception
+    → trade.status = REJECTED
+    → trade.broker_order_id = "rejected_{symbol}_{timestamp}"
+    → trade.notes = "Order rejected: {error message}"
+    → REJECTED trade record saved to DB for audit trail
+    → Returns None — no crash, no exception propagation
+    → Warning logged: cause, symbol, timestamp
+```
+
+All REJECTED trades are visible in the Forward Test → Trades table.
+
+---
+
+## Signal Dismissal
+
+The Recent Signals panel on the Dashboard is kept clean by dismissing signals that are no longer actionable. Dismissed signals are **hidden from the UI but retained in the database** for ML training.
+
+### "Clear Expired" Button
+
+Located in the Recent Signals header. When clicked:
+
+1. Dismisses all **HOLD signals** (never actionable, any age)
+2. Dismisses all **un-acted-on signals older than 24 hours**
+
+### API Endpoint
+
+```
+POST /api/signals/dismiss-expired?older_than_hours=24
+```
+
+Returns: `{"dismissed": N, "message": "N signal(s) cleared from Recent Signals."}`
+
+### Signal Staleness in SignalCard
+
+Every signal card checks its age against the current time:
+
+- Signal ≤ 5 minutes old → Execute button enabled
+- Signal > 5 minutes old → Yellow warning: "Signal is Xm old — price levels may be stale. Click Run Now for a fresh signal."
+- Execute button is visually disabled and blocked when stale
 
 ---
 

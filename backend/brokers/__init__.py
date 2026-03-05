@@ -33,9 +33,12 @@ def set_broker_mode(broker: str, mode: str) -> None:
     _BROKER_MODES[broker] = mode
 
 
-def get_broker(broker_name: str) -> AbstractBroker:
-    """Factory: instantiate the correct broker client, wiring in the current mode."""
+def get_broker(broker_name: str, force_paper: bool | None = None) -> AbstractBroker:
+    """Factory: instantiate the correct broker client, wiring in the current mode.
+    Pass force_paper=False to always get a live/data client (e.g. for backtesting)."""
     paper = _BROKER_MODES.get(broker_name, "paper") == "paper"
+    if force_paper is not None:
+        paper = force_paper
     factories = {
         "binance": lambda: BinanceClient(paper=paper),
         "alpaca":  lambda: AlpacaClient(paper=paper),

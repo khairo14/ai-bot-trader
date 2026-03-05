@@ -1,7 +1,19 @@
-import { useState } from 'react'
-import { FlaskConical, Play, TrendingUp, AlertTriangle, Download } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { FlaskConical, Play, AlertTriangle, Download, BookOpen, TrendingUp } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
+
+interface SavedStrategy {
+  id: number
+  name: string
+  broker: string
+  parameters: {
+    strategy_type?: string
+    symbol?: string
+    timeframe?: string
+    limit?: number
+  } | null
+}
 
 interface BacktestResult {
   strategy_name: string
@@ -28,12 +40,13 @@ const MetricRow = ({ label, value, positive }: { label: string, value: string, p
 )
 
 export default function Backtest() {
+  const [savedStrategies, setSavedStrategies] = useState<SavedStrategy[]>([])
   const [form, setForm] = useState({
     strategy_name: 'hybrid_macd_rsi',
-    symbol: 'BTC/USDT',
+    symbol: 'SOL/USDT',
     timeframe: '1h',
     start_date: '2024-01-01',
-    end_date: '2025-01-01',
+    end_date: '2026-01-01',
     initial_capital: 10000,
     commission_pct: 0.1,
     slippage_pct: 0.05,
@@ -42,18 +55,44 @@ export default function Backtest() {
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [backtestId, setBacktestId] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
+  const [errorDetail, setErrorDetail] = useState<string | null>(null)
+
+  // Load saved strategies from DB on mount
+  useEffect(() => {
+    axios.get('/api/strategies/').then(res => {
+      setSavedStrategies(res.data.strategies || [])
+    }).catch(() => {})
+  }, [])
+
+  // Auto-fill form when a saved strategy is selected
+  const loadFromSaved = (strategyId: string) => {
+    if (!strategyId) return
+    const s = savedStrategies.find(x => x.id === Number(strategyId))
+    if (!s) return
+    setForm(f => ({
+      ...f,
+      broker: s.broker,
+      strategy_name: s.parameters?.strategy_type || f.strategy_name,
+      symbol: s.parameters?.symbol || f.symbol,
+      timeframe: s.parameters?.timeframe || f.timeframe,
+    }))
+    toast.success(`Loaded "${s.name}"`)
+  }
 
   const runBacktest = async () => {
     setLoading(true)
     setResult(null)
     setBacktestId(null)
+    setErrorDetail(null)
     try {
       const res = await axios.post('/api/backtest/run', form)
       setResult(res.data.result)
       if (res.data.backtest_id) setBacktestId(res.data.backtest_id)
       toast.success('Backtest completed!')
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Backtest failed')
+      const detail = e?.response?.data?.detail || e?.message || 'Backtest failed'
+      setErrorDetail(typeof detail === 'string' ? detail : JSON.stringify(detail))
+      toast.error('Backtest failed — see error below')
     } finally {
       setLoading(false)
     }
@@ -71,10 +110,69 @@ export default function Backtest() {
         <div className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">
           <h2 className="text-sm font-semibold text-gray-300">Configuration</h2>
 
+          {/* Load from saved strategy */}
+          <div className="bg-dark-700 border border-dark-500 rounded-lg p-3 space-y-2">
+            <label className="text-xs text-brand-400 font-medium flex items-center gap-1.5">
+              <BookOpen size={12} /> Load from Saved Strategy
+            </label>
+            <select
+              defaultValue=""
+              onChange={e => loadFromSaved(e.target.value)}
+              className="w-full bg-dark-600 border border-dark-400 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+            >
+              <option value="" disabled>— select to auto-fill —</option>
+              {savedStrategies.map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.broker} · {s.parameters?.symbol ?? '?'} · {s.parameters?.timeframe ?? '?'})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Algorithm type */}
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Algorithm</label>
+            <select
+              value={form.strategy_name}
+              onChange={e => setForm(f => ({ ...f, strategy_name: e.target.value }))}
+              className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+            >
+              <option value="hybrid_macd_rsi">hybrid_macd_rsi</option>
+              <option value="momentum_breakout">momentum_breakout</option>
+              <option value="mean_reversion_bb">mean_reversion_bb</option>
+            </select>
+          </div>
+
+          {/* Broker */}
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Broker</label>
+            <select
+              value={form.broker}
+              onChange={e => setForm(f => ({ ...f, broker: e.target.value }))}
+              className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+            >
+              <option value="binance">binance</option>
+              <option value="alpaca">alpaca</option>
+              <option value="ibkr">ibkr</option>
+            </select>
+          </div>
+
+          {/* Timeframe */}
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Timeframe</label>
+            <select
+              value={form.timeframe}
+              onChange={e => setForm(f => ({ ...f, timeframe: e.target.value }))}
+              className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+            >
+              {['1m','5m','15m','30m','1h','2h','4h','6h','12h','1d'].map(tf => (
+                <option key={tf} value={tf}>{tf}</option>
+              ))}
+            </select>
+          </div>
+
           {[
-            { label: 'Strategy', key: 'strategy_name', type: 'text' },
-            { label: 'Symbol', key: 'symbol', type: 'text', placeholder: 'BTC/USDT' },
-            { label: 'Timeframe', key: 'timeframe', type: 'text', placeholder: '1h' },
+            { label: 'Symbol', key: 'symbol', type: 'text', placeholder: 'SOL/USDT' },
             { label: 'Start Date', key: 'start_date', type: 'date' },
             { label: 'End Date', key: 'end_date', type: 'date' },
             { label: 'Initial Capital ($)', key: 'initial_capital', type: 'number' },
@@ -125,25 +223,35 @@ export default function Backtest() {
               </a>
             </div>
           </div>
-          {!result ? (
+          {!result && !errorDetail ? (
             <div className="flex flex-col items-center justify-center h-64 text-gray-600">
               <FlaskConical size={40} className="mb-3 opacity-30" />
               <p className="text-sm">Run a backtest to see results here</p>
             </div>
+          ) : errorDetail ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-start gap-2 p-3 bg-red-900/20 border border-red-900/40 rounded-lg">
+                <AlertTriangle size={16} className="text-red-400 mt-0.5 shrink-0" />
+                <div>
+                  <p className="text-xs font-semibold text-red-400 mb-1">Backtest failed</p>
+                  <p className="text-xs text-red-300 break-words">{errorDetail}</p>
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="space-y-1">
-              <MetricRow label="Total Return" value={`${result.total_return_pct?.toFixed(2)}%`} positive={result.total_return_pct > 0} />
-              <MetricRow label="Annualized Return" value={`${result.annualized_return_pct?.toFixed(2)}%`} positive={result.annualized_return_pct > 0} />
-              <MetricRow label="Max Drawdown" value={`${result.max_drawdown_pct?.toFixed(2)}%`} positive={result.max_drawdown_pct > -20} />
-              <MetricRow label="Sharpe Ratio" value={result.sharpe_ratio?.toFixed(2)} positive={result.sharpe_ratio > 1} />
-              <MetricRow label="Profit Factor" value={result.profit_factor?.toFixed(2)} positive={result.profit_factor > 1.5} />
-              <MetricRow label="Win Rate" value={`${result.win_rate_pct?.toFixed(1)}%`} positive={result.win_rate_pct > 50} />
-              <MetricRow label="Total Trades" value={String(result.total_trades)} />
-              <MetricRow label="Avg Win" value={`$${result.avg_win?.toFixed(2)}`} positive />
-              <MetricRow label="Avg Loss" value={`$${result.avg_loss?.toFixed(2)}`} />
-              <MetricRow label="R:R Ratio" value={result.rr_ratio?.toFixed(2)} positive={result.rr_ratio > 1.5} />
+              <MetricRow label="Total Return" value={`${result!.total_return_pct?.toFixed(2)}%`} positive={result!.total_return_pct > 0} />
+              <MetricRow label="Annualized Return" value={`${result!.annualized_return_pct?.toFixed(2)}%`} positive={result!.annualized_return_pct > 0} />
+              <MetricRow label="Max Drawdown" value={`${result!.max_drawdown_pct?.toFixed(2)}%`} positive={result!.max_drawdown_pct > -20} />
+              <MetricRow label="Sharpe Ratio" value={result!.sharpe_ratio?.toFixed(2)} positive={result!.sharpe_ratio > 1} />
+              <MetricRow label="Profit Factor" value={result!.profit_factor?.toFixed(2)} positive={result!.profit_factor > 1.5} />
+              <MetricRow label="Win Rate" value={`${result!.win_rate_pct?.toFixed(1)}%`} positive={result!.win_rate_pct > 50} />
+              <MetricRow label="Total Trades" value={String(result!.total_trades)} />
+              <MetricRow label="Avg Win" value={`$${result!.avg_win?.toFixed(2)}`} positive />
+              <MetricRow label="Avg Loss" value={`$${result!.avg_loss?.toFixed(2)}`} />
+              <MetricRow label="R:R Ratio" value={result!.rr_ratio?.toFixed(2)} positive={result!.rr_ratio > 1.5} />
 
-              {result.max_drawdown_pct < -20 || result.sharpe_ratio < 1 ? (
+              {result!.max_drawdown_pct < -20 || result!.sharpe_ratio < 1 ? (
                 <div className="flex items-start gap-2 mt-4 p-3 bg-yellow-900/20 border border-yellow-900/40 rounded-lg">
                   <AlertTriangle size={16} className="text-yellow-500 mt-0.5 shrink-0" />
                   <p className="text-xs text-yellow-400">Results below recommended thresholds. Review strategy before forward testing.</p>

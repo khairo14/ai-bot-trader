@@ -49,6 +49,13 @@ class BinanceClient(AbstractBroker):
         else:
             logger.info("BinanceClient initialized in LIVE mode.")
 
+    async def close(self) -> None:
+        """Close the underlying ccxt aiohttp session."""
+        try:
+            await self.exchange.close()
+        except Exception:
+            pass
+
     async def _ensure_markets(self) -> None:
         """Load spot markets once; silently skip sapi/margin timeouts."""
         if self.exchange.markets:

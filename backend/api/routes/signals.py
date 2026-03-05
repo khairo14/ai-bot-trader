@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, update, or_
 from typing import Optional
+from datetime import datetime, timedelta
 
 from db.database import get_db
-from db.models import Signal, Strategy, ExecutionMode
+from db.models import Signal, Strategy, ExecutionMode, SignalType
 
 router = APIRouter()
 
@@ -26,6 +27,7 @@ def _signal_dict(s: Signal) -> dict:
         "execution_mode": s.execution_mode,
         "reasons": s.reasons,
         "acted_on": s.acted_on,
+        "dismissed": s.dismissed,
         "created_at": s.created_at.isoformat() if s.created_at else None,
     }
 
@@ -37,14 +39,48 @@ async def list_signals(
     limit: int = Query(default=50, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get recent signals, optionally filtered by symbol and broker."""
-    query = select(Signal).order_by(desc(Signal.created_at)).limit(limit)
+    """Get recent signals, optionally filtered by symbol and broker. Dismissed signals are hidden."""
+    query = (
+        select(Signal)
+        .where(Signal.dismissed == False)  # noqa: E712
+        .order_by(desc(Signal.created_at))
+        .limit(limit)
+    )
     if symbol:
         query = query.where(Signal.symbol == symbol.upper())
     if broker:
         query = query.where(Signal.broker == broker.lower())
     result = await db.execute(query)
     return {"signals": [_signal_dict(s) for s in result.scalars().all()]}
+
+
+@router.post("/dismiss-expired")
+async def dismiss_expired_signals(
+    older_than_hours: int = Query(default=24, ge=1, le=168),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Dismiss signals that are no longer useful:
+    - ALL HOLD signals (never actionable, any age)
+    - Un-acted-on signals older than `older_than_hours` (default 24h)
+    Signals are hidden from Recent Signals but kept in DB for ML auditing.
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
+    result = await db.execute(
+        update(Signal)
+        .where(
+            Signal.dismissed == False,  # noqa: E712
+            or_(
+                Signal.signal == SignalType.HOLD,  # always dismiss HOLDs
+                # dismiss old un-acted-on signals of any type
+                (Signal.acted_on == False) & (Signal.created_at < cutoff),  # noqa: E712
+            ),
+        )
+        .values(dismissed=True)
+    )
+    await db.commit()
+    count = result.rowcount
+    return {"dismissed": count, "message": f"{count} signal(s) cleared from Recent Signals."}
 
 
 @router.get("/pending")
@@ -54,7 +90,8 @@ async def list_pending_signals(db: AsyncSession = Depends(get_db)):
         select(Signal)
         .where(
             Signal.execution_mode == ExecutionMode.SEMI_AUTO.value,
-            Signal.acted_on == False,
+            Signal.acted_on == False,  # noqa: E712
+            Signal.dismissed == False,  # noqa: E712
         )
         .order_by(desc(Signal.created_at))
     )

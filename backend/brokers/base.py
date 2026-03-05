@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Optional, Callable
+import asyncio
 import pandas as pd
 
 
@@ -136,3 +138,48 @@ class AbstractBroker(ABC):
     def is_paper(self) -> bool:
         """Returns True if this connector is in paper/testnet mode."""
         return getattr(self, "_paper", True)
+
+    async def close(self) -> None:
+        """Release any open network sessions. Override in subclasses that hold async connections."""
+        pass
+
+    async def get_ohlcv_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        batch_size: int = 1000,
+    ) -> pd.DataFrame:
+        """
+        Fetch OHLCV candles across a date range by paginating requests.
+        Brokers cap single requests (Binance = 1000 candles), so this loops
+        using the `since` cursor until end_dt is covered.
+        """
+        since_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
+        chunks: list[pd.DataFrame] = []
+
+        while True:
+            chunk = await self.get_ohlcv(symbol, timeframe, limit=batch_size, since=since_ms)
+            if chunk.empty:
+                break
+            chunks.append(chunk)
+            # Advance cursor to 1 ms after the last candle timestamp
+            last_ts = int(chunk.index[-1].timestamp() * 1000)
+            if last_ts >= end_ms:
+                break
+            if last_ts <= since_ms:
+                # No progress — avoid infinite loop
+                break
+            since_ms = last_ts + 1
+            await asyncio.sleep(0.05)  # be nice to the rate limiter
+
+        if not chunks:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+        df = pd.concat(chunks)
+        df = df[~df.index.duplicated(keep="first")]
+        df.sort_index(inplace=True)
+        df = df[(df.index >= pd.Timestamp(start_dt)) & (df.index <= pd.Timestamp(end_dt))]
+        return df

@@ -81,6 +81,7 @@ class Signal(Base):
     execution_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # suggestion | semi-auto | full-auto
     reasons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # list of reason strings
     acted_on: Mapped[bool] = mapped_column(Boolean, default=False)
+    dismissed: Mapped[bool] = mapped_column(Boolean, default=False)  # hidden from Recent Signals UI
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
 
     trade: Mapped[Optional[Trade]] = relationship("Trade", back_populates="signal", uselist=False)
@@ -110,6 +111,7 @@ class Trade(Base):
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
     broker_order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     strategy_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # rejection reason, halt info, etc.
     opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)

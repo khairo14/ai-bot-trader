@@ -12,18 +12,28 @@ from config import settings
 
 router = APIRouter()
 
+# ── IBKR cooldown: after a failure, skip retries for 60 s to stop log spam ──
+_ibkr_last_fail: float = 0.0
+_IBKR_COOLDOWN = 60.0  # seconds
+
 
 async def _safe_balance(broker_name: str) -> dict:
     """Fetch broker balance with timeout; never raises."""
+    global _ibkr_last_fail
+    import time
     try:
         from brokers import get_broker, get_broker_modes
         if broker_name == "ibkr":
+            # Skip immediately if IBKR failed recently — stops connection spam
+            if time.monotonic() - _ibkr_last_fail < _IBKR_COOLDOWN:
+                return {"broker": "ibkr", "total": 0.0, "available": 0.0,
+                        "currency": "USD", "connected": False, "is_paper": True}
             from brokers.ibkr_client import ibkr_balance_sync
             import concurrent.futures
             _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             loop = asyncio.get_event_loop()
             balance = await asyncio.wait_for(
-                loop.run_in_executor(_pool, ibkr_balance_sync), timeout=35.0
+                loop.run_in_executor(_pool, ibkr_balance_sync), timeout=10.0
             )
         else:
             broker = get_broker(broker_name)
@@ -41,7 +51,8 @@ async def _safe_balance(broker_name: str) -> dict:
             "is_paper": is_paper,
         }
     except Exception as e:
-        print(f"[IBKR-DEBUG] {broker_name} failed: {type(e).__name__}: {e}", flush=True)
+        if broker_name == "ibkr":
+            _ibkr_last_fail = time.monotonic()
         logger.warning(f"[portfolio] {broker_name} balance failed: {type(e).__name__}: {e}")
         return {
             "broker": broker_name,

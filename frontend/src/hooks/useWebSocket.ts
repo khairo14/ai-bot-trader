@@ -13,6 +13,9 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
   const [connected, setConnected] = useState(false)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
+  // Keep onMessage in a ref so changing the callback never triggers a reconnect
+  const onMessageRef = useRef<MessageHandler | undefined>(onMessage)
+  useEffect(() => { onMessageRef.current = onMessage })
 
   const connect = useCallback(() => {
     if (!mountedRef.current) return
@@ -28,7 +31,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
         if (!mountedRef.current) return
         try {
           const data = JSON.parse(event.data)
-          onMessage?.(data)
+          onMessageRef.current?.(data)
         } catch {}
       }
 
@@ -40,7 +43,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
         reconnectTimer.current = setTimeout(connect, reconnectDelay)
       }
     } catch {}
-  }, [url, onMessage, reconnectDelay])
+  }, [url, reconnectDelay])  // onMessage intentionally excluded — stored in ref above
 
   useEffect(() => {
     mountedRef.current = true

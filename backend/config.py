@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     default_rr_ratio: float = 2.0
     atr_stop_multiplier: float = 2.0
 
+    # Forward test auto-scheduler toggle
+    # Set to 0 to disable (manual "Run Now" only); any non-zero value enables it.
+    # The actual run interval per strategy is derived from its own timeframe setting
+    # (1m strat → runs every 60 s, 1h strat → every 3600 s, 1d → every 86400 s).
+    forward_test_interval_minutes: int = 1  # non-zero = enabled
+
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:5173"]
 

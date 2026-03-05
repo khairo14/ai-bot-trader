@@ -21,6 +21,10 @@ class StrategyCreate(BaseModel):
 
 
 class StrategyUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    broker: Optional[str] = None
+    asset_class: Optional[str] = None
     execution_mode: Optional[str] = None
     is_active: Optional[bool] = None
     is_paper: Optional[bool] = None
@@ -143,6 +147,14 @@ async def update_strategy(
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
+    if payload.name is not None:
+        strategy.name = payload.name  # type: ignore[assignment]
+    if payload.description is not None:
+        strategy.description = payload.description  # type: ignore[assignment]
+    if payload.broker is not None:
+        strategy.broker = payload.broker  # type: ignore[assignment]
+    if payload.asset_class is not None:
+        strategy.asset_class = payload.asset_class  # type: ignore[assignment]
     if payload.execution_mode is not None:
         strategy.execution_mode = payload.execution_mode  # type: ignore[assignment]
     if payload.is_active is not None:

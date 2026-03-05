@@ -181,18 +181,42 @@ class ForwardEngine:
             self._paper_balance -= validation.position_size * (signal.entry_price or 0)
             logger.info(f"[ForwardEngine] 📄 PAPER FILL: {signal.signal} {signal.symbol} @ {signal.entry_price}")
         else:
+            # ── Live order — broker API call ──────────────────────────────────────
+            # Brokers reject orders during:
+            #   • Market-wide circuit breakers (NYSE L1/L2/L3 halts — 7%/13%/20% drops)
+            #   • Individual stock LULD (Limit-Up Limit-Down) halts
+            #   • Exchange emergency halts / forced closures
+            #   • Crypto exchange maintenance windows
+            # We catch all broker errors here so the scheduler never crashes.
+            # A FAILED trade record is written to the DB so you have a full audit trail.
             side = "buy" if signal.signal == "BUY" else "sell"
-            result = await broker.place_order(
-                symbol=signal.symbol,
-                side=side,
-                quantity=validation.position_size,
-                order_type="market",
-                stop_price=signal.stop_loss,
-                take_profit_price=signal.take_profit,
-            )
-            trade.broker_order_id = result.order_id
-            trade.status = OrderStatus.OPEN
-            logger.info(f"[ForwardEngine] ✅ LIVE ORDER: {result.order_id}")
+            try:
+                result = await broker.place_order(
+                    symbol=signal.symbol,
+                    side=side,
+                    quantity=validation.position_size,
+                    order_type="market",
+                    stop_price=signal.stop_loss,
+                    take_profit_price=signal.take_profit,
+                )
+                trade.broker_order_id = result.order_id
+                trade.status = OrderStatus.OPEN
+                logger.info(f"[ForwardEngine] ✅ LIVE ORDER: {result.order_id}")
+            except Exception as order_err:
+                # Broker rejected or is unreachable — record FAILED trade for audit
+                trade.status = OrderStatus.REJECTED
+                trade.broker_order_id = f"rejected_{signal.symbol}_{int(datetime.utcnow().timestamp())}"
+                trade.notes = f"Order rejected: {order_err}"
+                logger.warning(
+                    f"[ForwardEngine] ⚠️  LIVE ORDER REJECTED for {signal.symbol}: {order_err}. "
+                    f"Likely causes: market halt, circuit breaker, exchange maintenance, "
+                    f"insufficient funds, or invalid symbol. Trade saved as FAILED."
+                )
+                # Persist FAILED record then return — do NOT expose the exception upward
+                if db_session:
+                    db_session.add(trade)
+                    await db_session.commit()
+                return None
 
         if db_session:
             db_session.add(trade)

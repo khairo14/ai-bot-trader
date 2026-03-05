@@ -23,6 +23,83 @@ router = APIRouter()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Timeframe helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TF_SECONDS: dict = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200,
+    "1d": 86400, "1w": 604800,
+}
+
+
+def timeframe_to_seconds(tf: str) -> int:
+    """Convert '4h' → 14400, '1d' → 86400, etc. Defaults to 3600 (1h)."""
+    return _TF_SECONDS.get(str(tf).lower(), 3600)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Market hours helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+from datetime import datetime as _dt, time as _time, date as _date
+from zoneinfo import ZoneInfo as _ZI
+import pandas as _pd
+
+_ET             = _ZI("America/New_York")
+_STOCK_BROKERS  = {"alpaca", "ibkr"}      # regulated session brokers
+_MARKET_OPEN    = _time(9, 30)            # NYSE regular session
+_MARKET_CLOSE   = _time(16, 0)
+
+# NYSE calendar — covers all US market holidays (MLK Day, July 4th, Christmas, etc.)
+# Loaded once at import time; covers dates far into the future.
+try:
+    import pandas_market_calendars as _pmc
+    _NYSE_CAL = _pmc.get_calendar("NYSE")
+    _USE_HOLIDAY_CAL = True
+except Exception:
+    _USE_HOLIDAY_CAL = False
+    logger.warning("[Scheduler] pandas_market_calendars not available — holiday blocking disabled.")
+
+
+def _is_nyse_trading_day(d: _date) -> bool:
+    """Return True if `d` is a day the NYSE is open (excludes weekends + all US holidays)."""
+    if not _USE_HOLIDAY_CAL:
+        return d.weekday() < 5  # fallback: weekday only
+    sched = _NYSE_CAL.schedule(
+        start_date=d.strftime("%Y-%m-%d"),
+        end_date=d.strftime("%Y-%m-%d"),
+    )
+    return not sched.empty
+
+
+def is_crypto_broker(broker_name: str) -> bool:
+    """Return True for 24/7 crypto brokers (Binance, etc.)."""
+    return broker_name.lower() not in _STOCK_BROKERS
+
+
+def is_market_open(broker_name: str) -> bool:
+    """
+    Return True if trading is currently allowed for this broker.
+
+    - Crypto (Binance): always True — trades 24/7
+    - Stocks (Alpaca) / Options (IBKR):
+        * NYSE regular session 09:30–16:00 ET only
+        * Blocked on weekends
+        * Blocked on all US market holidays (MLK Day, Presidents Day, Good Friday,
+          Memorial Day, Juneteenth, Independence Day, Labor Day, Thanksgiving,
+          Christmas) via pandas_market_calendars NYSE calendar
+        * DST handled automatically via ZoneInfo / America/New_York
+    """
+    if is_crypto_broker(broker_name):
+        return True
+    now_et = _dt.now(tz=_ET)
+    if not _is_nyse_trading_day(now_et.date()):
+        return False
+    return _MARKET_OPEN <= now_et.time() <= _MARKET_CLOSE
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -201,19 +278,128 @@ async def trigger_run(
     }
 
 
-async def _run_signals_background():
-    """Run signal engine + forward engine for all active paper strategies."""
+async def _run_one_strategy(strat) -> None:
+    """
+    Run signal engine + forward engine for a single strategy.
+    Opens its own DB session so it can be called independently by the scheduler.
+    """
     from core.engine.signal_engine import SignalEngine
     from core.engine.forward_engine import ForwardEngine
     from db.database import AsyncSessionLocal
-    from db.models import (
-        SignalType, AssetClass, BrokerName,
-    )
+    from db.models import SignalType, AssetClass
     from api.websocket import manager
-    from sqlalchemy import select as sa_select
+
+    params = strat.parameters or {}
+    strategy_type = params.get("strategy_type") or params.get("strategy_name")
+    symbol = params.get("symbol")
+    timeframe = params.get("timeframe", "1h")
+    limit = int(params.get("limit", 200))
+
+    if not strategy_type or not symbol:
+        logger.warning(
+            f"[ForwardTest] Strategy '{strat.name}' missing strategy_type/symbol — skip"
+        )
+        return
 
     signal_engine = SignalEngine()
     forward_engine = ForwardEngine()
+
+    try:
+        sig = await signal_engine.run(
+            strategy_name=strategy_type,
+            symbol=symbol,
+            broker_name=strat.broker.value,
+            timeframe=timeframe,
+            limit=limit,
+        )
+
+        # Skip HOLD signals — no value persisting noise, keep DB clean
+        if sig.signal.upper() == "HOLD":
+            logger.info(
+                f"[ForwardTest] HOLD {strat.name} | {symbol} "
+                f"(conf={sig.confidence:.2f}) — skipped"
+            )
+            return
+
+        # Persist signal
+        try:
+            sig_type = SignalType(sig.signal)
+        except ValueError:
+            sig_type = SignalType.HOLD
+
+        try:
+            asset_cls = AssetClass(sig.asset_class)
+        except ValueError:
+            asset_cls = strat.asset_class
+
+        async with AsyncSessionLocal() as session:
+            db_signal = SignalModel(
+                symbol=sig.symbol,
+                signal=sig_type,
+                entry_price=sig.entry_price,
+                stop_loss=sig.stop_loss,
+                take_profit=sig.take_profit,
+                confidence=sig.confidence,
+                timeframe=sig.timeframe,
+                strategy_name=sig.strategy_name,
+                regime=sig.regime,
+                asset_class=asset_cls,
+                broker=strat.broker,
+                reasons=sig.reasons,
+                acted_on=False,
+            )
+            session.add(db_signal)
+            await session.flush()
+
+            # Pipe through ForwardEngine
+            trade = await forward_engine.process_signal(
+                signal=sig,
+                execution_mode=strat.execution_mode.value,
+                is_paper=True,
+                db_session=session,
+            )
+
+            if trade is not None:
+                trade.signal_id = db_signal.id
+                db_signal.acted_on = True
+
+            await session.commit()
+
+        # Broadcast via WebSocket
+        await manager.broadcast("signal", {
+            "symbol": sig.symbol,
+            "signal": sig.signal,
+            "entry_price": sig.entry_price,
+            "confidence": sig.confidence,
+            "strategy": sig.strategy_name,
+            "timeframe": sig.timeframe,
+            "acted_on": db_signal.acted_on,
+        })
+
+        if trade is not None:
+            await manager.broadcast("trade", {
+                "symbol": trade.symbol,
+                "side": trade.side,
+                "quantity": trade.quantity,
+                "entry_price": trade.entry_price,
+                "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
+                "strategy_name": trade.strategy_name,
+                "is_paper": True,
+            })
+
+        logger.info(
+            f"[ForwardTest] ✓ {strat.name} | {symbol} → {sig.signal} "
+            f"@ {sig.entry_price} (conf={sig.confidence:.2f})"
+        )
+
+    except Exception as e:
+        logger.error(f"[ForwardTest] ✗ '{strat.name}': {e}", exc_info=True)
+
+
+async def _run_signals_background():
+    """Run signal engine for ALL active paper strategies (used by 'Run Now' button)."""
+    from db.database import AsyncSessionLocal
+    from sqlalchemy import select as sa_select
 
     async with AsyncSessionLocal() as session:
         strat_q = await session.execute(
@@ -224,101 +410,8 @@ async def _run_signals_background():
         )
         strategies = strat_q.scalars().all()
 
-        for strat in strategies:
-            params = strat.parameters or {}
-            strategy_type = params.get("strategy_type") or params.get("strategy_name")
-            symbol = params.get("symbol")
-            timeframe = params.get("timeframe", "1h")
-            limit = int(params.get("limit", 200))
-
-            if not strategy_type or not symbol:
-                logger.warning(
-                    f"[ForwardTest] Strategy '{strat.name}' missing strategy_type/symbol — skip"
-                )
-                continue
-
-            try:
-                sig = await signal_engine.run(
-                    strategy_name=strategy_type,
-                    symbol=symbol,
-                    broker_name=strat.broker.value,
-                    timeframe=timeframe,
-                    limit=limit,
-                )
-
-                # Persist signal
-                try:
-                    sig_type = SignalType(sig.signal)
-                except ValueError:
-                    sig_type = SignalType.HOLD
-
-                try:
-                    asset_cls = AssetClass(sig.asset_class)
-                except ValueError:
-                    asset_cls = strat.asset_class
-
-                db_signal = SignalModel(
-                    symbol=sig.symbol,
-                    signal=sig_type,
-                    entry_price=sig.entry_price,
-                    stop_loss=sig.stop_loss,
-                    take_profit=sig.take_profit,
-                    confidence=sig.confidence,
-                    timeframe=sig.timeframe,
-                    strategy_name=sig.strategy_name,
-                    regime=sig.regime,
-                    asset_class=asset_cls,
-                    broker=strat.broker,
-                    reasons=sig.reasons,
-                    acted_on=False,
-                )
-                session.add(db_signal)
-                await session.flush()
-
-                # Pipe through ForwardEngine
-                trade = await forward_engine.process_signal(
-                    signal=sig,
-                    execution_mode=strat.execution_mode.value,
-                    is_paper=True,
-                    db_session=session,
-                )
-
-                if trade is not None:
-                    trade.signal_id = db_signal.id
-                    db_signal.acted_on = True
-
-                await session.commit()
-
-                # Broadcast via WebSocket
-                await manager.broadcast("signal", {
-                    "symbol": sig.symbol,
-                    "signal": sig.signal,
-                    "entry_price": sig.entry_price,
-                    "confidence": sig.confidence,
-                    "strategy": sig.strategy_name,
-                    "timeframe": sig.timeframe,
-                    "acted_on": db_signal.acted_on,
-                })
-
-                if trade is not None:
-                    await manager.broadcast("trade", {
-                        "symbol": trade.symbol,
-                        "side": trade.side,
-                        "quantity": trade.quantity,
-                        "entry_price": trade.entry_price,
-                        "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
-                        "strategy_name": trade.strategy_name,
-                        "is_paper": True,
-                    })
-
-                logger.info(
-                    f"[ForwardTest] ✓ {strat.name} | {symbol} → {sig.signal} "
-                    f"@ {sig.entry_price} (conf={sig.confidence:.2f})"
-                )
-
-            except Exception as e:
-                await session.rollback()
-                logger.error(f"[ForwardTest] ✗ '{strat.name}': {e}", exc_info=True)
+    for strat in strategies:
+        await _run_one_strategy(strat)
 
 
 @router.post("/emergency-stop")

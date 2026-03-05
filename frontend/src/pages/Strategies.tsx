@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, Layers, ToggleLeft, ToggleRight, X, BookOpen, Sparkles, Trash2 } from 'lucide-react'
+import { Plus, Layers, ToggleLeft, ToggleRight, X, BookOpen, Sparkles, Trash2, Pencil } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import axios from 'axios'
 import toast from 'react-hot-toast'
@@ -51,6 +51,7 @@ export default function Strategies() {
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [loadingStrategies, setLoadingStrategies] = useState(true)
   const [showModal, setShowModal] = useState(false)
+  const [editTarget, setEditTarget] = useState<Strategy | null>(null)
   const [form, setForm] = useState(defaultForm)
   const [saving, setSaving] = useState(false)
   const [formErrors, setFormErrors] = useState<{ name?: string; symbol?: string }>({})
@@ -122,6 +123,30 @@ export default function Strategies() {
     }
   }
 
+  const openEdit = (s: Strategy) => {
+    setEditTarget(s)
+    setForm({
+      name: s.name,
+      description: s.description || '',
+      strategy_type: (s.parameters?.strategy_type as string) || 'hybrid_macd_rsi',
+      symbol: (s.parameters?.symbol as string) || '',
+      timeframe: (s.parameters?.timeframe as string) || '1h',
+      broker: s.broker,
+      asset_class: s.asset_class,
+      execution_mode: s.execution_mode,
+      is_paper: s.is_paper,
+    })
+    setFormErrors({})
+    setShowModal(true)
+  }
+
+  const closeModal = () => {
+    setShowModal(false)
+    setEditTarget(null)
+    setForm(defaultForm)
+    setFormErrors({})
+  }
+
   const createStrategy = async () => {
     const errors: { name?: string; symbol?: string } = {}
     if (!form.name.trim()) errors.name = 'Name is required'
@@ -146,11 +171,43 @@ export default function Strategies() {
         },
       })
       toast.success('Strategy created')
-      setShowModal(false)
-      setForm(defaultForm)
+      closeModal()
       load()
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || 'Failed to create strategy')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveEdit = async () => {
+    if (!editTarget) return
+    const errors: { name?: string; symbol?: string } = {}
+    if (!form.name.trim()) errors.name = 'Name is required'
+    if (!form.symbol.trim()) errors.symbol = 'Symbol is required'
+    if (Object.keys(errors).length) { setFormErrors(errors); return }
+    setFormErrors({})
+    setSaving(true)
+    try {
+      await axios.patch(`/api/strategies/${editTarget.id}`, {
+        name: form.name.trim(),
+        description: form.description.trim() || null,
+        broker: form.broker,
+        asset_class: form.asset_class,
+        execution_mode: form.execution_mode,
+        is_paper: form.is_paper,
+        parameters: {
+          strategy_type: form.strategy_type,
+          symbol: form.symbol.trim().toUpperCase(),
+          timeframe: form.timeframe,
+          limit: 200,
+        },
+      })
+      toast.success('Strategy updated')
+      closeModal()
+      load()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Failed to update strategy')
     } finally {
       setSaving(false)
     }
@@ -246,6 +303,13 @@ export default function Strategies() {
                   <option value="full-auto">Full-Auto</option>
                 </select>
                 <button
+                  onClick={() => openEdit(s)}
+                  className="p-1.5 text-gray-600 hover:text-blue-400 hover:bg-blue-900/20 rounded transition-colors"
+                  title="Edit strategy"
+                >
+                  <Pencil size={14} />
+                </button>
+                <button
                   onClick={() => deleteStrategy(s)}
                   className="p-1.5 text-gray-600 hover:text-red-400 hover:bg-red-900/20 rounded transition-colors"
                   title="Delete strategy"
@@ -258,13 +322,13 @@ export default function Strategies() {
         </div>
       )}
 
-      {/* Create Strategy Modal */}
+      {/* Create / Edit Strategy Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-dark-800 border border-dark-600 rounded-2xl w-full max-w-md shadow-2xl">
             <div className="flex items-center justify-between p-5 border-b border-dark-600">
-              <h2 className="text-base font-semibold text-white">New Strategy</h2>
-              <button onClick={() => setShowModal(false)} className="text-gray-500 hover:text-gray-300 transition-colors">
+              <h2 className="text-base font-semibold text-white">{editTarget ? 'Edit Strategy' : 'New Strategy'}</h2>
+              <button onClick={closeModal} className="text-gray-500 hover:text-gray-300 transition-colors">
                 <X size={18} />
               </button>
             </div>
@@ -365,17 +429,17 @@ export default function Strategies() {
 
             <div className="flex gap-2 p-5 pt-0">
               <button
-                onClick={() => setShowModal(false)}
+                onClick={closeModal}
                 className="flex-1 px-4 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition-all"
               >
                 Cancel
               </button>
               <button
-                onClick={createStrategy}
+                onClick={editTarget ? saveEdit : createStrategy}
                 disabled={saving}
                 className="flex-1 px-4 py-2 bg-brand-500 hover:bg-green-400 text-black text-sm font-semibold rounded-lg transition-all disabled:opacity-50"
               >
-                {saving ? 'Creating…' : 'Create Strategy'}
+                {saving ? (editTarget ? 'Saving…' : 'Creating…') : (editTarget ? 'Save Changes' : 'Create Strategy')}
               </button>
             </div>
           </div>

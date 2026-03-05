@@ -107,6 +107,12 @@ SECRET_KEY=change_this_to_a_random_string
 PAPER_INITIAL_BALANCE=10000
 RISK_PER_TRADE_PCT=2.0
 DAILY_CIRCUIT_BREAKER_PCT=5.0
+
+# ── Auto-Scheduler ────────────────────────────────
+# 0 = disabled (manual "Run Now" only)
+# Non-zero = scheduler enabled; fires each strategy at its own timeframe boundary
+# (1h strategy → fires every hour at candle close)
+FORWARD_TEST_INTERVAL_MINUTES=1
 ```
 
 ### Step 4: Set Up Python Environment
