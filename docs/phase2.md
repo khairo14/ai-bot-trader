@@ -94,15 +94,17 @@ IBKR connection is live. This feature activates options-specific strategies.
 
 ---
 
-## EX-02 · Trailing Stop & OCO Orders
+## EX-02 · Trailing Stop ✅
 
 **What it is:**
 The execution engine currently places static stop loss and take profit. This adds dynamic trailing stops that follow price up (locking in profit as the trade moves favorably).
 
-**What needs building:**
-- `TrailingStopManager` — monitors open positions, updates stop loss as price moves
-- IBKR + Alpaca trailing stop order type integration
-- Dashboard "modify stop" button per open position
+**What was built:**
+- `trailing_stop_pct` field added to `TradeOutcome` DB model (e.g. `2.0` = trail by 2%)
+- Alembic migration `e5f6a7b8c9d0` — `ADD COLUMN trailing_stop_pct FLOAT` to `trade_outcomes`
+- `tasks/signal_runner.py` — reads `strategy.parameters["trailing_stop_pct"]` when creating each `TradeOutcome` row
+- `tasks/outcome_resolver.py` — `_resolve_outcome()` now tracks `peak_high` / `trough_low` per candle; computes `effective_stop = peak * (1 - pct/100)` for longs (or `trough * (1 + pct/100)` for shorts); uses the better of trailing vs fixed stop; if trailing stop is triggered above entry → resolves as **win** (profit locked)
+- `frontend/src/pages/Strategies.tsx` — "Trailing Stop %" number input in the Create/Edit strategy modal; displays confirmation hint when set; persisted into `strategy.parameters`
 
 ---
 
@@ -245,6 +247,6 @@ A professional candlestick chart for every symbol/timeframe being traded, showin
 | 6 | **UI-03** Strategy code editor | Medium | High |
 | 7 | **UI-01** Analytics dashboard | Medium | Medium |
 | 8 | **EX-01** Options execution | High | Medium |
-| 9 | **EX-02** Trailing stops | Low | Medium |
+| 9 | ~~**EX-02** Trailing stops~~ ✅ | Low | Medium |
 | 10 | **UI-02** Multi-timeframe | Medium | Medium |
 | 11 | **ML-03** Portfolio optimization | High | Medium |

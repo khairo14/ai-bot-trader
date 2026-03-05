@@ -112,6 +112,14 @@ def run_signals(self):
                         # ── Create TradeOutcome for ML feedback loop ──────────
                         if sig.signal in _TRACKABLE_SIGNALS:
                             from db.models import TradeOutcome as TradeOutcomeModel
+                            _trailing = None
+                            if strat.parameters:
+                                _t = strat.parameters.get("trailing_stop_pct")
+                                if _t is not None:
+                                    try:
+                                        _trailing = float(_t)
+                                    except (TypeError, ValueError):
+                                        pass
                             session.add(TradeOutcomeModel(
                                 signal_id=db_signal.id,
                                 symbol=sig.symbol,
@@ -121,6 +129,7 @@ def run_signals(self):
                                 entry_price=sig.entry_price,
                                 stop_loss=sig.stop_loss,
                                 take_profit=sig.take_profit,
+                                trailing_stop_pct=_trailing,
                                 resolved=False,
                             ))
 

@@ -45,6 +45,7 @@ const defaultForm = {
   asset_class: 'crypto',
   execution_mode: 'suggestion',
   is_paper: true,
+  trailing_stop_pct: '',
 }
 
 export default function Strategies() {
@@ -135,6 +136,7 @@ export default function Strategies() {
       asset_class: s.asset_class,
       execution_mode: s.execution_mode,
       is_paper: s.is_paper,
+      trailing_stop_pct: s.parameters?.trailing_stop_pct != null ? String(s.parameters.trailing_stop_pct) : '',
     })
     setFormErrors({})
     setShowModal(true)
@@ -168,6 +170,9 @@ export default function Strategies() {
           symbol: form.symbol.trim().toUpperCase(),
           timeframe: form.timeframe,
           limit: 200,
+          ...(form.trailing_stop_pct !== '' && !isNaN(parseFloat(form.trailing_stop_pct))
+            ? { trailing_stop_pct: parseFloat(form.trailing_stop_pct) }
+            : {}),
         },
       })
       toast.success('Strategy created')
@@ -201,6 +206,9 @@ export default function Strategies() {
           symbol: form.symbol.trim().toUpperCase(),
           timeframe: form.timeframe,
           limit: 200,
+          ...(form.trailing_stop_pct !== '' && !isNaN(parseFloat(form.trailing_stop_pct))
+            ? { trailing_stop_pct: parseFloat(form.trailing_stop_pct) }
+            : {}),
         },
       })
       toast.success('Strategy updated')
@@ -425,6 +433,27 @@ export default function Strategies() {
                 </div>
                 <span className="text-xs text-gray-500">{form.is_paper ? 'Paper' : 'Live'}</span>
               </label>
+
+              {/* Trailing Stop */}
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">
+                  Trailing Stop % <span className="text-gray-700">(optional — e.g. 2 = trail by 2%)</span>
+                </label>
+                <input
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={form.trailing_stop_pct}
+                  onChange={e => setForm(f => ({ ...f, trailing_stop_pct: e.target.value }))}
+                  placeholder="Disabled"
+                  className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500"
+                />
+                {form.trailing_stop_pct !== '' && !isNaN(parseFloat(form.trailing_stop_pct)) && parseFloat(form.trailing_stop_pct) > 0 && (
+                  <p className="text-xs text-brand-400 mt-1">
+                    Stop trails {form.trailing_stop_pct}% below the highest price reached — locks in profit automatically.
+                  </p>
+                )}
+              </div>
             </div>
 
             <div className="flex gap-2 p-5 pt-0">

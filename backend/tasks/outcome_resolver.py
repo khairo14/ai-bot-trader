@@ -73,18 +73,43 @@ def _resolve_outcome(
     signal_type: str,
     df,           # OHLCV DataFrame sliced from entry candle onwards
     horizon: int = RESOLUTION_HORIZON,
+    trailing_stop_pct: Optional[float] = None,
 ) -> dict:
     """
     Walk rows of `df` (starting at entry candle) to determine outcome.
     Returns dict with keys: outcome, pnl_pct, exit_price, candles_held, ml_label
+
+    If trailing_stop_pct is set (e.g. 2.0 = 2%), the stop trails up/down
+    with the price peak and overrides the fixed stop_loss once it would be
+    more favourable to the trade.
     """
     is_long = signal_type in ("BUY",)
     is_short = signal_type in ("SELL", "SHORT")
+
+    # Trailing state — initialised to entry price so the trail starts tight
+    peak_high = entry_price   # for longs: running max high
+    trough_low = entry_price  # for shorts: running min low
 
     for i, (ts, row) in enumerate(df.iterrows()):
         high = float(row["high"])
         low = float(row["low"])
         close = float(row["close"])
+
+        # Update trailing peaks
+        if trailing_stop_pct is not None:
+            peak_high = max(peak_high, high)
+            trough_low = min(trough_low, low)
+
+            # Compute current trailing stop level
+            if is_long:
+                t_stop = peak_high * (1.0 - trailing_stop_pct / 100.0)
+                # Use trailing stop if it's tighter (higher) than fixed stop_loss
+                effective_stop = max(t_stop, stop_loss) if stop_loss is not None else t_stop
+            else:
+                t_stop = trough_low * (1.0 + trailing_stop_pct / 100.0)
+                effective_stop = min(t_stop, stop_loss) if stop_loss is not None else t_stop
+        else:
+            effective_stop = stop_loss
 
         # Check take profit first (optimistic — assume best intra-candle fill)
         if take_profit is not None:
@@ -107,25 +132,42 @@ def _resolve_outcome(
                     "ml_label": 1,
                 }
 
-        # Check stop loss
-        if stop_loss is not None:
-            if is_long and low <= stop_loss:
-                pnl_pct = round((stop_loss - entry_price) / entry_price * 100, 4)
+        # Check stop loss (fixed or trailing)
+        if effective_stop is not None:
+            if is_long and low <= effective_stop:
+                pnl_pct = round((effective_stop - entry_price) / entry_price * 100, 4)
+                # trailing stop locked in profit → still a win
+                if pnl_pct > 0:
+                    return {
+                        "outcome": "win",
+                        "pnl_pct": pnl_pct,
+                        "exit_price": effective_stop,
+                        "candles_held": i + 1,
+                        "ml_label": 1,
+                    }
                 outcome = "break_even" if abs(pnl_pct) < 0.1 else "loss"
                 return {
                     "outcome": outcome,
                     "pnl_pct": pnl_pct,
-                    "exit_price": stop_loss,
+                    "exit_price": effective_stop,
                     "candles_held": i + 1,
                     "ml_label": 0,
                 }
-            if is_short and high >= stop_loss:
-                pnl_pct = round((entry_price - stop_loss) / entry_price * 100, 4)
+            if is_short and high >= effective_stop:
+                pnl_pct = round((entry_price - effective_stop) / entry_price * 100, 4)
+                if pnl_pct > 0:
+                    return {
+                        "outcome": "win",
+                        "pnl_pct": pnl_pct,
+                        "exit_price": effective_stop,
+                        "candles_held": i + 1,
+                        "ml_label": 1,
+                    }
                 outcome = "break_even" if abs(pnl_pct) < 0.1 else "loss"
                 return {
                     "outcome": outcome,
                     "pnl_pct": pnl_pct,
-                    "exit_price": stop_loss,
+                    "exit_price": effective_stop,
                     "candles_held": i + 1,
                     "ml_label": 0,
                 }
@@ -219,6 +261,7 @@ async def resolve_pending_outcomes() -> dict:
                         signal_type=o.signal_type,
                         df=future_df,
                         horizon=RESOLUTION_HORIZON,
+                        trailing_stop_pct=getattr(o, "trailing_stop_pct", None),
                     )
 
                     if not result_dict:

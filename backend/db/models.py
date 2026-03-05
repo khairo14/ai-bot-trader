@@ -116,6 +116,7 @@ class TradeOutcome(Base):
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
     stop_loss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     take_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trailing_stop_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # e.g. 2.0 → trail by 2%
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     outcome: Mapped[Optional[OutcomeResult]] = mapped_column(SAEnum(OutcomeResult), nullable=True)
     pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # % gain/loss
