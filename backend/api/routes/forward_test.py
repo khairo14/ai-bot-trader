@@ -411,6 +411,9 @@ async def _run_one_strategy(strat) -> None:
             pass
 
         async with AsyncSessionLocal() as session:
+            # Hydrate engine state from DB before processing (balance, open positions)
+            await forward_engine.initialize(session)
+
             db_signal = SignalModel(
                 symbol=sig.symbol,
                 signal=sig_type,
@@ -553,19 +556,20 @@ async def _run_signals_background():
 @router.post("/emergency-stop")
 async def emergency_stop(db: AsyncSession = Depends(get_db)):
     """
-    Close all open paper trades immediately (mark as FILLED with note).
+    Close all open paper trades immediately — fetches current price from broker
+    to compute real PnL before marking each trade as FILLED.
     """
+    from core.engine.forward_engine import ForwardEngine
+    engine = ForwardEngine()
+    await engine.initialize(db)
+
     q = await db.execute(
         select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.OPEN)
     )
     open_trades = q.scalars().all()
 
-    now = datetime.utcnow()
     for t in open_trades:
-        t.status = OrderStatus.FILLED
-        t.closed_at = now
-        t.pnl = 0.0           # Closed flat — no price data available
-        t.pnl_pct = 0.0
+        await engine.close_position(t, reason="emergency_stop")
 
     await db.commit()
 

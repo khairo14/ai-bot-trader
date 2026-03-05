@@ -145,7 +145,10 @@ class ForwardEngine:
         if not validation.approved:
             logger.warning(f"[ForwardEngine] Signal rejected by risk manager: {validation.reason}")
             return None
-
+        # ── Apply portfolio weight multiplier ─────────────────────────────
+        # ML-03: strategies with higher Sharpe weight get proportionally larger size
+        effective_size = round(validation.position_size * position_size_multiplier, 6)
+        effective_size = max(effective_size, 1e-8)  # never zero
         # ── Handle execution mode ─────────────────────────
         if execution_mode == ExecutionMode.SUGGESTION:
             logger.info(f"[ForwardEngine] 💡 SUGGESTION: {signal.signal} {signal.symbol} @ {signal.entry_price}")
@@ -161,7 +164,7 @@ class ForwardEngine:
         trade = Trade(
             symbol=signal.symbol,
             side=signal.signal.lower(),
-            quantity=validation.position_size,
+            quantity=effective_size,
             entry_price=signal.entry_price,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
