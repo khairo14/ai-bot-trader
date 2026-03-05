@@ -183,8 +183,13 @@ class BacktestEngine:
         if len(equity_curve) > 1:
             returns = safe_eq.pct_change().dropna().replace([np.inf, -np.inf], 0.0)
             sharpe = _safe(returns.mean() / (returns.std() + 1e-10) * np.sqrt(252))
+            # Sortino ratio — only penalise downside volatility
+            downside = returns[returns < 0]
+            downside_std = _safe(downside.std(), default=0.0)
+            sortino = _safe(returns.mean() / (downside_std + 1e-10) * np.sqrt(252))
         else:
             sharpe = 0.0
+            sortino = 0.0
 
         days = max((end_date - start_date).days, 1)
         if capital <= 0:
@@ -207,7 +212,7 @@ class BacktestEngine:
             "annualized_return_pct": round(annualized_return, 4),
             "max_drawdown_pct": round(max_drawdown, 4),
             "sharpe_ratio": round(sharpe, 4),
-            "sortino_ratio": None,  # TODO Phase 5
+            "sortino_ratio": round(sortino, 4),
             "profit_factor": round(profit_factor, 4),
             "win_rate_pct": round(win_rate, 4),
             "total_trades": n_trades,
@@ -221,6 +226,6 @@ class BacktestEngine:
         logger.info(
             f"[Backtest] Done: {n_trades} trades | "
             f"Win: {win_rate:.1f}% | Return: {total_return_pct:.2f}% | "
-            f"Max DD: {max_drawdown:.2f}% | Sharpe: {sharpe:.2f}"
+            f"Max DD: {max_drawdown:.2f}% | Sharpe: {sharpe:.2f} | Sortino: {sortino:.2f}"
         )
         return result

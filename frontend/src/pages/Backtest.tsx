@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { FlaskConical, Play, AlertTriangle, Download, BookOpen, TrendingUp, History, Eye, X, ChevronUp, ChevronDown } from 'lucide-react'
+import { FlaskConical, Play, AlertTriangle, Download, BookOpen, TrendingUp, History, Eye, X, ChevronUp, ChevronDown, HelpCircle } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 
@@ -28,6 +28,7 @@ interface BacktestResult {
   annualized_return_pct: number
   max_drawdown_pct: number
   sharpe_ratio: number
+  sortino_ratio: number | null
   profit_factor: number
   win_rate_pct: number
   total_trades: number
@@ -37,9 +38,27 @@ interface BacktestResult {
   created_at?: string
 }
 
-const MetricRow = ({ label, value, positive }: { label: string, value: string, positive?: boolean }) => (
-  <div className="flex justify-between py-2 border-b border-dark-600">
-    <span className="text-sm text-gray-400">{label}</span>
+const MetricRow = ({
+  label, value, positive, tooltip,
+}: {
+  label: string
+  value: string
+  positive?: boolean
+  tooltip?: { what: string; verdict: string }
+}) => (
+  <div className="flex justify-between items-center py-2 border-b border-dark-600">
+    <div className="flex items-center gap-1.5">
+      <span className="text-sm text-gray-400">{label}</span>
+      {tooltip && (
+        <div className="relative group/tip">
+          <HelpCircle size={11} className="text-gray-600 group-hover/tip:text-gray-400 cursor-help transition-colors" />
+          <div className="absolute bottom-full left-0 mb-2 w-60 p-3 bg-dark-700 border border-dark-500 rounded-xl text-xs text-gray-300 shadow-2xl z-50 opacity-0 group-hover/tip:opacity-100 pointer-events-none transition-opacity duration-150">
+            <p className="leading-relaxed">{tooltip.what}</p>
+            <p className="mt-1.5 pt-1.5 border-t border-dark-600 text-gray-500 leading-relaxed">{tooltip.verdict}</p>
+          </div>
+        </div>
+      )}
+    </div>
     <span className={`text-sm font-medium ${positive === undefined ? 'text-white' : positive ? 'text-green-400' : 'text-red-400'}`}>
       {value}
     </span>
@@ -319,16 +338,28 @@ export default function Backtest() {
             </div>
           ) : (
             <div className="space-y-1">
-              <MetricRow label="Total Return" value={`${result!.total_return_pct?.toFixed(2)}%`} positive={result!.total_return_pct > 0} />
-              <MetricRow label="Annualized Return" value={`${result!.annualized_return_pct?.toFixed(2)}%`} positive={result!.annualized_return_pct > 0} />
-              <MetricRow label="Max Drawdown" value={`${result!.max_drawdown_pct?.toFixed(2)}%`} positive={result!.max_drawdown_pct > -20} />
-              <MetricRow label="Sharpe Ratio" value={result!.sharpe_ratio?.toFixed(2)} positive={result!.sharpe_ratio > 1} />
-              <MetricRow label="Profit Factor" value={result!.profit_factor?.toFixed(2)} positive={result!.profit_factor > 1.5} />
-              <MetricRow label="Win Rate" value={`${result!.win_rate_pct?.toFixed(1)}%`} positive={result!.win_rate_pct > 50} />
-              <MetricRow label="Total Trades" value={String(result!.total_trades)} />
-              <MetricRow label="Avg Win" value={`$${result!.avg_win?.toFixed(2)}`} positive />
-              <MetricRow label="Avg Loss" value={`$${result!.avg_loss?.toFixed(2)}`} />
-              <MetricRow label="R:R Ratio" value={result!.rr_ratio?.toFixed(2)} positive={result!.rr_ratio > 1.5} />
+              <MetricRow label="Total Return" value={`${result!.total_return_pct?.toFixed(2)}%`} positive={result!.total_return_pct > 0}
+                tooltip={{ what: 'Total percentage gain or loss over the entire test period.', verdict: 'Above 0% = profitable. Always compare against drawdown — a high return with large losses may not be worth it.' }} />
+              <MetricRow label="Annualized Return" value={`${result!.annualized_return_pct?.toFixed(2)}%`} positive={result!.annualized_return_pct > 0}
+                tooltip={{ what: 'Total return scaled to a 1-year rate, accounting for the test duration.', verdict: 'Above 20–30% is strong. Very high values on short tests can be misleading — longer test periods are more reliable.' }} />
+              <MetricRow label="Max Drawdown" value={`${result!.max_drawdown_pct?.toFixed(2)}%`} positive={result!.max_drawdown_pct > -20}
+                tooltip={{ what: 'The largest peak-to-trough drop in portfolio value during the test. Measures worst-case capital loss.', verdict: 'Keep above −20% for safer strategies. Below −30% means the strategy could blow your account in a bad streak.' }} />
+              <MetricRow label="Sharpe Ratio" value={result!.sharpe_ratio?.toFixed(2)} positive={result!.sharpe_ratio > 1}
+                tooltip={{ what: 'Risk-adjusted return: reward per unit of total volatility (both up and down swings). Annualised.', verdict: 'Below 1.0 = poor reward for risk. 1–2 = acceptable. Above 2 = excellent. Your value means returns don\'t justify the volatility.' }} />
+              <MetricRow label="Sortino Ratio" value={result!.sortino_ratio != null ? result!.sortino_ratio.toFixed(2) : '—'} positive={(result!.sortino_ratio ?? 0) > 1}
+                tooltip={{ what: 'Like Sharpe, but only penalises downside volatility (losing periods). More trader-relevant than Sharpe.', verdict: 'Above 1.0 = good. Above 2.0 = strong. A higher Sortino vs Sharpe means your losses are relatively controlled.' }} />
+              <MetricRow label="Profit Factor" value={result!.profit_factor?.toFixed(2)} positive={result!.profit_factor > 1.5}
+                tooltip={{ what: 'Gross profits ÷ gross losses. How much you earn for every dollar lost across all trades.', verdict: '1.0 = breakeven. Above 1.5 = solid edge. Above 2.0 = strong. Your value means each $1 lost generated $' + result!.profit_factor?.toFixed(2) + ' in gross profit.' }} />
+              <MetricRow label="Win Rate" value={`${result!.win_rate_pct?.toFixed(1)}%`} positive={result!.win_rate_pct > 50}
+                tooltip={{ what: 'Percentage of closed trades that finished in profit.', verdict: 'Below 50% is fine if your R:R ratio is high — trend-following strategies typically win 35–45% but profit because winners are much larger than losers.' }} />
+              <MetricRow label="Total Trades" value={String(result!.total_trades)}
+                tooltip={{ what: 'Number of completed trades in the test period.', verdict: 'More trades = more statistically meaningful results. Under 30 trades makes metrics unreliable.' }} />
+              <MetricRow label="Avg Win" value={`$${result!.avg_win?.toFixed(2)}`} positive
+                tooltip={{ what: 'Average dollar profit per winning trade.', verdict: 'Should ideally be significantly larger than Avg Loss to offset a sub-50% win rate.' }} />
+              <MetricRow label="Avg Loss" value={`$${result!.avg_loss?.toFixed(2)}`}
+                tooltip={{ what: 'Average dollar loss per losing trade (shown as positive number).', verdict: 'The lower relative to Avg Win, the better. Avg Win ÷ Avg Loss = your R:R ratio.' }} />
+              <MetricRow label="R:R Ratio" value={result!.rr_ratio?.toFixed(2)} positive={result!.rr_ratio > 1.5}
+                tooltip={{ what: 'Average Win ÷ Average Loss. How many dollars you make on winners vs how many you lose on losers.', verdict: 'Above 1.5 = good. Your ' + result!.rr_ratio?.toFixed(2) + 'x means winners are ' + result!.rr_ratio?.toFixed(2) + '× larger than losers — this is why the strategy stays profitable even with a sub-50% win rate.' }} />
 
               {result!.max_drawdown_pct < -20 || result!.sharpe_ratio < 1 ? (
                 <div className="flex items-start gap-2 mt-4 p-3 bg-yellow-900/20 border border-yellow-900/40 rounded-lg">
