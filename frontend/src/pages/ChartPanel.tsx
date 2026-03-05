@@ -94,6 +94,14 @@ interface SignalMarker {
   time: number; signal: string; price: number; confidence: number | null
   strategy_name: string; stop_loss: number | null; take_profit: number | null
 }
+interface TradeMarker {
+  id: number; side: string; status: string; is_paper: boolean
+  strategy_name: string | null
+  entry_price: number | null; entry_time: number | null
+  exit_price: number | null; exit_time: number | null
+  stop_loss: number | null; take_profit: number | null
+  pnl: number | null; pnl_pct: number | null; quantity: number
+}
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 const BROKERS    = ['binance', 'alpaca', 'ibkr'] as const
@@ -134,7 +142,9 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const [subPanel, setSubPanel]       = useState<'RSI' | 'MACD'>('RSI')
   const [lastUpdated, setLastUpdated] = useState<string | null>(null)
   const [signalCount, setSignalCount] = useState(0)
+  const [tradeCount, setTradeCount]   = useState(0)
   const [candleCount, setCandleCount] = useState(0)
+  const [showTrades, setShowTrades]   = useState(true)
 
   // Symbol combobox
   const [allSymbols, setAllSymbols] = useState<string[]>([])
@@ -151,6 +161,9 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   // Chart instance refs
   const mainChart = useRef<IChartApi | null>(null)
   const subChart  = useRef<IChartApi | null>(null)
+
+  // Price-line refs for trade TP/SL — cleaned up on each fetch
+  const tradeLineRefs = useRef<any[]>([])
 
   // Series refs
   const candleRef  = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -270,9 +283,10 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
         ;({ since, until } = presetToRange(rangePreset))
       }
 
-      const [candleRes, signalRes] = await Promise.all([
+      const [candleRes, signalRes, tradeRes] = await Promise.all([
         axios.get('/api/charts/candles', { params: { symbol, timeframe, broker, since, until } }),
         axios.get('/api/charts/signals', { params: { symbol, timeframe, broker, limit: 500 } }),
+        axios.get('/api/charts/trades',  { params: { symbol, broker, since, until } }),
       ])
 
       const candles: Candle[] = (candleRes.data.candles as Candle[]).sort((a, b) => a.time - b.time)
@@ -321,7 +335,71 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
           size: 1,
         }))
         .sort((a, b) => (a.time as number) - (b.time as number))
-      createSeriesMarkers(candleRef.current!, lwtMarkers)
+
+      // ── Trade markers & TP/SL price lines ─────────────────────────────────
+      // Remove price lines from previous render
+      tradeLineRefs.current.forEach(l => { try { candleRef.current!.removePriceLine(l) } catch {} })
+      tradeLineRefs.current = []
+
+      const trades: TradeMarker[] = tradeRes.data.trades ?? []
+      setTradeCount(trades.length)
+      const tradeMarkers: any[] = []
+
+      if (showTrades && candleRef.current) {
+        for (const t of trades) {
+          const isBuy     = t.side === 'buy' || t.side === 'cover'
+          const entryColor = t.is_paper ? '#60a5fa' : '#f59e0b'  // blue = paper, gold = live
+          const modeTag   = t.is_paper ? 'P' : 'L'
+
+          // Entry marker
+          if (t.entry_time && t.entry_price && t.entry_time >= minTime && t.entry_time <= maxTime) {
+            const pnlTag = t.pnl_pct != null
+              ? ` ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%`
+              : ''
+            tradeMarkers.push({
+              time:     t.entry_time as any,
+              position: isBuy ? 'belowBar' : 'aboveBar',
+              color:    entryColor,
+              shape:    isBuy ? 'arrowUp' : 'arrowDown',
+              text:     `[${modeTag}] ${t.side.toUpperCase()}${pnlTag}`,
+              size:     2,
+            })
+          }
+
+          // Exit marker (closed trades)
+          if (t.exit_time && t.exit_price && t.exit_time >= minTime && t.exit_time <= maxTime) {
+            const won = t.pnl != null ? t.pnl > 0 : null
+            const exitColor = won === null ? '#9ca3af' : won ? '#22c55e' : '#ef4444'
+            const pnlTag = t.pnl_pct != null
+              ? ` ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%`
+              : ''
+            tradeMarkers.push({
+              time:     t.exit_time as any,
+              position: isBuy ? 'aboveBar' : 'belowBar',
+              color:    exitColor,
+              shape:    'circle',
+              text:     `EXIT${pnlTag}`,
+              size:     1,
+            })
+          }
+
+          // TP/SL price lines (only for open positions — clutter if shown for closed)
+          if (t.status === 'OPEN' || t.status === 'open') {
+            if (t.stop_loss) {
+              const l = candleRef.current!.createPriceLine({ price: t.stop_loss, color: '#ef4444', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL' })
+              tradeLineRefs.current.push(l)
+            }
+            if (t.take_profit) {
+              const l = candleRef.current!.createPriceLine({ price: t.take_profit, color: '#22c55e', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TP' })
+              tradeLineRefs.current.push(l)
+            }
+          }
+        }
+      }
+
+      // Combine signal + trade markers, sort by time
+      const allMarkers = [...lwtMarkers, ...tradeMarkers].sort((a, b) => (a.time as number) - (b.time as number))
+      createSeriesMarkers(candleRef.current!, allMarkers)
 
       mainChart.current?.timeScale().fitContent()
       subChart.current?.timeScale().fitContent()
@@ -332,7 +410,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     } finally {
       setLoading(false)
     }
-  }, [symbol, timeframe, broker, rangePreset, customFrom, customTo])
+  }, [symbol, timeframe, broker, rangePreset, customFrom, customTo, showTrades])
 
   useEffect(() => { fetchAndRender() }, [fetchAndRender])
 
@@ -455,6 +533,10 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
             <input type="checkbox" checked={showVolume} onChange={e => setShowVolume(e.target.checked)} />
             <span>Vol</span>
           </label>
+          <label className="flex items-center gap-1 text-xs cursor-pointer select-none">
+            <input type="checkbox" checked={showTrades} onChange={e => setShowTrades(e.target.checked)} className="accent-sky-400" />
+            <span className="text-sky-400">Trades</span>
+          </label>
         </div>
 
         {/* Sub-panel toggle */}
@@ -473,6 +555,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
         {!compact && (
           <div className="ml-auto flex items-center gap-2 text-xs text-gray-500">
             {signalCount > 0 && <span className="text-brand-400">{signalCount} signal{signalCount !== 1 ? 's' : ''}</span>}
+            {tradeCount > 0 && <span className="text-sky-400">{tradeCount} trade{tradeCount !== 1 ? 's' : ''}</span>}
             {candleCount > 0 && <span className="text-gray-600">{candleCount.toLocaleString()} candles</span>}
             {lastUpdated && <span>{lastUpdated}</span>}
           </div>
@@ -484,6 +567,11 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
         <div className="flex flex-wrap items-center gap-3 px-3 py-1 bg-dark-800/60 border-b border-dark-700 text-xs text-gray-500 shrink-0">
           <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-500" /> BUY</span>
           <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" /> SELL</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-sky-400" /> Trade entry (paper)</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-yellow-400" /> Trade entry (live)</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full border border-gray-400" /> Exit</span>
+          <span className="flex items-center gap-1.5"><span className="w-4 border-t-2 border-dashed border-green-500" /> TP</span>
+          <span className="flex items-center gap-1.5"><span className="w-4 border-t-2 border-dashed border-red-500" /> SL</span>
           <span className="flex items-center gap-1.5"><span className="w-4 h-px bg-amber-400" /> EMA 20</span>
           <span className="flex items-center gap-1.5"><span className="w-4 h-px bg-violet-400" /> EMA 50</span>
           {showBB && <span className="flex items-center gap-1.5"><span className="w-4 border-t-2 border-dashed border-indigo-400" /> BB(20,2)</span>}

@@ -5,7 +5,7 @@ from sqlalchemy import select, desc
 from loguru import logger
 
 from db.database import AsyncSessionLocal
-from db.models import Signal
+from db.models import Signal, Trade, OrderStatus
 
 router = APIRouter()
 
@@ -240,4 +240,75 @@ async def get_chart_signals(
         "symbol": symbol.upper(),
         "timeframe": timeframe,
         "broker": broker.lower(),
+    }
+
+
+@router.get("/trades")
+async def get_chart_trades(
+    symbol: str = Query(...),
+    broker: str = Query(default="binance"),
+    since: Optional[int] = Query(default=None, description="Start unix ms"),
+    until: Optional[int] = Query(default=None, description="End unix ms"),
+    limit: int = Query(default=500, le=2000),
+):
+    """
+    Return executed trades for a symbol/broker as chart overlays.
+    Each trade includes entry marker, exit marker, stop_loss, take_profit,
+    and realised PnL — allowing the frontend to draw entry/exit arrows and
+    TP/SL horizontal price levels on the chart.
+    """
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if until is None:
+        until = now_ms
+    if since is None:
+        since = until - 365 * 24 * 3600 * 1000  # default: last 1 year
+
+    since_dt = datetime.fromtimestamp(since / 1000, tz=timezone.utc).replace(tzinfo=None)
+    until_dt = datetime.fromtimestamp(until / 1000, tz=timezone.utc).replace(tzinfo=None)
+
+    async with AsyncSessionLocal() as session:
+        q = (
+            select(Trade)
+            .where(
+                Trade.symbol == symbol.upper(),
+                Trade.broker == broker.lower(),
+                Trade.status.in_([OrderStatus.OPEN, OrderStatus.FILLED]),
+                Trade.opened_at >= since_dt,
+                Trade.opened_at <= until_dt,
+            )
+            .order_by(desc(Trade.opened_at))
+            .limit(limit)
+        )
+        result = await session.execute(q)
+        trades = result.scalars().all()
+
+    out = []
+    for t in trades:
+        out.append({
+            "id": t.id,
+            "symbol": t.symbol,
+            "side": t.side,
+            "status": t.status.value if hasattr(t.status, "value") else t.status,
+            "is_paper": t.is_paper,
+            "strategy_name": t.strategy_name,
+            # Entry
+            "entry_price": t.entry_price,
+            "entry_time": int(t.opened_at.timestamp()) if t.opened_at else None,
+            # Exit (None if still open)
+            "exit_price": t.exit_price,
+            "exit_time": int(t.closed_at.timestamp()) if t.closed_at else None,
+            # Risk levels
+            "stop_loss": t.stop_loss,
+            "take_profit": t.take_profit,
+            # Performance
+            "pnl": t.pnl,
+            "pnl_pct": t.pnl_pct,
+            "quantity": t.quantity,
+        })
+
+    return {
+        "trades": out,
+        "symbol": symbol.upper(),
+        "broker": broker.lower(),
+        "count": len(out),
     }
