@@ -143,16 +143,21 @@ A step-by-step guide and scripts for deploying the full stack to a VPS (e.g. Dig
 
 ---
 
-## OPS-02 · Authentication & Multi-User Support
+## OPS-02 · Authentication & Multi-User Support ✅
 
 **What it is:**
-Currently the dashboard has no login. This feature adds JWT-based authentication so the app can be safely hosted on a public VPS.
+JWT-based authentication protecting all `/api/*` routes with a login page on the frontend, safe for hosting on a public VPS.
 
-**What needs building:**
-- User model + `POST /auth/login` + `POST /auth/register`
-- JWT token middleware protecting all `/api/*` routes
-- Login page on the frontend
-- `SECRET_KEY` in `.env` is already wired — just needs the auth routes
+**What was built:**
+- `User` DB model + alembic migration (`users` table: id, username, hashed_password, is_active, is_admin, created_at)
+- `backend/core/auth.py` — bcrypt password hashing + JWT helpers + `get_current_user` FastAPI dependency
+- `POST /auth/register` — first registered user auto-becomes admin; username ≥ 3 chars, password ≥ 8 chars
+- `POST /auth/login` — returns `{access_token, token_type, username, is_admin}`; 7-day expiry
+- `GET /auth/me` — returns current authenticated user info
+- All `/api/*` routers protected via `dependencies=[Depends(get_current_user)]`; `/auth/*`, `/health`, `/ws` remain public
+- `frontend/src/lib/auth.ts` — token storage helpers + axios interceptor (attaches Bearer header; redirects to `/login` on 401)
+- `frontend/src/pages/Login.tsx` — login form with username/password, error display, show/hide password toggle
+- `frontend/src/App.tsx` refactored into `ProtectedLayout` + auth-guarded `App` root with logout button in sidebar
 
 ---
 
@@ -230,7 +235,7 @@ A professional candlestick chart for every symbol/timeframe being traded, showin
 | 1 | ~~**ML-01** Feedback loop~~ ✅ | Medium | Very High |
 | 2 | ~~**UI-04** Candlestick chart~~ ✅ | Medium | High |
 | 3 | **OPS-01** VPS deployment | Low | High |
-| 4 | **OPS-02** Auth / login | Low | High (required for VPS) |
+| 4 | ~~**OPS-02** Auth / login~~ ✅ | Low | High (required for VPS) |
 | 5 | **ML-02** Regime detector | High | High |
 | 6 | **UI-03** Strategy code editor | Medium | High |
 | 7 | **UI-01** Analytics dashboard | Medium | Medium |

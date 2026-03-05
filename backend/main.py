@@ -1,13 +1,14 @@
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from config import settings
 from db.database import init_db
-from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications, ml, charts
+from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications, ml, charts, auth as auth_routes
 from api.websocket import ws_endpoint
+from core.auth import get_current_user
 
 
 async def _forward_test_scheduler():
@@ -198,18 +199,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register API routes
-app.include_router(signals.router, prefix="/api/signals", tags=["Signals"])
-app.include_router(positions.router, prefix="/api/positions", tags=["Positions"])
-app.include_router(backtest.router, prefix="/api/backtest", tags=["Backtest"])
-app.include_router(strategies.router, prefix="/api/strategies", tags=["Strategies"])
-app.include_router(brokers.router, prefix="/api/brokers", tags=["Brokers"])
-app.include_router(tools.router, prefix="/api/tools", tags=["Tools"])
-app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])
-app.include_router(forward_test.router, prefix="/api/forward-test", tags=["ForwardTest"])
-app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
-app.include_router(ml.router, prefix="/api/ml", tags=["ML"])
-app.include_router(charts.router, prefix="/api/charts", tags=["Charts"])
+# Auth routes — no authentication required
+app.include_router(auth_routes.router, prefix="/auth", tags=["Auth"])
+
+# Protected API routes — all require a valid JWT
+_auth = [Depends(get_current_user)]
+app.include_router(signals.router, prefix="/api/signals", tags=["Signals"], dependencies=_auth)
+app.include_router(positions.router, prefix="/api/positions", tags=["Positions"], dependencies=_auth)
+app.include_router(backtest.router, prefix="/api/backtest", tags=["Backtest"], dependencies=_auth)
+app.include_router(strategies.router, prefix="/api/strategies", tags=["Strategies"], dependencies=_auth)
+app.include_router(brokers.router, prefix="/api/brokers", tags=["Brokers"], dependencies=_auth)
+app.include_router(tools.router, prefix="/api/tools", tags=["Tools"], dependencies=_auth)
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"], dependencies=_auth)
+app.include_router(forward_test.router, prefix="/api/forward-test", tags=["ForwardTest"], dependencies=_auth)
+app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"], dependencies=_auth)
+app.include_router(ml.router, prefix="/api/ml", tags=["ML"], dependencies=_auth)
+app.include_router(charts.router, prefix="/api/charts", tags=["Charts"], dependencies=_auth)
 
 # WebSocket endpoint for real-time signal/trade broadcasts
 app.add_api_websocket_route("/ws", ws_endpoint)

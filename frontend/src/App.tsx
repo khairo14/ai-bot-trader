@@ -1,10 +1,10 @@
-import { useState } from 'react'
-import { Routes, Route, NavLink } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import toast from 'react-hot-toast'
 import {
   LayoutDashboard, FlaskConical, Play, Settings,
-  Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight, BarChart2
+  Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight, BarChart2, LogOut
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -16,6 +16,8 @@ import Strategies from './pages/Strategies'
 import StrategyLibrary from './pages/StrategyLibrary'
 import SettingsPage from './pages/Settings'
 import ChartPage from './pages/Chart'
+import Login from './pages/Login'
+import { isAuthenticated, clearAuth, getUsername } from './lib/auth'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -27,7 +29,9 @@ const navItems = [
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
-export default function App() {
+// ─── Protected layout (sidebar + all app routes) ────────────────────────────
+function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
+  const navigate = useNavigate()
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem('nav-collapsed') === 'true' } catch { return false }
   })
@@ -39,6 +43,14 @@ export default function App() {
       return next
     })
   }
+
+  const handleLogout = () => {
+    clearAuth()
+    onLogout()
+    navigate('/login', { replace: true })
+  }
+
+  const username = getUsername()
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -103,6 +115,24 @@ export default function App() {
           <NotificationBell collapsed={collapsed} />
         </div>
 
+        {/* User / Logout */}
+        <div className={clsx('px-2 pb-2 border-t border-dark-700 pt-2', collapsed ? '' : '')}>
+          {!collapsed && username && (
+            <p className="text-[10px] text-gray-600 px-2 mb-1 truncate">{username}</p>
+          )}
+          <button
+            onClick={handleLogout}
+            title="Logout"
+            className={clsx(
+              'w-full flex items-center rounded-lg text-sm text-gray-500 hover:text-gray-200 hover:bg-dark-700 transition-all',
+              collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2'
+            )}
+          >
+            <LogOut size={15} className="shrink-0" />
+            {!collapsed && 'Logout'}
+          </button>
+        </div>
+
         {/* Emergency Stop */}
         <div className="px-2 pb-4">
           <button
@@ -163,3 +193,26 @@ export default function App() {
     </div>
   )
 }
+
+// ─── Root: gate all app routes behind auth ───────────────────────────────────
+export default function App() {
+  const [authed, setAuthed] = useState(() => isAuthenticated())
+
+  // Re-check on localStorage changes (other tabs, storage events)
+  useEffect(() => {
+    const onStorage = () => setAuthed(isAuthenticated())
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+
+  return (
+    <Routes>
+      <Route path="/login" element={<Login onLogin={() => setAuthed(true)} />} />
+      <Route
+        path="*"
+        element={authed ? <ProtectedLayout onLogout={() => setAuthed(false)} /> : <Navigate to="/login" replace />}
+      />
+    </Routes>
+  )
+}
+

@@ -224,3 +224,18 @@ class Notification(Base):
     email_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     extra: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)   # symbol, broker, trade_id, etc.
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+# ─────────────────────────────────────────────────────────
+# Users (Auth)
+# ─────────────────────────────────────────────────────────
+class User(Base):
+    """Dashboard user account. Passwords are bcrypt-hashed."""
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(200), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
