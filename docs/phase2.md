@@ -191,17 +191,60 @@ A built-in code editor in the dashboard where you can write, upload, and hot-rel
 
 ---
 
+## UI-04 · Candlestick Chart with Signal Markers
+
+**What it is:**
+A TradingView-style candlestick chart for every symbol/timeframe being traded, showing exactly where the strategy placed each entry and exit signal — across all three brokers and all asset classes.
+
+**Covers:**
+- **Binance** — crypto pairs (BTC/USDT, ETH/USDT, etc.) — OHLCV from Binance REST
+- **Alpaca** — US stocks (SPY, AAPL, etc.) — OHLCV from Alpaca Bars API
+- **IBKR** — stocks, forex, and options underlyings — OHLCV via ib_insync historical data
+
+**What the chart shows:**
+- Candlestick OHLCV price action for any symbol + timeframe
+- ▲ BUY / ▼ SELL markers at the exact candle where the signal fired (price + timestamp from DB)
+- HOLD signals shown as a neutral dot (optional, toggleable)
+- Indicator overlays: EMA lines, RSI panel below, Bollinger Bands — same indicators the strategy actually uses
+- Stop loss and take profit lines for open/recent paper trades
+- For options: shows the underlying asset chart (e.g. SPY candles for an SPY options strategy)
+
+**Symbol/Broker selector:**
+- Dropdown to pick broker → asset class → symbol → timeframe
+- Crypto pairs grouped under Binance (e.g. BTC/USDT · 1h, 4h, 1d)
+- Stock tickers grouped under Alpaca / IBKR
+- Options strategies show underlying chart with an "Options" badge
+
+**What needs building:**
+
+*Backend:*
+- `GET /api/charts/candles?symbol=BTC/USDT&timeframe=4h&broker=binance&limit=200` — returns OHLCV array; fetches live from broker on demand (not stored in DB — fresh fetch each time)
+- `GET /api/charts/signals?symbol=BTC/USDT&timeframe=4h&limit=50` — returns signals from DB with `timestamp`, `price`, `signal_type`, `strategy_name`
+- Broker routing: Binance → `BinanceClient.get_ohlcv()`, Alpaca → Alpaca Bars, IBKR → `ib_insync.reqHistoricalData()`
+
+*Frontend:*
+- New page `/charts` in sidebar navigation
+- [Lightweight Charts](https://tradingview.github.io/lightweight-charts/) (TradingView open-source lib) for the candlestick + marker rendering
+- Symbol/broker/timeframe selector dropdowns at top
+- Marker series: BUY = green up-arrow, SELL = red down-arrow, HOLD = grey dot
+- Sub-panel for RSI (line series below the main chart)
+- Toggle checkboxes: Show Signals | Show EMA | Show RSI | Show BB
+- Auto-refreshes markers when a new `signal` WS event arrives
+
+---
+
 ## Priority Order
 
 | # | Item | Effort | Impact |
 |---|---|---|---|
 | 1 | **ML-01** Feedback loop | Medium | Very High |
-| 2 | **OPS-01** VPS deployment | Low | High |
-| 3 | **OPS-02** Auth / login | Low | High (required for VPS) |
-| 4 | **ML-02** Regime detector | High | High |
-| 5 | **UI-03** Strategy code editor | Medium | High |
-| 6 | **UI-01** Analytics dashboard | Medium | Medium |
-| 7 | **EX-01** Options execution | High | Medium |
-| 8 | **EX-02** Trailing stops | Low | Medium |
-| 9 | **UI-02** Multi-timeframe | Medium | Medium |
-| 10 | **ML-03** Portfolio optimization | High | Medium |
+| 2 | **UI-04** Candlestick chart | Medium | High |
+| 3 | **OPS-01** VPS deployment | Low | High |
+| 4 | **OPS-02** Auth / login | Low | High (required for VPS) |
+| 5 | **ML-02** Regime detector | High | High |
+| 6 | **UI-03** Strategy code editor | Medium | High |
+| 7 | **UI-01** Analytics dashboard | Medium | Medium |
+| 8 | **EX-01** Options execution | High | Medium |
+| 9 | **EX-02** Trailing stops | Low | Medium |
+| 10 | **UI-02** Multi-timeframe | Medium | Medium |
+| 11 | **ML-03** Portfolio optimization | High | Medium |
