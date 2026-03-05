@@ -4,6 +4,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Signal types that are worth tracking for ML feedback
+_TRACKABLE_SIGNALS = {"BUY", "SELL", "SHORT", "COVER"}
+
 
 @celery_app.task(name="tasks.signal_runner.run_signals", bind=True, max_retries=3)
 def run_signals(self):
@@ -105,6 +108,21 @@ def run_signals(self):
                         )
                         session.add(db_signal)
                         await session.flush()   # get db_signal.id
+
+                        # ── Create TradeOutcome for ML feedback loop ──────────
+                        if sig.signal in _TRACKABLE_SIGNALS:
+                            from db.models import TradeOutcome as TradeOutcomeModel
+                            session.add(TradeOutcomeModel(
+                                signal_id=db_signal.id,
+                                symbol=sig.symbol,
+                                timeframe=sig.timeframe,
+                                strategy_name=sig.strategy_name,
+                                signal_type=sig.signal,
+                                entry_price=sig.entry_price,
+                                stop_loss=sig.stop_loss,
+                                take_profit=sig.take_profit,
+                                resolved=False,
+                            ))
 
                         # ── Broadcast signal to WebSocket clients ─────────────
                         await ws_manager.broadcast("signal", {

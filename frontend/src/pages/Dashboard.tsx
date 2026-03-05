@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2 } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
@@ -62,6 +62,19 @@ const StatCard = ({ label, value, sub, color = 'text-white' }: { label: string; 
   </div>
 )
 
+interface MLStatus {
+  model_count: number
+  last_retrain: string | null
+  outcomes_total: number
+  outcomes_resolved: number
+  outcomes_pending: number
+  win_rate_pct: number | null
+  avg_pnl_pct: number | null
+  feedback_loop_active: boolean
+  models: { symbol: string; trained_date: string | null }[]
+}
+
+
 export default function Dashboard() {
   const [signals, setSignals] = useState<Signal[]>([])
   const [pendingSignals, setPendingSignals] = useState<Signal[]>([])
@@ -69,18 +82,21 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [actioning, setActioning] = useState<number | null>(null)
+  const [mlStatus, setMlStatus] = useState<MLStatus | null>(null)
 
   const fetchAll = async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     // Fetch independently — a slow broker never blocks signals from loading
-    const [sigResult, portResult, pendingResult] = await Promise.allSettled([
+    const [sigResult, portResult, pendingResult, mlResult] = await Promise.allSettled([
       axios.get('/api/signals/?limit=20'),
       axios.get('/api/portfolio/summary'),
       axios.get('/api/signals/pending'),
+      axios.get('/api/ml/status'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
     if (pendingResult.status === 'fulfilled') setPendingSignals(pendingResult.value.data.signals || [])
+    if (mlResult.status === 'fulfilled') setMlStatus(mlResult.value.data)
     setLoading(false)
     setRefreshing(false)
   }
@@ -237,6 +253,58 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* ML Feedback Loop Status */}
+      <div className={`bg-dark-800 border rounded-xl p-4 ${mlStatus?.feedback_loop_active ? 'border-brand-500/40' : 'border-dark-600'}`}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Brain size={15} className={mlStatus?.feedback_loop_active ? 'text-brand-400' : 'text-gray-500'} />
+            <span className="text-sm font-semibold text-gray-300">ML Feedback Loop</span>
+            {mlStatus?.feedback_loop_active
+              ? <span className="text-xs bg-brand-500/15 text-brand-400 px-2 py-0.5 rounded-full">Active</span>
+              : <span className="text-xs bg-dark-700 text-gray-500 px-2 py-0.5 rounded-full">Warming up</span>
+            }
+          </div>
+          {mlStatus?.last_retrain && (
+            <span className="text-xs text-gray-500">
+              Last retrain: {new Date(mlStatus.last_retrain).toLocaleDateString()}
+            </span>
+          )}
+        </div>
+        <div className="grid grid-cols-4 gap-3">
+          <div className="bg-dark-700 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-1">Models Trained</p>
+            <p className="text-lg font-bold text-white">{mlStatus?.model_count ?? '—'}</p>
+            <p className="text-xs text-gray-600 mt-0.5 truncate">
+              {mlStatus?.models.map(m => m.symbol).join(', ') || 'none yet'}
+            </p>
+          </div>
+          <div className="bg-dark-700 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-1">Outcomes Tracked</p>
+            <p className="text-lg font-bold text-white">{mlStatus?.outcomes_total ?? '—'}</p>
+            <p className="text-xs text-gray-600 mt-0.5">{mlStatus?.outcomes_pending ?? 0} pending resolution</p>
+          </div>
+          <div className="bg-dark-700 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-1">Win Rate</p>
+            <p className={`text-lg font-bold ${mlStatus?.win_rate_pct != null ? (mlStatus.win_rate_pct >= 50 ? 'text-green-400' : 'text-red-400') : 'text-gray-500'}`}>
+              {mlStatus?.win_rate_pct != null ? `${mlStatus.win_rate_pct}%` : '—'}
+            </p>
+            <p className="text-xs text-gray-600 mt-0.5">{mlStatus?.outcomes_resolved ?? 0} resolved</p>
+          </div>
+          <div className="bg-dark-700 rounded-lg p-3">
+            <p className="text-xs text-gray-500 mb-1">Avg Signal P&L</p>
+            <p className={`text-lg font-bold ${mlStatus?.avg_pnl_pct != null ? (mlStatus.avg_pnl_pct >= 0 ? 'text-green-400' : 'text-red-400') : 'text-gray-500'}`}>
+              {mlStatus?.avg_pnl_pct != null ? `${mlStatus.avg_pnl_pct > 0 ? '+' : ''}${mlStatus.avg_pnl_pct}%` : '—'}
+            </p>
+            <p className="text-xs text-gray-600 mt-0.5">per signal</p>
+          </div>
+        </div>
+        {!mlStatus?.feedback_loop_active && (
+          <p className="text-xs text-gray-600 mt-3">
+            Outcomes are collected as the bot fires signals. The resolver runs nightly to measure win/loss. After the first batch resolves, win rate and model accuracy will appear here.
+          </p>
+        )}
+      </div>
 
       {/* Pending Approvals (semi-auto signals awaiting confirmation) */}
       {pendingSignals.length > 0 && (

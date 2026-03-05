@@ -45,6 +45,13 @@ class BrokerName(str, enum.Enum):
     IBKR = "ibkr"
 
 
+class OutcomeResult(str, enum.Enum):
+    WIN = "win"
+    LOSS = "loss"
+    BREAK_EVEN = "break_even"
+    EXPIRED = "expired"    # horizon passed, no SL/TP hit — measured return
+
+
 class NotificationLevel(str, enum.Enum):
     INFO = "info"
     SUCCESS = "success"
@@ -85,6 +92,40 @@ class Signal(Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
 
     trade: Mapped[Optional[Trade]] = relationship("Trade", back_populates="signal", uselist=False)
+    outcome: Mapped[Optional[TradeOutcome]] = relationship("TradeOutcome", back_populates="signal", uselist=False)
+
+
+# ─────────────────────────────────────────────────────────
+# Trade Outcomes (ML feedback loop)
+# ─────────────────────────────────────────────────────────
+class TradeOutcome(Base):
+    """Records the resolved outcome of a BUY/SELL signal for ML retraining.
+
+    Created immediately when a non-HOLD signal fires (resolved=False).
+    The nightly outcome_resolver task walks OHLCV, detects SL/TP hits or
+    measures the 24-candle forward return, and marks resolved=True.
+    """
+    __tablename__ = "trade_outcomes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    signal_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("signals.id"), nullable=True, unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    signal_type: Mapped[str] = mapped_column(String(10), nullable=False)   # BUY / SELL / SHORT
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    stop_loss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    take_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    outcome: Mapped[Optional[OutcomeResult]] = mapped_column(SAEnum(OutcomeResult), nullable=True)
+    pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # % gain/loss
+    candles_held: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ml_label: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)   # 1=win, 0=loss (for retraining)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    signal: Mapped[Optional[Signal]] = relationship("Signal", back_populates="outcome")
 
 
 # ─────────────────────────────────────────────────────────

@@ -166,6 +166,7 @@ class ModelTrainer:
     MODEL_DIR: pathlib.Path = MODEL_DIR
     MIN_AUC: float = 0.55
     MIN_ROWS: int = 50     # minimum labelled rows to attempt training
+    LIVE_LABEL_WEIGHT: int = 3   # repeat each live row N times (upweights real outcomes)
 
     async def retrain_all(self) -> dict:
         """Main entry point called by the Celery retrain task.
@@ -226,6 +227,70 @@ class ModelTrainer:
             "symbols": results,
         }
 
+    async def _fetch_live_labels(self, symbol: str, df: "pd.DataFrame") -> "Optional[pd.DataFrame]":
+        """
+        Query resolved TradeOutcome rows for `symbol` and extract feature rows
+        from the already-fetched OHLCV `df`.  Returns a DataFrame with the same
+        FEATURE_COLS + 'label' column, or None if no live labels exist.
+
+        Each live outcome row is repeated LIVE_LABEL_WEIGHT times so the model
+        up-weights ground-truth signal outcomes over heuristic yfinance labels.
+        """
+        try:
+            from db.database import AsyncSessionLocal
+            from db.models import TradeOutcome
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(TradeOutcome).where(
+                        TradeOutcome.symbol == symbol,
+                        TradeOutcome.resolved == True,  # noqa: E712
+                        TradeOutcome.ml_label != None,  # noqa: E711
+                    )
+                )
+                outcomes = result.scalars().all()
+
+            if not outcomes:
+                return None
+
+            feat_df = _compute_features(df)
+            feat_df = feat_df.dropna()
+
+            FEATURE_COLS = ["rsi", "macd_hist", "atr_norm", "vol_ratio", "bb_pct", "log_ret"]
+            live_rows = []
+
+            for o in outcomes:
+                if o.created_at is None:
+                    continue
+                # Find the closest date in df index on or before the signal date
+                signal_date = o.created_at.date()
+                import pandas as pd
+                mask = feat_df.index.date <= signal_date
+                if not mask.any():
+                    continue
+                row = feat_df[mask].iloc[-1]
+                if row[FEATURE_COLS].isna().any():
+                    continue
+                row_dict = {c: row[c] for c in FEATURE_COLS}
+                row_dict["label"] = int(o.ml_label)
+                # Upweight live labels by repeating rows
+                for _ in range(self.LIVE_LABEL_WEIGHT):
+                    live_rows.append(row_dict)
+
+            if not live_rows:
+                return None
+
+            import pandas as pd
+            live_df = pd.DataFrame(live_rows)
+            logger.info(f"[trainer] {symbol}: loaded {len(outcomes)} live outcome labels "
+                        f"({len(live_rows)} rows after weighting)")
+            return live_df
+
+        except Exception as exc:
+            logger.warning(f"[trainer] Could not load live labels for {symbol}: {exc}")
+            return None
+
     async def train_symbol(self, symbol: str, broker: str) -> dict:
         """Train or update model for a single symbol.
 
@@ -248,6 +313,15 @@ class ModelTrainer:
         # Combine and drop NaN rows
         feat_df["label"] = labels
         feat_df = feat_df.dropna()
+
+        # ── Merge live outcome labels from DB (ML feedback loop) ────────────
+        live_df = await self._fetch_live_labels(symbol, df)
+        if live_df is not None and not live_df.empty:
+            import pandas as pd
+            FEATURE_COLS_LABEL = ["rsi", "macd_hist", "atr_norm", "vol_ratio", "bb_pct", "log_ret", "label"]
+            base_df = feat_df[FEATURE_COLS_LABEL].copy()
+            feat_df = pd.concat([base_df, live_df], ignore_index=True)
+            logger.info(f"[trainer] {symbol}: combined {len(base_df)} historical + {len(live_df)} live rows")
 
         if len(feat_df) < self.MIN_ROWS:
             return {

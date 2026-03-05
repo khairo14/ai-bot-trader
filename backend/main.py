@@ -6,7 +6,7 @@ from loguru import logger
 
 from config import settings
 from db.database import init_db
-from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications
+from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications, ml
 from api.websocket import ws_endpoint
 
 
@@ -208,6 +208,7 @@ app.include_router(tools.router, prefix="/api/tools", tags=["Tools"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])
 app.include_router(forward_test.router, prefix="/api/forward-test", tags=["ForwardTest"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
+app.include_router(ml.router, prefix="/api/ml", tags=["ML"])
 
 # WebSocket endpoint for real-time signal/trade broadcasts
 app.add_api_websocket_route("/ws", ws_endpoint)

@@ -11,7 +11,7 @@ celery_app = Celery(
     "ai_bot_trader",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["tasks.ml_retrain", "tasks.signal_runner"],
+    include=["tasks.ml_retrain", "tasks.signal_runner", "tasks.outcome_resolver"],
 )
 
 celery_app.conf.update(
@@ -32,10 +32,15 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.signal_runner.run_signals",
         "schedule": 300,  # every 5 minutes
     },
-    # Retrain ML models weekly (Sunday midnight UTC)
+    # Resolve pending trade outcomes nightly at 01:30 UTC
+    "resolve-outcomes-nightly": {
+        "task": "tasks.outcome_resolver.resolve_outcomes",
+        "schedule": crontab(hour=1, minute=30),
+    },
+    # Retrain ML models weekly (Sunday 02:00 UTC — after outcomes are resolved)
     "ml-retrain-weekly": {
         "task": "tasks.ml_retrain.retrain_all",
-        "schedule": crontab(hour=0, minute=0, day_of_week="sunday"),
+        "schedule": crontab(hour=2, minute=0, day_of_week="sunday"),
     },
 }
 
