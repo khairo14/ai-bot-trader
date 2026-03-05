@@ -5,10 +5,10 @@ Phase 2 focuses on making the system **smarter over time** and **production-hard
 
 ---
 
-## ML-01 · Automatic ML Feedback Loop (Closed-Loop Learning)
+## ML-01 · Automatic ML Feedback Loop (Closed-Loop Learning) ✅
 
 **What it is:**
-Right now the ML model is static — it's trained once and frozen. This feature closes the loop: the bot monitors the real outcome of every signal it generated, then uses those outcomes to continuously improve the model.
+The ML model closes the loop: the bot monitors the real outcome of every signal it generated, then uses those outcomes to continuously improve the model.
 
 **The loop:**
 ```
@@ -25,17 +25,13 @@ Nightly retrain: model updated with new outcome data
 Better predictions tomorrow
 ```
 
-**What improves:**
-- Model adapts to current market regime (no longer frozen on 2024 data)
-- Feature weights re-ranked as market dynamics evolve
-- Model learns which signals work in bull vs. bear vs. ranging conditions
-- Accuracy compounds over time as live outcome data accumulates
-
-**What needs building:**
-- `TradeOutcome` DB table — links `Signal.id` → outcome (win/loss/pnl) after N candles
-- Celery beat task that resolves pending outcomes nightly
-- Retrain pipeline that uses live outcomes as labels (in addition to historical yfinance data)
-- AUC gate maintained on holdout set — only deploy if new model is better
+**What was built:**
+- `TradeOutcome` DB table (`backend/db/models.py`) — created automatically when any non-HOLD signal fires; stores entry, SL/TP, symbol, timeframe, resolved flag
+- `tasks/outcome_resolver.py` — async resolver that walks OHLCV forward from each signal's entry candle, detects SL/TP hits or measures 24-candle forward return; Celery beat task scheduled nightly at 01:30 UTC
+- `models/trainer.py` — `_fetch_live_labels()` blends resolved live outcome rows (3× weighted) with historical yfinance heuristic labels; `MIN_AUC = 0.55` holdout gate before saving new model
+- `tasks/ml_retrain.py` — Celery task scheduled weekly (Sunday 02:00 UTC); calls `ModelTrainer.retrain_all()` then hot-reloads `MLScorer` cache
+- `api/routes/ml.py` — `GET /api/ml/status` (model registry, outcome counts, win rate, avg P&L), `POST /api/ml/resolve` (manual trigger), `POST /api/ml/retrain` (manual trigger)
+- Dashboard shows feedback loop status, win rate, and avg signal P&L once first batch resolves
 
 **Priority:** High — this is the most impactful Phase 2 item.
 
@@ -231,7 +227,7 @@ A professional candlestick chart for every symbol/timeframe being traded, showin
 
 | # | Item | Effort | Impact |
 |---|---|---|---|
-| 1 | **ML-01** Feedback loop | Medium | Very High |
+| 1 | ~~**ML-01** Feedback loop~~ ✅ | Medium | Very High |
 | 2 | ~~**UI-04** Candlestick chart~~ ✅ | Medium | High |
 | 3 | **OPS-01** VPS deployment | Low | High |
 | 4 | **OPS-02** Auth / login | Low | High (required for VPS) |
