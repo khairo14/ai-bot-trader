@@ -179,8 +179,8 @@ class ForwardEngine:
             trade.broker_order_id = f"paper_{signal.symbol}_{int(datetime.utcnow().timestamp())}"
             self._paper_positions[signal.symbol] = trade
             # Update in-memory balance (will be recomputed from DB on next initialize())
-            self._paper_balance -= validation.position_size * (signal.entry_price or 0)
-            logger.info(f"[ForwardEngine] 📄 PAPER FILL: {signal.signal} {signal.symbol} @ {signal.entry_price}")
+            self._paper_balance -= effective_size * (signal.entry_price or 0)
+            logger.info(f"[ForwardEngine] 📄 PAPER FILL: {signal.signal} {signal.symbol} @ {signal.entry_price} qty={effective_size}")
         else:
             # ── Live order — broker API call ──────────────────────────────────────
             # Brokers reject orders during:
@@ -195,7 +195,7 @@ class ForwardEngine:
                 result = await broker.place_order(
                     symbol=signal.symbol,
                     side=side,
-                    quantity=validation.position_size,
+                    quantity=effective_size,
                     order_type="market",
                     stop_price=signal.stop_loss,
                     take_profit_price=signal.take_profit,

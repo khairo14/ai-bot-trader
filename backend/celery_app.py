@@ -11,7 +11,7 @@ celery_app = Celery(
     "ai_bot_trader",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["tasks.ml_retrain", "tasks.signal_runner", "tasks.outcome_resolver"],
+    include=["tasks.ml_retrain", "tasks.signal_runner", "tasks.outcome_resolver", "tasks.portfolio_rebalancer"],
 )
 
 celery_app.conf.update(
