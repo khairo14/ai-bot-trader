@@ -21,6 +21,19 @@ STRATEGY_REGISTRY = {
     "bull_call_spread":  BullCallSpreadStrategy,
 }
 
+# Asset class that each broker trades in for non-options strategies.
+# Used to correct Signal metadata after generation, since the OHLCV strategy
+# classes are hardcoded binance/crypto but the underlying indicator logic
+# (MACD, RSI, BB, ADX) works identically on any OHLCV data.
+BROKER_ASSET_CLASS: Dict[str, str] = {
+    "binance": "crypto",
+    "alpaca":  "stock",
+    "ibkr":    "stock",
+}
+
+# Options strategies manage their own broker/asset_class metadata — never override them.
+_OPTIONS_STRATEGIES = frozenset({"iron_condor", "covered_call", "bull_call_spread"})
+
 
 class SignalEngine:
     """
@@ -62,6 +75,15 @@ class SignalEngine:
 
         strategy = self.get_strategy(strategy_name)
         signal = strategy.generate_signal(data, symbol=symbol, timeframe=timeframe)
+
+        # Correct Signal metadata to reflect the actual broker and asset class used.
+        # OHLCV strategies (hybrid, momentum, mean_reversion) hardcode broker="binance"
+        # and asset_class="crypto" in their class definition, but their indicator logic
+        # (MACD, RSI, BB, ADX) works on any OHLCV feed. Options strategies own their
+        # metadata and must not be overridden.
+        if strategy_name not in _OPTIONS_STRATEGIES:
+            signal.broker = broker_name
+            signal.asset_class = BROKER_ASSET_CLASS.get(broker_name, signal.asset_class)
 
         logger.info(
             f"[SignalEngine] {strategy_name} | {symbol} | {timeframe} → "
