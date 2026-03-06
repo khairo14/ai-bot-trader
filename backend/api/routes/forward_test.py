@@ -125,7 +125,6 @@ def is_market_open(broker_name: str) -> bool:
 
 async def _get_paper_stats(db: AsyncSession) -> dict:
     """Compute aggregated paper trading statistics from the DB."""
-    from api.routes.portfolio import _safe_balance
 
     # Active paper strategies
     strat_q = await db.execute(
@@ -136,6 +135,19 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
     )
     active_strategies = strat_q.scalars().all()
     active_brokers = sorted({s.broker.value for s in active_strategies})
+
+    # Real broker API balances (same source as Dashboard broker cards)
+    from api.routes.portfolio import _safe_balance
+    binance_bal, alpaca_bal, ibkr_bal = await _asyncio.gather(
+        _safe_balance("binance"),
+        _safe_balance("alpaca"),
+        _safe_balance("ibkr"),
+        return_exceptions=True,
+    )
+    api_balances: dict = {}
+    for b in [binance_bal, alpaca_bal, ibkr_bal]:
+        if not isinstance(b, Exception):
+            api_balances[b["broker"]] = b
 
     # Sum closed paper trade P&L
     closed = await db.execute(
@@ -149,50 +161,36 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
     )
     open_trades = open_q.scalars().all()
 
-    # ── Per-broker breakdown using real broker balances ───────────────────────
-    all_broker_names = sorted({
-        *{t.broker.value for t in closed_trades},
-        *{t.broker.value for t in open_trades},
-        *active_brokers,
-    })
-
-    # Fetch real balances from all brokers in parallel (never raises)
-    live_balances: dict[str, dict] = {}
-    if all_broker_names:
-        results = await _asyncio.gather(*(_safe_balance(b) for b in all_broker_names))
-        live_balances = {r["broker"]: r for r in results}
-
+    # ── All 3 brokers always present ─────────────────────────────────────────
     broker_breakdown = []
-    for b in all_broker_names:
-        live = live_balances.get(b, {})
-        b_open_cost  = sum(
-            (t.quantity or 0) * (t.entry_price or 0)
-            for t in open_trades if t.broker.value == b
-        )
-        b_open_pnl   = sum(t.pnl or 0.0 for t in open_trades   if t.broker.value == b)
+    for b in ["binance", "alpaca", "ibkr"]:
+        api          = api_balances.get(b, {})
         b_closed_pnl = sum(t.pnl or 0.0 for t in closed_trades if t.broker.value == b)
+        b_open_pnl   = sum(t.pnl or 0.0 for t in open_trades   if t.broker.value == b)
         b_open_count = sum(1              for t in open_trades   if t.broker.value == b)
         b_strats     = [s.name for s in active_strategies if s.broker.value == b]
         broker_breakdown.append({
             "broker":         b,
-            "total":          live.get("total", 0.0),
-            "available":      live.get("available", 0.0),
-            "currency":       live.get("currency", "USD"),
-            "connected":      live.get("connected", False),
-            "in_use":         round(b_open_cost, 2),          # capital currently in open paper positions
+            "connected":      api.get("connected", False),
+            "is_paper":       api.get("is_paper", True),
+            "total":          api.get("total", 0.0),
+            "available":      api.get("available", 0.0),
+            "currency":       api.get("currency", "USD"),
             "pnl":            round(b_closed_pnl + b_open_pnl, 4),
             "open_positions": b_open_count,
             "strategies":     b_strats,
+            "is_active":      b in active_brokers,
         })
 
     # ── Aggregates ────────────────────────────────────────────────────────────
     realized_pnl   = sum(t.pnl or 0.0 for t in closed_trades)
     unrealized_pnl = sum(t.pnl or 0.0 for t in open_trades)
     open_count     = len(open_trades)
-    # paper_balance is no longer meaningful as a single number when brokers
-    # have different real balances — keep it as sum-of-totals so existing
-    # aggregate stats cards aren't broken.
-    total_balance  = sum(b["total"] for b in broker_breakdown)
+    # Total = sum of real API balances for active+connected brokers
+    total_balance = sum(
+        bd["total"] for bd in broker_breakdown
+        if bd["connected"] and bd["is_active"]
+    ) or sum(bd["total"] for bd in broker_breakdown if bd["connected"])
 
     # Days running — from earliest trade
     first_q = await db.execute(

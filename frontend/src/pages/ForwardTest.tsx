@@ -13,14 +13,15 @@ const WS_URL = (() => {
 
 interface BrokerBreakdown {
   broker: string
+  connected: boolean
+  is_paper: boolean
   total: number
   available: number
   currency: string
-  connected: boolean
-  in_use: number
   pnl: number
   open_positions: number
   strategies: string[]
+  is_active: boolean
 }
 
 interface ForwardStatus {
@@ -329,21 +330,61 @@ export default function ForwardTest() {
         </div>
       </div>
 
+      {/* Broker Balance Cards — always show all 3, highlight active ones */}
+      <div className="grid grid-cols-3 gap-4">
+        {(status?.broker_breakdown ?? [
+          { broker: 'binance', connected: false, is_paper: true, total: 0, available: 0, currency: 'USDT', pnl: 0, open_positions: 0, strategies: [], is_active: false },
+          { broker: 'alpaca',  connected: false, is_paper: true, total: 0, available: 0, currency: 'USD',  pnl: 0, open_positions: 0, strategies: [], is_active: false },
+          { broker: 'ibkr',    connected: false, is_paper: true, total: 0, available: 0, currency: 'USD',  pnl: 0, open_positions: 0, strategies: [], is_active: false },
+        ] as BrokerBreakdown[]).map((b) => (
+          <div key={b.broker} className={`bg-dark-800 border rounded-xl p-4 transition-opacity ${
+            b.is_active ? 'border-brand-500/40' : b.connected ? 'border-dark-600' : 'border-dark-700 opacity-50'
+          }`}>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs text-gray-500 uppercase tracking-wider">{b.broker}</p>
+              <div className="flex items-center gap-1.5">
+                {b.is_paper && <span className="text-xs text-yellow-500 bg-yellow-900/20 px-1.5 py-0.5 rounded">paper</span>}
+                {b.is_active
+                  ? <span className="w-2 h-2 rounded-full bg-brand-500 animate-pulse" title="Active in forward test" />
+                  : b.connected
+                    ? <span className="w-2 h-2 rounded-full bg-gray-600" title="Connected, not in use" />
+                    : <span className="w-2 h-2 rounded-full bg-dark-500" title="Offline" />
+                }
+              </div>
+            </div>
+            <p className={`text-xl font-bold ${b.connected ? 'text-white' : 'text-gray-600'}`}>
+              {loading ? <SkeletonLine className="h-6 w-28 mt-1" /> : b.connected ? fmtUSD(b.total) : '—'}
+            </p>
+            {b.connected && (
+              <p className="text-xs text-gray-600 mt-0.5">
+                {fmtUSD(b.available)} available
+                {b.pnl !== 0 && (
+                  <span className={`ml-1.5 ${b.pnl > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    ({b.pnl > 0 ? '+' : ''}{fmtUSD(b.pnl)} P&L)
+                  </span>
+                )}
+              </p>
+            )}
+            {b.is_active && b.strategies.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {b.strategies.map(s => (
+                  <span key={s} className="text-xs bg-brand-500/10 text-brand-400 px-1.5 py-0.5 rounded truncate max-w-full">{s}</span>
+                ))}
+              </div>
+            )}
+            {!b.is_active && b.connected && (
+              <p className="text-xs text-gray-700 mt-1.5">No active strategies</p>
+            )}
+            {!b.connected && (
+              <p className="text-xs text-gray-700 mt-1.5">Offline — not configured</p>
+            )}
+          </div>
+        ))}
+      </div>
+
       {/* Stats Cards */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         {[
-          {
-            label: status?.broker_breakdown.length === 1
-              ? `${status.broker_breakdown[0].broker.toUpperCase()} Balance`
-              : 'Broker Balances',
-            value: status
-              ? status.broker_breakdown.length === 1
-                ? fmtUSD(status.broker_breakdown[0].total)
-                : `${status.broker_breakdown.length} brokers`
-              : '—',
-            sub: status ? '__breakdown__' : '',
-            breakdown: status?.broker_breakdown ?? [],
-          },
           {
             label: 'Open Positions',
             value: status?.open_positions ?? '—',
@@ -360,41 +401,11 @@ export default function ForwardTest() {
             value: status?.days_running ?? '—',
             sub: status ? `${status.total_closed_trades} closed trade${status.total_closed_trades === 1 ? '' : 's'}` : '',
           },
-        ].map(({ label, value, sub, color, breakdown }) => (
+        ].map(({ label, value, sub, color }) => (
           <div key={label} className="bg-dark-800 border border-dark-600 rounded-xl p-4">
             <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">{label}</p>
             <p className={`text-xl font-bold ${color ?? 'text-white'}`}>{loading ? <SkeletonLine className="h-6 w-24 mt-1" /> : value}</p>
-            sub === '__breakdown__' && breakdown && breakdown.length > 0 ? (
-              <div className="mt-2 space-y-2">
-                {breakdown.map((b: BrokerBreakdown) => (
-                  <div key={b.broker} className="rounded-lg bg-dark-700/60 px-3 py-2">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-semibold text-gray-300 capitalize">{b.broker}</span>
-                      {!b.connected && <span className="text-xs text-red-400">offline</span>}
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-gray-500">total</span>
-                      <span className="text-xs font-medium text-white">{fmtUSD(b.total)}</span>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-gray-500">available</span>
-                      <span className="text-xs font-medium text-green-400">{fmtUSD(b.available)}</span>
-                    </div>
-                    {b.in_use > 0 && (
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-gray-500">in use ({b.open_positions} pos)</span>
-                        <span className="text-xs font-medium text-yellow-400">{fmtUSD(b.in_use)}</span>
-                      </div>
-                    )}
-                    {b.strategies.length > 0 && (
-                      <p className="text-xs text-gray-600 mt-1 truncate">{b.strategies.join(', ')}</p>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : sub && sub !== '__breakdown__' ? (
-              <p className="text-xs text-gray-600 mt-0.5">{sub}</p>
-            ) : null}
+            {sub && <p className="text-xs text-gray-600 mt-0.5">{sub}</p>}
           </div>
         ))}
       </div>
