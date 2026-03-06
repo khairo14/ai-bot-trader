@@ -310,7 +310,11 @@ class ForwardEngine:
                 order_type="market",
             )
         except Exception as _close_err:
-            logger.warning(f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err}")
+            logger.error(
+                f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
+                "— trade left OPEN to avoid phantom fill"
+            )
+            raise
 
         # ── Compute realised PnL ──────────────────────────────────────────
         if exit_price and trade.entry_price:
@@ -352,14 +356,20 @@ class ForwardEngine:
             )
             all_open = open_q.scalars().all()
             for trade in all_open:
-                await self.close_position(trade, reason="emergency_stop")
-                closed += 1
+                try:
+                    await self.close_position(trade, reason="emergency_stop")
+                    closed += 1
+                except Exception as _e:
+                    logger.error(f"[ForwardEngine] Emergency stop: failed to close {trade.symbol} id={trade.id}: {_e}")
             await db_session.commit()
         else:
             # Fallback: in-memory only (should not happen in normal usage)
             for symbol, trade in list(self._paper_positions.items()):
-                await self.close_position(trade, reason="emergency_stop")
-                closed += 1
+                try:
+                    await self.close_position(trade, reason="emergency_stop")
+                    closed += 1
+                except Exception as _e:
+                    logger.error(f"[ForwardEngine] Emergency stop: failed to close {symbol}: {_e}")
 
         self._paper_positions.clear()
         logger.warning(f"[ForwardEngine] Emergency stop: {closed} positions closed.")

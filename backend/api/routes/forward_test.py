@@ -776,7 +776,10 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
     open_trades = q.scalars().all()
 
     for t in open_trades:
-        await engine.close_position(t, reason="emergency_stop")
+        try:
+            await engine.close_position(t, reason="emergency_stop")
+        except Exception as _e:
+            logger.warning(f"[ForwardTest] Emergency stop: failed to close {t.symbol} id={t.id}: {_e}")
 
     await db.commit()
 

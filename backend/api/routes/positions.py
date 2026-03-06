@@ -83,7 +83,10 @@ async def close_position(request: ClosePositionRequest, db: AsyncSession = Depen
 
     from core.engine.forward_engine import ForwardEngine
     engine = ForwardEngine()
-    await engine.close_position(trade, reason=request.reason or "manual_close")
+    try:
+        await engine.close_position(trade, reason=request.reason or "manual_close")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker rejected the closing order: {exc}")
     await db.commit()
 
     return {"message": f"Position {request.trade_id} closed.", "trade_id": request.trade_id}

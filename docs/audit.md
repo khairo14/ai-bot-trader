@@ -25,9 +25,9 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 | F-011 | ⏳ | `api/routes/auth.py` | Race condition on first-user admin check — two simultaneous registrations both become admins. |
 | F-012 | ⏳ | `api/routes/auth.py` | No rate limiting on `POST /auth/login` — brute-force password attacks go unchecked. |
 | F-014 | ⏳ | `api/routes/signals.py` | Signal approval path has no market-hours check — live orders can be placed on weekends/holidays. |
-| F-015 | ⏳ | `api/routes/forward_test.py` | Emergency stop partially fails silently — broker calls that fail still mark the trade as FILLED in DB (phantom positions). |
+| F-015 | ✅ | `api/routes/forward_test.py` | Emergency stop partially fails silently — broker calls that fail still mark the trade as FILLED in DB (phantom positions). |
 | F-023 | ⏳ | `api/routes/strategies.py` | Any authenticated user can patch any strategy to `is_paper=false, execution_mode=full-auto`. No admin gate on mutations. |
-| F-026 | ⏳ | `core/engine/forward_engine.py` | If `broker.place_order()` raises during `close_position()`, the trade is still marked FILLED. Phantom positions at broker. |
+| F-026 | ✅ | `core/engine/forward_engine.py` | If `broker.place_order()` raises during `close_position()`, the trade is still marked FILLED. Phantom positions at broker. |
 | F-057 | ⏳ | Cross-cutting | No audit log for sensitive actions (login, strategy activation, signal approval, emergency stop). |
 
 ---
