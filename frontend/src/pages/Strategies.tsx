@@ -261,7 +261,7 @@ export default function Strategies() {
             <Sparkles size={15} /> Seed Defaults
           </button>
           <button
-            onClick={() => setShowModal(true)}
+            onClick={() => { setEditTarget(null); setForm(defaultForm); setFormErrors({}); setShowModal(true) }}
             className="flex items-center gap-1.5 px-3 py-2 bg-brand-500 hover:bg-green-400 text-black text-sm font-semibold rounded-lg transition-all"
           >
             <Plus size={16} /> New Strategy

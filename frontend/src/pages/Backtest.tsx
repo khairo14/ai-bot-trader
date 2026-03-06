@@ -65,6 +65,14 @@ const MetricRow = ({
   </div>
 )
 
+// Strategies valid per broker — mirrors backend BROKER_STRATEGIES in scanner.py
+const BROKER_STRATEGIES: Record<string, string[]> = {
+  binance: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
+  alpaca:  ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
+  ibkr:    ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb',
+             'iron_condor', 'covered_call', 'bull_call_spread'],
+}
+
 export default function Backtest() {
   const [savedStrategies, setSavedStrategies] = useState<SavedStrategy[]>([])
   const [form, setForm] = useState({
@@ -78,6 +86,9 @@ export default function Backtest() {
     slippage_pct: 0.05,
     broker: 'binance',
   })
+
+  // Strategies available for the currently selected broker
+  const availableStrategies = BROKER_STRATEGIES[form.broker] ?? BROKER_STRATEGIES.binance
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [backtestId, setBacktestId] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
@@ -209,6 +220,29 @@ export default function Backtest() {
             </select>
           </div>
 
+          {/* Broker */}
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Broker</label>
+            <select
+              value={form.broker}
+              onChange={e => {
+                const broker = e.target.value
+                const strats = BROKER_STRATEGIES[broker] ?? BROKER_STRATEGIES.binance
+                setForm(f => ({
+                  ...f,
+                  broker,
+                  // Reset strategy to first valid one for new broker
+                  strategy_name: strats.includes(f.strategy_name) ? f.strategy_name : strats[0],
+                }))
+              }}
+              className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+            >
+              <option value="binance">binance</option>
+              <option value="alpaca">alpaca</option>
+              <option value="ibkr">ibkr</option>
+            </select>
+          </div>
+
           {/* Algorithm type */}
           <div>
             <label className="text-xs text-gray-500 block mb-1">Algorithm</label>
@@ -217,23 +251,9 @@ export default function Backtest() {
               onChange={e => setForm(f => ({ ...f, strategy_name: e.target.value }))}
               className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
             >
-              <option value="hybrid_macd_rsi">hybrid_macd_rsi</option>
-              <option value="momentum_breakout">momentum_breakout</option>
-              <option value="mean_reversion_bb">mean_reversion_bb</option>
-            </select>
-          </div>
-
-          {/* Broker */}
-          <div>
-            <label className="text-xs text-gray-500 block mb-1">Broker</label>
-            <select
-              value={form.broker}
-              onChange={e => setForm(f => ({ ...f, broker: e.target.value }))}
-              className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
-            >
-              <option value="binance">binance</option>
-              <option value="alpaca">alpaca</option>
-              <option value="ibkr">ibkr</option>
+              {availableStrategies.map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
             </select>
           </div>
 
