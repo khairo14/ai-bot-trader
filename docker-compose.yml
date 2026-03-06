@@ -73,6 +73,7 @@ services:
     command: celery -A celery_app worker --loglevel=info --concurrency=2
     env_file: .env
     environment:
+      - PYTHONPATH=/app
       - POSTGRES_HOST=db
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
@@ -100,6 +101,7 @@ services:
     command: celery -A celery_app beat --loglevel=info
     env_file: .env
     environment:
+      - PYTHONPATH=/app
       - POSTGRES_HOST=db
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0

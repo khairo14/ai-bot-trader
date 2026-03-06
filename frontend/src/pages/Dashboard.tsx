@@ -96,6 +96,13 @@ interface WeightsData {
   optimized: boolean
 }
 
+// Per-broker label for the "available" balance field
+const AVAILABLE_LABEL: Record<string, string> = {
+  binance: 'free',
+  alpaca:  'buying power',
+  ibkr:    'available funds',
+}
+
 const REGIME_STYLES: Record<string, { label: string; color: string; bg: string; border: string }> = {
   trending_up:    { label: 'Trending Up',    color: 'text-green-400',  bg: 'bg-green-900/20',  border: 'border-green-700/40' },
   trending_down:  { label: 'Trending Down',  color: 'text-red-400',    bg: 'bg-red-900/20',    border: 'border-red-700/40' },
@@ -120,20 +127,35 @@ export default function Dashboard() {
   const fetchAll = async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     // Fetch independently — a slow broker never blocks signals from loading
-    const [sigResult, portResult, pendingResult, mlResult, regimeResult, weightsResult] = await Promise.allSettled([
+    const [sigResult, portResult, pendingResult, mlResult, weightsResult] = await Promise.allSettled([
       axios.get('/api/signals/?limit=20'),
       axios.get('/api/portfolio/summary'),
       axios.get('/api/signals/pending'),
       axios.get('/api/ml/status'),
-      axios.get('/api/regime?symbol=BTC%2FUSDT&timeframe=1h&broker=binance'),
       axios.get('/api/portfolio-optimizer/weights'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
     if (pendingResult.status === 'fulfilled') setPendingSignals(pendingResult.value.data.signals || [])
     if (mlResult.status === 'fulfilled') setMlStatus(mlResult.value.data)
-    if (regimeResult.status === 'fulfilled') setRegime(regimeResult.value.data)
     if (weightsResult.status === 'fulfilled') setPortfolioWeights(weightsResult.value.data)
+
+    // Derive regime from the most recent non-HOLD signal so the badge reflects
+    // what the bot is actually trading, not a hardcoded BTC/USDT default.
+    const latestSig = sigResult.status === 'fulfilled'
+      ? (sigResult.value.data.signals || []).find((s: Signal) => s.signal !== 'HOLD')
+      : null
+    const regimeSymbol    = latestSig?.symbol    ?? 'BTC/USDT'
+    const regimeTimeframe = latestSig?.timeframe  ?? '1h'
+    const regimeBroker    = latestSig?.broker     ?? 'binance'
+    try {
+      const regimeRes = await axios.get(
+        `/api/regime?symbol=${encodeURIComponent(regimeSymbol)}&timeframe=${regimeTimeframe}&broker=${regimeBroker}`
+      )
+      setRegime(regimeRes.data)
+    } catch {
+      setRegime(null)
+    }
     setLoading(false)
     setRefreshing(false)
   }
@@ -227,7 +249,9 @@ export default function Dashboard() {
                 {b.connected ? formatBalance(b.total, b.currency) : '—'}
               </p>
               <p className="text-xs text-gray-500 mt-0.5">
-                {b.connected ? `${formatBalance(b.available, b.currency)} available` : 'Offline — not configured'}
+                {b.connected
+                  ? `${formatBalance(b.available, b.currency)} ${AVAILABLE_LABEL[b.broker] ?? 'available'}`
+                  : 'Offline — not configured'}
               </p>
             </div>
           )
