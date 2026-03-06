@@ -43,11 +43,37 @@ A production-grade algorithmic trading system with AI-assisted entry/exit signal
 
 ## Quick Start
 
-### Option A: Local Development (current setup)
+### Option A: Docker Bundle (1-click, recommended)
+
+**Prerequisites:** Docker Desktop — nothing else.
+
+```bash
+git clone <your-repo-url> ai-bot-trader
+cd ai-bot-trader
+```
+
+**Windows — double-click `launch.bat`** (or run `.\launch.ps1` in PowerShell)
+
+On first run it will:
+1. Copy `.env.docker` → `.env` and open it in Notepad
+2. Fill in your broker API keys and save
+3. Re-run `launch.bat` — all 5 services start and the app opens in your browser automatically
+
+To stop everything: double-click `stop.bat` (or `.\stop.ps1`)
+
+| Service | URL |
+|---|---|
+| Frontend (React/nginx) | http://localhost:3000 |
+| Backend API | http://localhost:8000 |
+| API Docs (Swagger) | http://localhost:8000/docs |
+
+> **Database migrations run automatically** on every `docker compose up` — no manual `alembic` commands needed.
+
+### Option B: Local Development (Python venv + Vite)
 
 **Prerequisites:**
 - Python 3.11, Node.js 18+, Git
-- Docker Desktop (for PostgreSQL + Redis only)
+- Docker Desktop (for PostgreSQL + Redis)
 - Broker accounts (see [docs/brokers.md](docs/brokers.md))
 - For IBKR: [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) running locally on port 7497
 
@@ -81,7 +107,6 @@ npm install
 npm run dev
 ```
 
-Services:
 | Service | URL |
 |---|---|
 | Frontend (React) | http://localhost:5173 |
@@ -89,14 +114,6 @@ Services:
 | API Docs (Swagger) | http://localhost:8000/docs |
 | PostgreSQL | localhost:5432 |
 | Redis | localhost:6379 |
-
-### Option B: Full Docker Stack
-
-```bash
-docker-compose up --build
-```
-
-> Docker frontend runs at **http://localhost:3000** (nginx), dev server runs at **http://localhost:5173** (Vite).
 
 ### First Run Checklist
 - [ ] Set `BINANCE_TESTNET=true` in `.env` until you're confident (or use Binance Testnet at testnet.binance.vision)
