@@ -414,11 +414,9 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
 
   useEffect(() => { fetchAndRender() }, [fetchAndRender])
 
-  // Fetch symbols when broker changes
+  // Fetch symbols when broker changes (keep symbol in sync atomically)
   useEffect(() => {
     setAllSymbols([])
-    const def = BROKER_DEFAULT[broker] ?? ''
-    setSymQuery(def); setSymbol(def)
     axios.get('/api/charts/symbols', { params: { broker } })
       .then(r => setAllSymbols(r.data.symbols ?? []))
       .catch(() => {})
@@ -443,7 +441,16 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
       <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5 border-b border-dark-600 bg-dark-800 shrink-0">
 
         {/* Broker */}
-        <select value={broker} onChange={e => setBroker(e.target.value)} className={sel}>
+        <select value={broker} onChange={e => {
+          const b = e.target.value
+          const def = BROKER_DEFAULT[b] ?? ''
+          // Batch all three updates so React re-renders ONCE with the new
+          // broker + matching symbol — prevents fetchAndRender firing with
+          // broker=binance / symbol=SPY (stale mismatch that causes errors)
+          setBroker(b)
+          setSymbol(def)
+          setSymQuery(def)
+        }} className={sel}>
           {BROKERS.map(b => <option key={b} value={b}>{b.charAt(0).toUpperCase() + b.slice(1)}</option>)}
         </select>
 

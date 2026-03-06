@@ -133,6 +133,7 @@ async def get_candles(
             client = BinanceClient(paper=False)
         else:
             client = _get_broker_client(broker)
+            await client.connect()   # no-op for Alpaca; ensures IBKR singleton is live
 
         all_rows: list[tuple[int, object]] = []
         current_since = since
