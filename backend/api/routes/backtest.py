@@ -28,12 +28,42 @@ class BacktestRequest(BaseModel):
     parameters: Optional[dict] = None
 
 
+# Symbols that contain '/' are crypto pairs — only valid on Binance
+_CRYPTO_BROKERS = {"binance"}
+_STOCK_BROKERS  = {"alpaca", "ibkr"}
+
+
+def _validate_broker_symbol(broker: str, symbol: str):
+    """Raise HTTPException 422 if broker/symbol combination is clearly wrong."""
+    is_crypto_symbol = "/" in symbol
+    if is_crypto_symbol and broker in _STOCK_BROKERS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Symbol '{symbol}' looks like a crypto pair but broker '{broker}' "
+                f"only supports stock tickers (e.g. AAPL, SHOP, SPY). "
+                f"Either change the symbol to a stock ticker or switch the broker to 'binance'."
+            ),
+        )
+    if not is_crypto_symbol and broker in _CRYPTO_BROKERS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Symbol '{symbol}' looks like a stock ticker but broker '{broker}' "
+                f"only supports crypto pairs (e.g. BTC/USDT, ETH/USDT). "
+                f"Either use a crypto pair symbol or switch the broker to 'alpaca' or 'ibkr'."
+            ),
+        )
+
+
 @router.post("/run")
 async def run_backtest(request: BacktestRequest, db: AsyncSession = Depends(get_db)):
     """
     Trigger a backtest run for a strategy.
     Returns backtest result ID. Results are stored in DB.
     """
+    _validate_broker_symbol(request.broker, request.symbol)
+
     from core.engine.backtest_engine import BacktestEngine
 
     engine = BacktestEngine()

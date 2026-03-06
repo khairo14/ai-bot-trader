@@ -41,12 +41,28 @@ class BacktestEngine:
         # Always use the live (non-testnet) client for data — testnet has no 
         # OHLCV history. OHLCV is a public endpoint; no API key needed.
         broker_client = get_broker(broker, force_paper=False)
+        fetch_error = None
         try:
             df = await broker_client.get_ohlcv_range(symbol, timeframe, start_date, end_date)
+        except Exception as exc:
+            fetch_error = exc
         finally:
             # Always close the async session (ccxt uses aiohttp — must be released
             # or subsequent requests will hit a closed connector error).
             await broker_client.close()
+
+        if fetch_error is not None:
+            err = str(fetch_error)
+            # Produce a readable message for common broker rejections
+            if "invalid symbol" in err.lower():
+                return {
+                    "error": (
+                        f"Broker '{broker}' rejected symbol '{symbol}'. "
+                        f"Make sure the symbol is valid for this broker "
+                        f"(crypto pairs like BTC/USDT for Binance, stock tickers like AAPL for Alpaca/IBKR)."
+                    )
+                }
+            return {"error": f"Failed to fetch market data: {err}"}
 
         if len(df) < 50:
             return {"error": f"Insufficient data: {len(df)} candles"}
