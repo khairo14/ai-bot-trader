@@ -637,7 +637,7 @@ async def _run_one_strategy(strat) -> None:
 
             if trade is not None:
                 trade.signal_id = db_signal.id
-                db_signal.acted_on = True
+                db_signal.acted_on = True  # mark regardless of OPEN/REJECTED status
 
             await session.commit()
 
@@ -652,7 +652,7 @@ async def _run_one_strategy(strat) -> None:
             "acted_on": db_signal.acted_on,
         })
 
-        if trade is not None:
+        if trade is not None and trade.status == OrderStatus.OPEN:
             await manager.broadcast("trade", {
                 "symbol": trade.symbol,
                 "side": trade.side,
@@ -894,21 +894,29 @@ async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
     if trade is None:
         raise HTTPException(status_code=400, detail="Trade rejected by risk manager (position limits, daily loss cap, or insufficient balance).")
 
-    # Mark signal acted on
+    # Mark signal acted on (even for REJECTED — prevents duplicate execution attempts)
     db_signal.acted_on = True
+    trade.signal_id = db_signal.id
     await db.commit()
 
-    # Broadcast
-    await manager.broadcast("trade", {
-        "symbol": trade.symbol,
-        "side": trade.side,
-        "quantity": trade.quantity,
-        "entry_price": trade.entry_price,
-        "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
-        "strategy_name": trade.strategy_name,
-        "is_paper": is_paper,
-        "triggered_by": "manual_execute",
-    })
+    # Only broadcast for successfully placed orders
+    if trade.status == OrderStatus.OPEN:
+        await manager.broadcast("trade", {
+            "symbol": trade.symbol,
+            "side": trade.side,
+            "quantity": trade.quantity,
+            "entry_price": trade.entry_price,
+            "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
+            "strategy_name": trade.strategy_name,
+            "is_paper": is_paper,
+            "triggered_by": "manual_execute",
+        })
+
+    if trade.status == OrderStatus.REJECTED:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Broker rejected the order: {trade.notes or 'unknown reason'}",
+        )
 
     return {
         "status": "executed",

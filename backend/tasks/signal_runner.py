@@ -91,6 +91,7 @@ def run_signals(self):
             AssetClass,
             BrokerName,
             SignalType,
+            OrderStatus,
         )
         from sqlalchemy import select
 
@@ -302,34 +303,37 @@ def run_signals(self):
 
                         if trade is not None:
                             trade.signal_id = db_signal.id
-                            db_signal.acted_on = True
-                            # ── Broadcast trade to WebSocket clients ──────────
-                            await ws_manager.broadcast("trade", {
-                                "symbol": trade.symbol,
-                                "side": trade.side,
-                                "quantity": trade.quantity,
-                                "entry_price": trade.entry_price,
-                                "is_paper": trade.is_paper,
-                                "broker": trade.broker.value if hasattr(trade.broker, 'value') else trade.broker,
-                                "strategy_name": trade.strategy_name,
-                            })                            # ── Trade notification (with email) ──────────────
-                            await _notify.trade(
-                                session,
-                                title=f"Trade Executed • {trade.side.upper()} {trade.symbol}",
-                                message=(
-                                    f"{'PAPER' if trade.is_paper else 'LIVE'} order filled | "
-                                    f"Qty: {trade.quantity} | Entry: ${trade.entry_price:,.4f}"
-                                ),
-                                metadata={
+                            db_signal.acted_on = True  # mark regardless of OPEN/REJECTED
+                            # Only broadcast / notify for successfully placed orders
+                            if trade.status == OrderStatus.OPEN:
+                                # ── Broadcast trade to WebSocket clients ────────
+                                await ws_manager.broadcast("trade", {
                                     "symbol": trade.symbol,
                                     "side": trade.side,
                                     "quantity": trade.quantity,
                                     "entry_price": trade.entry_price,
+                                    "is_paper": trade.is_paper,
                                     "broker": trade.broker.value if hasattr(trade.broker, 'value') else trade.broker,
-                                    "mode": "paper" if trade.is_paper else "live",
-                                    "strategy": trade.strategy_name,
-                                },
-                            )
+                                    "strategy_name": trade.strategy_name,
+                                })
+                                # ── Trade notification (with email) ─────────────
+                                await _notify.trade(
+                                    session,
+                                    title=f"Trade Executed • {trade.side.upper()} {trade.symbol}",
+                                    message=(
+                                        f"{'PAPER' if trade.is_paper else 'LIVE'} order filled | "
+                                        f"Qty: {trade.quantity} | Entry: ${trade.entry_price:,.4f}"
+                                    ),
+                                    metadata={
+                                        "symbol": trade.symbol,
+                                        "side": trade.side,
+                                        "quantity": trade.quantity,
+                                        "entry_price": trade.entry_price,
+                                        "broker": trade.broker.value if hasattr(trade.broker, 'value') else trade.broker,
+                                        "mode": "paper" if trade.is_paper else "live",
+                                        "strategy": trade.strategy_name,
+                                    },
+                                )
                         await session.commit()
 
                         logger.info(

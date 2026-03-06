@@ -423,9 +423,11 @@ class IBKRClient(AbstractBroker):
         total = 0.0
         available = 0.0
         for v in account_values:
-            if v.tag == "NetLiquidation" and v.currency == "USD":
+            # Accept both "USD" and "BASE" (multi-currency accounts report BASE
+            # as the account's base currency equivalent)
+            if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
                 total = float(v.value)
-            if v.tag == "AvailableFunds" and v.currency == "USD":
+            if v.tag == "AvailableFunds" and v.currency in ("USD", "BASE"):
                 available = float(v.value)
         return Balance(total=total, available=available, currency="USD")
 

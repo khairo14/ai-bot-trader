@@ -151,10 +151,18 @@ class BinanceClient(AbstractBroker):
         )
 
     async def get_positions(self) -> List[Position]:
-        # Spot: positions are simply non-zero balances
+        # Spot: positions are simply non-zero balances.
+        # ccxt returns balance["info"]["balances"] as a LIST of {"asset", "free", "locked"} dicts.
         balance = await self.exchange.fetch_balance()
+        raw_balances = balance.get("info", {}).get("balances", [])
+        # Normalise: ccxt may return a dict (testnet) or a list (live)
+        if isinstance(raw_balances, dict):
+            items = raw_balances.items()   # {symbol: {free, locked, total}}
+        else:
+            items = ((b["asset"], b) for b in raw_balances if isinstance(b, dict))
+
         positions = []
-        for asset, info in balance.get("info", {}).get("balances", {}).items() if isinstance(balance.get("info", {}).get("balances", {}), dict) else []:
+        for asset, info in items:
             free = float(info.get("free", 0))
             if free > 0 and asset != "USDT":
                 symbol = f"{asset}/USDT"

@@ -203,7 +203,11 @@ class ForwardEngine:
         #   • Crypto exchange maintenance windows
         # We catch all broker errors here so the scheduler never crashes.
         # A FAILED trade record is written to the DB so you have a full audit trail.
-        side = "buy" if signal.signal == "BUY" else "sell"
+        # BUY  → buy (open long)
+        # SELL → sell (close long or open short for equity/crypto)
+        # SHORT → sell (open short position)
+        # COVER → buy (buy-to-cover; close an open short position)
+        side = "buy" if signal.signal in ("BUY", "COVER") else "sell"
         # ── Options extra kwargs (single-leg only; multi-leg is paper-only) ──
         option_kwargs: dict = {}
         meta = getattr(signal, "options_meta", None)
@@ -245,10 +249,13 @@ class ForwardEngine:
                 f"Likely causes: market halt, circuit breaker, exchange maintenance, "
                 f"insufficient funds, or invalid symbol. Trade saved as FAILED."
             )
+            # Return the rejected Trade so callers can set signal_id and acted_on=True.
+            # This prevents the same signal from being re-attempted on the next run.
             if db_session:
                 db_session.add(trade)
                 await db_session.commit()
-            return None
+                await db_session.refresh(trade)
+            return trade
 
         if db_session:
             db_session.add(trade)
@@ -279,6 +286,10 @@ class ForwardEngine:
     async def close_position(self, trade: Trade, reason: str = "manual"):
         """Close an open position and compute exit price + realised PnL."""
         broker = get_broker(trade.broker)
+        try:
+            await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
+        except Exception as _conn_err:
+            logger.warning(f"[ForwardEngine] Broker connect failed before close: {_conn_err}")
 
         # ── Fetch current market price (live and paper) ───────────────────
         exit_price: float = 0.0
