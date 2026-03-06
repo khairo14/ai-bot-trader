@@ -110,8 +110,9 @@ async def _stream_alpaca(ws: WebSocket, symbol: str, timeframe: str, tf_secs: in
     Proxy Alpaca data stream (trades feed via IEX).
 
     Subscribes to individual trades and builds OHLCV candles locally, one per
-    timeframe period.  Each trade tick triggers a current-bar update.  Period
-    rollovers produce a finalized bar followed by a new open bar.
+    timeframe period.  Sends are throttled to at most once per second to avoid
+    flooding the browser with hundreds of per-trade messages (AAPL can produce
+    200+ ticks/s which would freeze the JS thread).
     """
     import websockets as wsl
     from config import settings
@@ -124,6 +125,8 @@ async def _stream_alpaca(ws: WebSocket, symbol: str, timeframe: str, tf_secs: in
     now_sec = int(_time.time())
     period_start = (now_sec // tf_secs) * tf_secs
     o = h = l = c_price = vol = 0.0
+    last_sent = 0.0          # monotonic timestamp of last _send call
+    THROTTLE_SECS = 1.0      # max one update per second to the browser
 
     async with wsl.connect(url, ping_interval=20, ping_timeout=10) as aws:
         # Auth
@@ -157,12 +160,14 @@ async def _stream_alpaca(ws: WebSocket, symbol: str, timeframe: str, tf_secs: in
                     current_period = (now_sec // tf_secs) * tf_secs
 
                     if current_period != period_start:
-                        # Finalize previous period
-                        if o > 0 and not await _send(ws, {
-                            "time": period_start,
-                            "open": o, "high": h, "low": l, "close": c_price, "volume": vol,
-                        }):
-                            return
+                        # Finalize previous period — always send this immediately
+                        if o > 0:
+                            if not await _send(ws, {
+                                "time": period_start,
+                                "open": o, "high": h, "low": l, "close": c_price, "volume": vol,
+                            }):
+                                return
+                            last_sent = _time.monotonic()
                         period_start = current_period
                         o = h = l = price
                         vol = 0.0
@@ -174,6 +179,12 @@ async def _stream_alpaca(ws: WebSocket, symbol: str, timeframe: str, tf_secs: in
                         l = min(l, price)
                     c_price = price
                     vol += size
+
+                    # Throttle: only push to browser at most once per second
+                    now_mono = _time.monotonic()
+                    if now_mono - last_sent < THROTTLE_SECS:
+                        continue
+                    last_sent = now_mono
 
                     if not await _send(ws, {
                         "time": period_start,

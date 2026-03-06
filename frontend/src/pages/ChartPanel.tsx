@@ -559,6 +559,10 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     ws.onopen  = () => setWsLive(true)
     ws.onerror = () => setWsLive(false)
     ws.onclose = () => setWsLive(false)
+    // Throttle the React state update (setLastUpdated) to at most once per 2s.
+    // series.update() is called every message but is a DOM mutation with no
+    // React re-render — safe to call at full rate.
+    let lastStateUpdate = 0
     ws.onmessage = (evt) => {
       try {
         const d = JSON.parse(evt.data) as { time: number; open: number; high: number; low: number; close: number; volume: number }
@@ -568,8 +572,13 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
           candleRef.current.update({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })
           volRef.current?.update({ time: d.time as any, value: d.volume ?? 0, color: d.close >= d.open ? '#22c55e33' : '#ef444433' })
           if (d.time > (lastCandleTimeRef.current ?? 0)) lastCandleTimeRef.current = d.time
-          setLastUpdated(new Date().toLocaleTimeString())
           mainChart.current?.timeScale().scrollToRealTime()
+          // Throttle React state update to avoid re-render on every tick
+          const now = Date.now()
+          if (now - lastStateUpdate > 2000) {
+            lastStateUpdate = now
+            setLastUpdated(new Date().toLocaleTimeString())
+          }
         } catch {}
       } catch {}
     }
