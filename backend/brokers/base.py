@@ -181,5 +181,10 @@ class AbstractBroker(ABC):
         df = pd.concat(chunks)
         df = df[~df.index.duplicated(keep="first")]
         df.sort_index(inplace=True)
-        df = df[(df.index >= pd.Timestamp(start_dt)) & (df.index <= pd.Timestamp(end_dt))]
+        start_ts = pd.Timestamp(start_dt, tz="UTC") if start_dt.tzinfo is None else pd.Timestamp(start_dt).tz_convert("UTC")
+        end_ts   = pd.Timestamp(end_dt,   tz="UTC") if end_dt.tzinfo   is None else pd.Timestamp(end_dt).tz_convert("UTC")
+        # Ensure index is UTC-aware for comparison
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        df = df[(df.index >= start_ts) & (df.index <= end_ts)]
         return df
