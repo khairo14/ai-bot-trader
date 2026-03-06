@@ -31,39 +31,52 @@ RESOLUTION_HORIZON = 24
 # minimum age before we attempt resolution (allow market to move)
 MIN_AGE_HOURS = 4
 
-
-# ─────────────────────────────────────────────────────────────
-# yfinance OHLCV helper (broker-agnostic historical resolver)
-# ─────────────────────────────────────────────────────────────
-def _symbol_to_yf(symbol: str) -> str:
-    if "/" in symbol:
-        base, quote = symbol.split("/", 1)
-        quote_yf = "USD" if quote in ("USDT", "USDC", "BUSD") else quote
-        return f"{base}-{quote_yf}"
-    return symbol
+# Seconds per candle for each supported timeframe
+_TF_SECONDS: dict[str, int] = {
+    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "1Hour": 3600, "4h": 14400, "1d": 86400,
+}
+# Sub-hour timeframes whose live history is often limited — fall back to 1h
+_SUB_HOUR = {"1m", "5m", "15m", "30m"}
 
 
-def _fetch_ohlcv_since(symbol: str, since: datetime.datetime, days: int = 60):
-    """Fetch daily OHLCV from `since` up to today. Returns DataFrame or None."""
-    try:
-        import yfinance as yf
-        import pandas as pd
+async def _fetch_ohlcv_broker(
+    broker_name: str,
+    symbol: str,
+    timeframe: str,
+    since: datetime.datetime,
+):
+    """
+    Fetch OHLCV candles from the broker starting at `since`.
+    Uses force_paper=False so we always get market data, not paper-trade data.
+    Falls back to '1h' for sub-hour timeframes when the broker returns too few
+    candles (many brokers cap intraday history to 30-90 days).
+    Returns a pandas DataFrame or None.
+    """
+    import pandas as pd
+    from brokers import get_broker
 
-        ticker = _symbol_to_yf(symbol)
-        start = (since - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-        end = (datetime.datetime.utcnow() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-        df = yf.download(ticker, start=start, end=end, interval="1d",
-                         progress=False, auto_adjust=True)
-        if df is None or df.empty:
-            return None
-        df = df.rename(columns=str.lower)
-        if isinstance(df.columns, __import__("pandas").MultiIndex):
-            df.columns = [c[0] for c in df.columns]
-        df.index = __import__("pandas").to_datetime(df.index).tz_localize(None)
-        return df[["open", "high", "low", "close", "volume"]].dropna()
-    except Exception as exc:
-        logger.warning(f"[resolver] yfinance fetch failed for {symbol}: {exc}")
-        return None
+    since_ms = int(since.timestamp() * 1000)
+
+    # How long since the oldest outcome — convert to candle count
+    elapsed_secs = (datetime.datetime.utcnow() - since).total_seconds()
+    tf_secs = _TF_SECONDS.get(timeframe, 3600)
+    limit = max(RESOLUTION_HORIZON + 10, int(elapsed_secs / tf_secs) + RESOLUTION_HORIZON + 10)
+
+    for tf in ([timeframe, "1h"] if timeframe in _SUB_HOUR and timeframe != "1h" else [timeframe]):
+        try:
+            broker = get_broker(broker_name, force_paper=False)
+            df = await broker.get_ohlcv(symbol, tf, limit=limit, since=since_ms)
+            if df is not None and not df.empty and len(df) >= 2:
+                # Normalise index to tz-naive UTC for consistent slicing
+                if hasattr(df.index, "tz") and df.index.tz is not None:
+                    df.index = df.index.tz_convert("UTC").tz_localize(None)
+                return df[["open", "high", "low", "close", "volume"]].dropna()
+        except Exception as exc:
+            logger.warning(f"[resolver] broker={broker_name} {symbol}/{tf} OHLCV failed: {exc}")
+        if tf != "1h" and timeframe in _SUB_HOUR:
+            logger.info(f"[resolver] {symbol}/{timeframe} insufficient — retrying with 1h")
+    return None
 
 
 def _resolve_outcome(
@@ -221,18 +234,36 @@ async def resolve_pending_outcomes() -> dict:
     skipped_count = 0
     error_count = 0
 
-    # Group by symbol to minimise yfinance calls
+    # Group by (symbol, timeframe, broker) to minimise broker OHLCV calls.
+    # TradeOutcome has timeframe; broker comes from the linked Signal row.
     from collections import defaultdict
-    by_symbol: dict[str, list] = defaultdict(list)
-    for o in pending:
-        by_symbol[o.symbol].append(o)
+    from db.models import Signal
+    from sqlalchemy import select as sa_select
 
-    for symbol, outcomes in by_symbol.items():
-        # Oldest entry date for this symbol
+    # Eagerly load broker for each outcome via its signal_id
+    async with AsyncSessionLocal() as session:
+        sig_ids = [o.signal_id for o in pending if o.signal_id is not None]
+        sig_rows = {}
+        if sig_ids:
+            res = await session.execute(sa_select(Signal).where(Signal.id.in_(sig_ids)))
+            sig_rows = {s.id: s for s in res.scalars().all()}
+
+    # Build groups: key = (symbol, timeframe, broker_name)
+    by_group: dict[tuple, list] = defaultdict(list)
+    for o in pending:
+        sig = sig_rows.get(o.signal_id) if o.signal_id else None
+        broker_name = sig.broker.value if sig else "alpaca"  # fallback
+        key = (o.symbol, o.timeframe, broker_name)
+        by_group[key].append(o)
+
+    for (symbol, timeframe, broker_name), outcomes in by_group.items():
         oldest = min(o.created_at for o in outcomes)
-        df = _fetch_ohlcv_since(symbol, oldest)
+        df = await _fetch_ohlcv_broker(broker_name, symbol, timeframe, oldest)
         if df is None:
-            logger.warning(f"[resolver] Could not fetch OHLCV for {symbol} — skipping {len(outcomes)} outcomes")
+            logger.warning(
+                f"[resolver] Could not fetch OHLCV for {symbol}/{timeframe} via {broker_name} "
+                f"— skipping {len(outcomes)} outcomes"
+            )
             skipped_count += len(outcomes)
             continue
 
@@ -240,14 +271,13 @@ async def resolve_pending_outcomes() -> dict:
             for o in outcomes:
                 try:
                     # Slice df from entry candle onwards
-                    entry_date = o.created_at.date() if o.created_at else None
-                    if entry_date is None:
+                    if o.created_at is None:
                         skipped_count += 1
                         continue
 
-                    # Find first candle on or after the signal date
+                    # Find first candle on or after the signal timestamp
                     import pandas as pd
-                    entry_ts = pd.Timestamp(entry_date)
+                    entry_ts = pd.Timestamp(o.created_at).tz_localize(None)
                     future_df = df[df.index >= entry_ts]
 
                     if len(future_df) < 2:
