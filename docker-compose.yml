@@ -43,6 +43,11 @@ services:
       - POSTGRES_HOST=db
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
+      # Clear system proxy — Docker Desktop injects it from host but 127.0.0.1 is unreachable inside containers
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - http_proxy=
+      - https_proxy=
     # Run migrations then start uvicorn (no --reload in production)
     command: >
       sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1"
@@ -71,6 +76,10 @@ services:
       - POSTGRES_HOST=db
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - http_proxy=
+      - https_proxy=
     depends_on:
       db:
         condition: service_healthy
@@ -94,6 +103,10 @@ services:
       - POSTGRES_HOST=db
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
+      - HTTP_PROXY=
+      - HTTPS_PROXY=
+      - http_proxy=
+      - https_proxy=
     depends_on:
       db:
         condition: service_healthy
