@@ -13,8 +13,11 @@ const WS_URL = (() => {
 
 interface BrokerBreakdown {
   broker: string
-  balance: number
-  initial_capital: number
+  total: number
+  available: number
+  currency: string
+  connected: boolean
+  in_use: number
   pnl: number
   open_positions: number
   strategies: string[]
@@ -330,15 +333,15 @@ export default function ForwardTest() {
       <div className="grid grid-cols-4 gap-4">
         {[
           {
-            label: 'Paper Balance',
-            value: status ? fmtUSD(status.paper_balance) : '—',
-            sub: status
-              ? status.broker_breakdown.length > 1
-                ? '__breakdown__'
-                : status.brokers.length
-                  ? `Simulated on ${status.brokers[0]} · started ${fmtUSD(status.initial_capital)}`
-                  : `Started at ${fmtUSD(status.initial_capital)}`
-              : '',
+            label: status?.broker_breakdown.length === 1
+              ? `${status.broker_breakdown[0].broker.toUpperCase()} Balance`
+              : 'Broker Balances',
+            value: status
+              ? status.broker_breakdown.length === 1
+                ? fmtUSD(status.broker_breakdown[0].total)
+                : `${status.broker_breakdown.length} brokers`
+              : '—',
+            sub: status ? '__breakdown__' : '',
             breakdown: status?.broker_breakdown ?? [],
           },
           {
@@ -361,14 +364,31 @@ export default function ForwardTest() {
           <div key={label} className="bg-dark-800 border border-dark-600 rounded-xl p-4">
             <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">{label}</p>
             <p className={`text-xl font-bold ${color ?? 'text-white'}`}>{loading ? <SkeletonLine className="h-6 w-24 mt-1" /> : value}</p>
-            {sub === '__breakdown__' && breakdown && breakdown.length > 1 ? (
-              <div className="mt-1.5 space-y-1">
+            sub === '__breakdown__' && breakdown && breakdown.length > 0 ? (
+              <div className="mt-2 space-y-2">
                 {breakdown.map((b: BrokerBreakdown) => (
-                  <div key={b.broker} className="flex items-center justify-between gap-2">
-                    <span className="text-xs text-gray-500 capitalize">{b.broker}</span>
-                    <span className={`text-xs font-medium ${b.pnl > 0 ? 'text-green-400' : b.pnl < 0 ? 'text-red-400' : 'text-gray-400'}`}>
-                      {fmtUSD(b.balance)}
-                    </span>
+                  <div key={b.broker} className="rounded-lg bg-dark-700/60 px-3 py-2">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-semibold text-gray-300 capitalize">{b.broker}</span>
+                      {!b.connected && <span className="text-xs text-red-400">offline</span>}
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-500">total</span>
+                      <span className="text-xs font-medium text-white">{fmtUSD(b.total)}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-500">available</span>
+                      <span className="text-xs font-medium text-green-400">{fmtUSD(b.available)}</span>
+                    </div>
+                    {b.in_use > 0 && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-gray-500">in use ({b.open_positions} pos)</span>
+                        <span className="text-xs font-medium text-yellow-400">{fmtUSD(b.in_use)}</span>
+                      </div>
+                    )}
+                    {b.strategies.length > 0 && (
+                      <p className="text-xs text-gray-600 mt-1 truncate">{b.strategies.join(', ')}</p>
+                    )}
                   </div>
                 ))}
               </div>

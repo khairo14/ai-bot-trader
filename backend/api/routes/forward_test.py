@@ -125,7 +125,7 @@ def is_market_open(broker_name: str) -> bool:
 
 async def _get_paper_stats(db: AsyncSession) -> dict:
     """Compute aggregated paper trading statistics from the DB."""
-    INITIAL_CAPITAL = 10_000.0
+    from api.routes.portfolio import _safe_balance
 
     # Active paper strategies
     strat_q = await db.execute(
@@ -149,34 +149,50 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
     )
     open_trades = open_q.scalars().all()
 
-    # ── Per-broker breakdown ──────────────────────────────────────────────────
-    # Each broker starts with its own INITIAL_CAPITAL pool; its balance is
-    # computed from trades that belong to that broker only.
-    broker_breakdown = []
+    # ── Per-broker breakdown using real broker balances ───────────────────────
     all_broker_names = sorted({
         *{t.broker.value for t in closed_trades},
         *{t.broker.value for t in open_trades},
         *active_brokers,
     })
+
+    # Fetch real balances from all brokers in parallel (never raises)
+    live_balances: dict[str, dict] = {}
+    if all_broker_names:
+        results = await _asyncio.gather(*(_safe_balance(b) for b in all_broker_names))
+        live_balances = {r["broker"]: r for r in results}
+
+    broker_breakdown = []
     for b in all_broker_names:
-        b_closed_pnl  = sum(t.pnl or 0.0 for t in closed_trades  if t.broker.value == b)
-        b_open_pnl    = sum(t.pnl or 0.0 for t in open_trades    if t.broker.value == b)
-        b_open_count  = sum(1              for t in open_trades    if t.broker.value == b)
-        b_strats      = [s.name for s in active_strategies if s.broker.value == b]
+        live = live_balances.get(b, {})
+        b_open_cost  = sum(
+            (t.quantity or 0) * (t.entry_price or 0)
+            for t in open_trades if t.broker.value == b
+        )
+        b_open_pnl   = sum(t.pnl or 0.0 for t in open_trades   if t.broker.value == b)
+        b_closed_pnl = sum(t.pnl or 0.0 for t in closed_trades if t.broker.value == b)
+        b_open_count = sum(1              for t in open_trades   if t.broker.value == b)
+        b_strats     = [s.name for s in active_strategies if s.broker.value == b]
         broker_breakdown.append({
-            "broker":           b,
-            "balance":          round(INITIAL_CAPITAL + b_closed_pnl + b_open_pnl, 2),
-            "initial_capital":  INITIAL_CAPITAL,
-            "pnl":              round(b_closed_pnl + b_open_pnl, 4),
-            "open_positions":   b_open_count,
-            "strategies":       b_strats,
+            "broker":         b,
+            "total":          live.get("total", 0.0),
+            "available":      live.get("available", 0.0),
+            "currency":       live.get("currency", "USD"),
+            "connected":      live.get("connected", False),
+            "in_use":         round(b_open_cost, 2),          # capital currently in open paper positions
+            "pnl":            round(b_closed_pnl + b_open_pnl, 4),
+            "open_positions": b_open_count,
+            "strategies":     b_strats,
         })
 
-    # ── Aggregates (sum across all brokers) ───────────────────────────────────
+    # ── Aggregates ────────────────────────────────────────────────────────────
     realized_pnl   = sum(t.pnl or 0.0 for t in closed_trades)
     unrealized_pnl = sum(t.pnl or 0.0 for t in open_trades)
     open_count     = len(open_trades)
-    total_initial  = INITIAL_CAPITAL * max(len(all_broker_names), 1)
+    # paper_balance is no longer meaningful as a single number when brokers
+    # have different real balances — keep it as sum-of-totals so existing
+    # aggregate stats cards aren't broken.
+    total_balance  = sum(b["total"] for b in broker_breakdown)
 
     # Days running — from earliest trade
     first_q = await db.execute(
@@ -210,8 +226,8 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         "strategy_names": [s.name for s in active_strategies],
         "brokers": active_brokers,
         "broker_breakdown": broker_breakdown,
-        "paper_balance": round(total_initial + realized_pnl + unrealized_pnl, 2),
-        "initial_capital": total_initial,
+        "paper_balance": round(total_balance, 2),
+        "initial_capital": total_balance,
         "open_positions": open_count,
         "realized_pnl": round(realized_pnl, 4),
         "unrealized_pnl": round(unrealized_pnl, 4),
