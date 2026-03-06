@@ -115,6 +115,7 @@ class ForwardEngine:
 
         # ── Get broker ───────────────────────────────────
         broker = get_broker(signal.broker)
+        await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
 
         # ── Get balance + open count ──────────────────────
         if is_paper:

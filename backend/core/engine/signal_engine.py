@@ -55,6 +55,7 @@ class SignalEngine:
         if data is None:
             broker = get_broker(broker_name)
             try:
+                await broker.connect()          # no-op for Binance/Alpaca; ensures IBKR is live
                 data = await broker.get_ohlcv(symbol, timeframe, limit)
             finally:
                 await broker.close()

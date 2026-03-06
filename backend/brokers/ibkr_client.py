@@ -67,11 +67,11 @@ class _IBKRManager:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _submit(self, coro) -> Balance:
+    def _submit(self, coro, timeout: float = 30.0):
         """Run a coroutine on the background loop and block until done."""
         assert self._loop is not None
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
-        return fut.result(timeout=30)
+        return fut.result(timeout=timeout)
 
     # ── connection helpers ────────────────────────────────────────────────────
 
@@ -137,6 +137,71 @@ class _IBKRManager:
     def is_connected(self) -> bool:
         return bool(self._ib and self._ib.isConnected())
 
+    def get_ib(self) -> "IB":
+        """
+        Return the live, connected IB instance.
+        Attempts a reconnect if disconnected (e.g. Gateway was restarted).
+        Raises ConnectionError if Gateway is still unreachable.
+        """
+        self._start()
+        if not self.is_connected():
+            try:
+                self._submit(self._ensure_connected())
+            except Exception:
+                pass
+        if not self.is_connected():
+            raise ConnectionError(
+                "IBKRClient is not connected. Call connect() first or ensure IB Gateway is running."
+            )
+        assert self._ib is not None
+        return self._ib
+
+    # ── OHLCV / price helpers (run on the background loop) ───────────────────
+
+    async def _do_ohlcv(
+        self, symbol: str, bar_size: str, duration: str
+    ) -> list:
+        """Fetch historical bars on the manager's dedicated event loop."""
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        contract = Stock(symbol, "SMART", "USD")
+        self._ib.qualifyContracts(contract)
+        bars = await self._ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime="",
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow="MIDPOINT",
+            useRTH=True,
+        )
+        return bars
+
+    def fetch_ohlcv(self, symbol: str, bar_size: str, duration: str) -> list:
+        """Thread-safe OHLCV fetch via the singleton IB connection.
+        Uses a 90-second timeout to accommodate IBKR pacing delays on large watchlists.
+        """
+        self._start()
+        return self._submit(self._do_ohlcv(symbol, bar_size, duration), timeout=90.0)
+
+    async def _do_price(self, symbol: str) -> float:
+        """Fetch current price on the manager's dedicated event loop."""
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        contract = Stock(symbol, "SMART", "USD")
+        self._ib.qualifyContracts(contract)
+        ticker = self._ib.reqMktData(contract)
+        await asyncio.sleep(1)
+        price = ticker.last or ticker.close or ticker.bid or 0.0
+        self._ib.cancelMktData(contract)
+        return float(price)
+
+    def fetch_price(self, symbol: str) -> float:
+        """Thread-safe price fetch via the singleton IB connection."""
+        self._start()
+        return self._submit(self._do_price(symbol))
+
 
 _manager = _IBKRManager()
 
@@ -168,32 +233,40 @@ class IBKRClient(AbstractBroker):
 
     def __init__(self, paper: bool | None = None):
         self._paper = paper if paper is not None else settings.ibkr_paper
-        self._port = settings.ibkr_port if self._paper else settings.ibkr_port_live
-        self.ib = IB()
-        self._connected = False
         mode = "PAPER" if self._paper else "LIVE"
-        logger.info(f"IBKRClient initialized in {mode} mode (not yet connected).")
+        logger.info(f"IBKRClient initialized in {mode} mode (delegating to singleton manager).")
 
-    async def connect(self):
-        """Connect to IB Gateway. Must be called before any other method."""
-        if not self._connected:
-            await self.ib.connectAsync(
-                host=settings.ibkr_host,
-                port=self._port,
-                clientId=settings.ibkr_client_id,
+    @property
+    def ib(self) -> "IB":
+        """
+        Return the singleton IB instance shared by the persistent manager.
+        Raises ConnectionError if the Gateway is not reachable.
+        """
+        return _manager.get_ib()
+
+    async def connect(self) -> None:
+        """
+        Ensure the singleton IBKR manager is connected (idempotent).
+        Safe to call multiple times; triggers auto-reconnect if Gateway was restarted.
+        """
+        _manager._start()
+        if not _manager.is_connected():
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _manager.get_balance)
+        if not _manager.is_connected():
+            raise ConnectionError(
+                "IBKRClient: failed to connect to IB Gateway. Ensure IB Gateway is running."
             )
-            self._connected = True
-            mode = "PAPER" if self._paper else "LIVE"
-            logger.info(f"[IBKR] Connected to IB Gateway at {settings.ibkr_host}:{self._port} ({mode})")
+        mode = "PAPER" if self._paper else "LIVE"
+        logger.info(f"[IBKR] IBKRClient ready — using singleton connection ({mode}, port={settings.ibkr_port})")
 
-    async def disconnect(self):
-        if self._connected:
-            self.ib.disconnect()
-            self._connected = False
-            logger.info("[IBKR] Disconnected from IB Gateway.")
+    async def disconnect(self) -> None:
+        """No-op: the singleton manager owns the connection lifecycle."""
+        logger.debug("[IBKR] IBKRClient.disconnect() called — singleton connection preserved.")
 
-    def _ensure_connected(self):
-        if not self._connected:
+    def _ensure_connected(self) -> None:
+        """Raise if the singleton IB manager is not currently connected."""
+        if not _manager.is_connected():
             raise ConnectionError(
                 "IBKRClient is not connected. Call connect() first or ensure IB Gateway is running."
             )
@@ -201,14 +274,14 @@ class IBKRClient(AbstractBroker):
     # ── Market Data ──────────────────────────────────────
 
     async def get_price(self, symbol: str) -> float:
+        """
+        Fetch current market price via the singleton IB connection.
+        Runs the ib_insync async call on the manager's dedicated event loop
+        to avoid cross-loop issues.
+        """
         self._ensure_connected()
-        contract = Stock(symbol, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
-        ticker = self.ib.reqMktData(contract)
-        await asyncio.sleep(1)  # wait for market data to arrive
-        price = ticker.last or ticker.close or ticker.bid or 0.0
-        self.ib.cancelMktData(contract)
-        return float(price)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _manager.fetch_price, symbol)
 
     async def get_ohlcv(
         self,
@@ -217,11 +290,13 @@ class IBKRClient(AbstractBroker):
         limit: int = 500,
         since: Optional[int] = None,
     ) -> pd.DataFrame:
+        """
+        Fetch historical OHLCV bars via the singleton IB connection.
+        reqHistoricalDataAsync must run on the manager's background loop;
+        we dispatch it there via run_in_executor so FastAPI's loop stays free.
+        """
         self._ensure_connected()
-        contract = Stock(symbol, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
 
-        # IBKR bar size map
         bar_size_map = {
             "1m": "1 min",
             "5m": "5 mins",
@@ -232,17 +307,11 @@ class IBKRClient(AbstractBroker):
             "1d": "1 day",
         }
         bar_size = bar_size_map.get(timeframe, "1 hour")
-
-        # Duration based on limit
         duration = f"{max(1, limit // 24)} D" if "hour" in bar_size else f"{max(1, limit // 390)} D"
 
-        bars = await self.ib.reqHistoricalDataAsync(
-            contract,
-            endDateTime="",
-            durationStr=duration,
-            barSizeSetting=bar_size,
-            whatToShow="MIDPOINT",
-            useRTH=True,
+        loop = asyncio.get_event_loop()
+        bars = await loop.run_in_executor(
+            None, _manager.fetch_ohlcv, symbol, bar_size, duration
         )
         df = pd.DataFrame([
             {
