@@ -36,7 +36,7 @@ class BaseStrategy(ABC):
 
     name: str = "base_strategy"
     description: str = ""
-    asset_class: str = "crypto"     # crypto | stock | option
+    asset_class: str = "crypto"     # crypto | stock | forex | option
     broker: str = "binance"
 
     @abstractmethod

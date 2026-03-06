@@ -1,5 +1,6 @@
 ﻿import { useState } from 'react'
 import { ChartPanel } from './ChartPanel'
+import MarketClock from '../components/MarketClock'
 
 type Layout = 1 | 2 | 4
 
@@ -21,7 +22,7 @@ export default function Chart() {
 
   return (
     <div className="flex flex-col h-full bg-dark-900">
-      {/* Layout picker */}
+      {/* Layout picker + clock */}
       <div className="flex items-center gap-2 px-4 py-2 bg-dark-800 border-b border-dark-700 shrink-0">
         <span className="text-xs text-gray-500 mr-1">Layout</span>
         {([1, 2, 4] as Layout[]).map(n => (
@@ -37,6 +38,9 @@ export default function Chart() {
         <span className="ml-3 text-[10px] text-gray-600">
           {layout === 1 ? 'Single chart' : layout === 2 ? '2 charts side-by-side' : '4-chart grid'}
         </span>
+        <div className="ml-auto">
+          <MarketClock />
+        </div>
       </div>
 
       {/* Panel grid */}

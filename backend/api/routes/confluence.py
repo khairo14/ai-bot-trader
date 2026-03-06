@@ -49,7 +49,7 @@ def _consensus(signals: list[dict]) -> dict:
     return {"consensus": best, "confluence_score": round(score, 2), "agreement": agreement}
 
 
-@router.get("/")
+@router.get("")
 async def get_confluence(
     symbol: str = Query(..., description="Trading symbol e.g. BTC/USDT"),
     broker: str = Query(..., description="Broker e.g. binance"),
@@ -142,7 +142,6 @@ async def get_confluence_batch(
 
     async def _run_sym(sym: str) -> dict:
         try:
-            from fastapi.testclient import TestClient  # noqa — not used, just reminder
             tf_list = [t.strip() for t in timeframes.split(",") if t.strip() in VALID_TIMEFRAMES]
 
             async def _one(tf: str) -> dict:

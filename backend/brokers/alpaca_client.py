@@ -85,12 +85,21 @@ class AlpacaClient(AbstractBroker):
         since: Optional[int] = None,
     ) -> pd.DataFrame:
         loop = asyncio.get_event_loop()
-        # Alpaca requires an explicit start date; derive it from limit when not given
+        # Alpaca requires an explicit start date; derive it from limit when not given.
+        # Stock markets trade only ~390 min/day (Mon-Fri 09:30-16:00 ET). The old
+        # formula (timedelta minutes = minutes * limit) assumed 24/7 operation, so
+        # for 1h+limit=200 it only went back 8 calendar days (~39 trading hours=39
+        # bars) — below the strategy's 50-bar minimum, causing "Insufficient data".
+        # Fix: convert trading minutes needed into calendar days with a safety buffer.
         if since:
             start = datetime.fromtimestamp(since / 1000, tz=timezone.utc)
         else:
-            minutes = self._TF_MINUTES.get(timeframe, 60)
-            start = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes * limit + 60)
+            mins = self._TF_MINUTES.get(timeframe, 60)
+            # Trading days needed: how many 390-min sessions fit the requested bars
+            trading_days_needed = (limit * mins + 390) / 390
+            # Convert to calendar days (+7 day buffer for weekends & holidays)
+            calendar_days = int(trading_days_needed * 7 / 5) + 7
+            start = datetime.now(tz=timezone.utc) - timedelta(days=calendar_days)
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=self._map_timeframe(timeframe),

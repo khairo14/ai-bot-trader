@@ -116,25 +116,61 @@ interface TradeMarker {
 interface MAOverlay { id: string; period: number; color: string }
 
 /** Returns the next NYSE open time as a human-readable ET string. */
+// DST-safe helpers — never use the "parse locale string as local time" offset trick.
+// Instead: find the target ET calendar date, then probe UTC candidates to find
+// the one that actually lands on the desired ET wall-clock hour.
+function _etHour(d: Date) {
+  return +d.toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' }).slice(0, 2)
+}
+function _etDow(d: Date) {
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(
+    d.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' })
+  )
+}
+function _etDateStr(d: Date) {
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) // "YYYY-MM-DD"
+}
+/** Find the UTC Date that equals targetHour:targetMin on the given ET date string. */
+function _utcForETTime(etDate: string, targetHour: number, targetMin: number): Date {
+  for (const offsetH of [4, 5]) { // try EDT (-4) then EST (-5)
+    const candidate = new Date(`${etDate}T${String(targetHour + offsetH).padStart(2,'0')}:${String(targetMin).padStart(2,'0')}:00Z`)
+    if (_etHour(candidate) === targetHour) return candidate
+  }
+  return new Date(`${etDate}T${String(targetHour + 5).padStart(2,'0')}:${String(targetMin).padStart(2,'0')}:00Z`)
+}
+
 function nextNYSEOpen(): string {
   const now = new Date()
-  // Parse ET time into a "local" Date object for day-arithmetic, then correct with offset
-  const nyNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
-  const offsetMs = nyNow.getTime() - now.getTime()
-  const d = nyNow.getDay(), h = nyNow.getHours(), m = nyNow.getMinutes()
-  const next = new Date(nyNow)
-  if (d >= 1 && d <= 5 && (h < 9 || (h === 9 && m < 30))) {
-    next.setHours(9, 30, 0, 0)                           // today before open
-  } else {
-    next.setDate(next.getDate() + 1)
-    while (next.getDay() === 0 || next.getDay() === 6) next.setDate(next.getDate() + 1)
-    next.setHours(9, 30, 0, 0)
+  let target = new Date(now)
+  const h = _etHour(now)
+  const etM = +now.toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' }).slice(3, 5)
+  const dow = _etDow(now)
+  const isWeekday = (d: number) => d >= 1 && d <= 5
+  if (!(isWeekday(dow) && (h < 9 || (h === 9 && etM < 30)))) {
+    do { target = new Date(target.getTime() + 86_400_000) } while (!isWeekday(_etDow(target)))
   }
-  return new Date(next.getTime() - offsetMs).toLocaleString('en-US', {
+  return _utcForETTime(_etDateStr(target), 9, 30).toLocaleString('en-US', {
     timeZone: 'America/New_York', weekday: 'short', month: 'short',
     day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
   }) + ' ET'
 }
+
+/** Next time the 24/5 FX market opens (Sunday 5 PM ET). */
+function nextFXOpen(): string {
+  const now = new Date()
+  let target = new Date(now)
+  const dow = _etDow(now), h = _etHour(now)
+  if (!(dow === 0 && h < 17)) {
+    do { target = new Date(target.getTime() + 86_400_000) } while (_etDow(target) !== 0)
+  }
+  return _utcForETTime(_etDateStr(target), 17, 0).toLocaleString('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', month: 'short',
+    day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }) + ' ET'
+}
+
+/** True when symbol looks like a spot FX pair (EUR/USD, GBP/JPY, etc.) */
+const isFxPair = (sym: string) => /^[A-Za-z]{3}\/[A-Za-z]{3}$/.test(sym)
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 const MA_COLORS  = ['#06b6d4', '#f97316', '#84cc16', '#ec4899', '#8b5cf6', '#14b8a6']
@@ -195,6 +231,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const [newMAPeriod, setNewMAPeriod] = useState(20)
   const [wsLive, setWsLive]           = useState(false)
   const [marketClosed, setMarketClosed] = useState(false)
+  const [wsRetryKey, setWsRetryKey]   = useState(0)   // increments to trigger WS reconnect
   const [showIndPanel, setShowIndPanel] = useState(false)
 
   // Symbol combobox
@@ -226,8 +263,10 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const maSeriesRefs   = useRef<Map<string, ISeriesApi<'Line'>>>(new Map())
   const candlesDataRef = useRef<Candle[]>([])
   const maOverlaysRef  = useRef<MAOverlay[]>([])
-  // Live WebSocket ref
-  const wsRef = useRef<WebSocket | null>(null)
+  // Live WebSocket refs
+  const wsRef       = useRef<WebSocket | null>(null)
+  const wsRetryRef  = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const abortRef    = useRef<AbortController | null>(null)   // cancels in-flight fetchAndRender
   const indPanelRef = useRef<HTMLDivElement>(null)
 
   // Series refs
@@ -337,8 +376,31 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   // ─── Fetch & render ──────────────────────────────────────────────────────
   const fetchAndRender = useCallback(async () => {
     if (!candleRef.current) return
+    // Cancel any previous in-flight fetch so stale data from the old
+    // symbol/timeframe never populates the series after it was cleared.
+    abortRef.current?.abort()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    const { signal } = ctrl
     isFetchingRef.current = true
     setLoading(true)
+    // Clear all series immediately so the chart goes blank while the new
+    // symbol loads — prevents the WS from appending new-symbol candles onto
+    // old-symbol data (which creates a visible gap)
+    lastCandleTimeRef.current = null
+    candlesDataRef.current = []
+    candleRef.current.setData([])
+    volRef.current?.setData([])
+    ema20Ref.current?.setData([])
+    ema50Ref.current?.setData([])
+    bbUpperRef.current?.setData([])
+    bbMidRef.current?.setData([])
+    bbLowerRef.current?.setData([])
+    rsiRef.current?.setData([])
+    macdLineRef.current?.setData([])
+    macdSignRef.current?.setData([])
+    macdHistRef.current?.setData([])
+    for (const s of maSeriesRefs.current.values()) s.setData([])
     try {
       // Compute since/until ms from preset or custom date pickers
       let since: number, until: number
@@ -350,9 +412,9 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
       }
 
       const [candleRes, signalRes, tradeRes] = await Promise.all([
-        axios.get('/api/charts/candles', { params: { symbol, timeframe, broker, since, until } }),
-        axios.get('/api/charts/signals', { params: { symbol, timeframe, broker, limit: 500 } }),
-        axios.get('/api/charts/trades',  { params: { symbol, broker, since, until } }),
+        axios.get('/api/charts/candles', { params: { symbol, timeframe, broker, since, until }, signal }),
+        axios.get('/api/charts/signals', { params: { symbol, timeframe, broker, limit: 500 }, signal }),
+        axios.get('/api/charts/trades',  { params: { symbol, broker, since, until }, signal }),
       ])
 
       const candles: Candle[] = (candleRes.data.candles as Candle[]).sort((a, b) => a.time - b.time)
@@ -484,10 +546,15 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
         }
       }
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail ?? 'Failed to load chart data.')
+      if (!axios.isCancel(err))
+        toast.error(err?.response?.data?.detail ?? 'Failed to load chart data.')
     } finally {
-      setLoading(false)
-      isFetchingRef.current = false
+      // Only release the loading lock if THIS fetch is still the active one.
+      // If it was aborted, a newer fetchAndRender already owns the lock.
+      if (!ctrl.signal.aborted) {
+        setLoading(false)
+        isFetchingRef.current = false
+      }
     }
   }, [symbol, timeframe, broker, rangePreset, customFrom, customTo, showTrades])
 
@@ -574,9 +641,13 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     }
   }, [maOverlays])
 
-  // Live WebSocket — real-time candle updates for all brokers
-  // Falls back to the REST poll (above) automatically when the WS closes.
+  // Live WebSocket — real-time candle updates for all brokers.
+  // Auto-reconnects every 60 s after a close so the chart picks up data as soon
+  // as IB Gateway comes online or the market reopens. Binance never closes
+  // (persistent public stream) so reconnect is only needed for IBKR / Alpaca.
   useEffect(() => {
+    // Cancel any pending reconnect from the previous render cycle
+    if (wsRetryRef.current) { clearTimeout(wsRetryRef.current); wsRetryRef.current = null }
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
     setWsLive(false)
     setMarketClosed(false)
@@ -584,9 +655,33 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     const url = `${proto}//${window.location.host}/ws/kline?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&broker=${encodeURIComponent(broker)}`
     const ws = new WebSocket(url)
     wsRef.current = ws
-    ws.onopen  = () => { wsLiveRef.current = true;  setWsLive(true); setMarketClosed(false) }
+    ws.onopen  = () => {
+      wsLiveRef.current = true
+      setWsLive(true)
+      setMarketClosed(false)
+      if (wsRetryRef.current) { clearTimeout(wsRetryRef.current); wsRetryRef.current = null }
+    }
     ws.onerror = () => { wsLiveRef.current = false; setWsLive(false) }
-    ws.onclose = () => { wsLiveRef.current = false; setWsLive(false); if (broker !== 'binance') setMarketClosed(true) }
+    ws.onclose = (e) => {
+      // Guard: if the user switched symbol/timeframe, a newer WS is already
+      // active.  Don't let this stale close clobber its state or schedule a
+      // spurious reconnect.
+      if (wsRef.current !== ws) return
+      wsLiveRef.current = false
+      setWsLive(false)
+      if (broker !== 'binance') {
+        // Show "Market Closed" only for normal close (code 1000/1001 = backend
+        // 60-second no-data timeout).  Error closes (4001 IBKR stream error,
+        // 4002 IBKR not connected) should not show a misleading overlay.
+        if (e.code === 1000 || e.code === 1001) setMarketClosed(true)
+        // Schedule reconnect: 60 s is short enough to pick up data quickly when
+        // IB Gateway starts or the market opens, but not so frequent as to spam.
+        wsRetryRef.current = setTimeout(() => {
+          wsRetryRef.current = null
+          setWsRetryKey(k => k + 1)
+        }, 60_000)
+      }
+    }
     // Throttle the React state update (setLastUpdated) to at most once per 2s.
     // series.update() is called every message but is a DOM mutation with no
     // React re-render — safe to call at full rate.
@@ -594,7 +689,13 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     ws.onmessage = (evt) => {
       try {
         const d = JSON.parse(evt.data) as { time: number; open: number; high: number; low: number; close: number; volume: number }
-        if (!candleRef.current || !d.time || !d.close || d.open <= 0 || d.high <= 0 || d.low <= 0) return
+        // Reject during a full fetch — prevents new-symbol WS candles being
+        // appended to old-symbol series data before setData() replaces it.
+        if (isFetchingRef.current) return
+        // Use explicit positivity checks instead of !d.close so that NaN values
+        // (ib_insync sentinel) are caught correctly — !NaN is true but NaN > 0
+        // is false, so `!(d.close > 0)` rejects both NaN and non-positive.
+        if (!candleRef.current || !(d.time > 0) || !(d.close > 0) || !(d.open > 0) || !(d.high > 0) || !(d.low > 0)) return
         if (lastCandleTimeRef.current !== null && d.time < lastCandleTimeRef.current) return
         try {
           candleRef.current.update({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })
@@ -610,8 +711,13 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
         } catch {}
       } catch {}
     }
-    return () => { ws.close(); wsLiveRef.current = false; setWsLive(false) }
-  }, [symbol, timeframe, broker])
+    return () => {
+      ws.close()
+      wsLiveRef.current = false
+      setWsLive(false)
+      if (wsRetryRef.current) { clearTimeout(wsRetryRef.current); wsRetryRef.current = null }
+    }
+  }, [symbol, timeframe, broker, wsRetryKey])
 
   // Fetch symbols when broker changes (keep symbol in sync atomically)
   useEffect(() => {
@@ -904,8 +1010,17 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
         {broker !== 'binance' && marketClosed && (
           <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
             <div className="bg-dark-900/90 border border-dark-600 rounded-xl px-5 py-4 text-center backdrop-blur-sm">
-              <p className="text-sm font-semibold text-gray-300">Market Closed</p>
-              <p className="text-xs text-gray-500 mt-1">NYSE opens {nextNYSEOpen()}</p>
+              {isFxPair(symbol) ? (
+                <>
+                  <p className="text-sm font-semibold text-gray-300">FX Market Closed</p>
+                  <p className="text-xs text-gray-500 mt-1">Opens {nextFXOpen()}</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-semibold text-gray-300">Market Closed</p>
+                  <p className="text-xs text-gray-500 mt-1">NYSE opens {nextNYSEOpen()}</p>
+                </>
+              )}
             </div>
           </div>
         )}

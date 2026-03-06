@@ -18,6 +18,7 @@ IBKR    : polls reqMktData ticker every 1s via singleton manager; builds candles
 """
 import asyncio
 import json
+import math
 import time as _time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -208,6 +209,39 @@ async def _stream_alpaca(ws: WebSocket, symbol: str, timeframe: str, tf_secs: in
 
 # ─── IBKR ─────────────────────────────────────────────────────────────────────
 
+def _safe_ticker_price(ticker) -> float:
+    """
+    Extract the best available live price from an ib_insync Ticker object.
+
+    ib_insync initialises all numeric ticker fields to math.nan (NOT None or 0)
+    to signal "not yet received from Gateway".  Python's `or` operator is broken
+    for NaN because NaN is *truthy*:
+
+        float('nan') or ticker.close  →  nan   ← chain short-circuits at nan
+        float('nan') <= 0             →  False  ← NaN comparison always False
+
+    This means the old pattern  `ticker.last or ticker.close or 0`  always
+    returns nan when .last hasn't been populated yet, bypassing every guard.
+
+    This function iterates each attribute explicitly and skips NaN values so the
+    first genuinely positive finite price is returned.  Only 'last' and 'bid'
+    are considered — 'close' is the *previous session's* final price and would
+    send a frozen stale value to the chart, preventing the 60-second no-data
+    timeout from firing and misleading the user.
+    """
+    for attr in ("last", "bid"):
+        try:
+            raw = getattr(ticker, attr, None)
+            if raw is None:
+                continue
+            val = float(raw)
+            if not math.isnan(val) and val > 0:
+                return val
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int):
     """
     Stream live IBKR price ticks as candle updates via the singleton manager.
@@ -220,13 +254,12 @@ async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int)
     Stops streaming and closes the WebSocket (so the frontend falls back to
     REST polling) if no valid price is received for 60 consecutive seconds.
     """
-    from brokers.ibkr_client import get_ibkr_manager
-    from ib_insync import Stock
+    from brokers.ibkr_client import get_ibkr_manager, _ibkr_contract
 
     loop = asyncio.get_event_loop()
     mgr = get_ibkr_manager()
     sym = symbol.upper()
-    contract = Stock(sym, "SMART", "USD")
+    contract = _ibkr_contract(sym)
 
     logger.info(f"[KlineWS][IBKR] Subscribing to live ticks for {sym}")
     try:
@@ -249,8 +282,11 @@ async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int)
     try:
         while True:
             await asyncio.sleep(1)
-            # Reading ticker attributes from the FastAPI loop is safe under CPython's GIL
-            price = float(ticker.last or ticker.close or ticker.bid or 0)
+            # Reading ticker attributes from the FastAPI loop is safe under
+            # CPython's GIL.  _safe_ticker_price() explicitly skips NaN values
+            # (ib_insync sentinel = math.nan) so a missing/stale price always
+            # returns 0.0 and triggers the 60-second no-data timeout correctly.
+            price = _safe_ticker_price(ticker)
 
             if price <= 0:
                 if _time.monotonic() - last_valid_ts > 60:

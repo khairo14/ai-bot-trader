@@ -81,7 +81,8 @@ async def _forward_test_scheduler():
                 # ── Market-hours gate ─────────────────────────────
                 # Do NOT mark last_fired if market is closed — we want to retry
                 # each minute until the session opens (covers overnight + weekends).
-                if not is_market_open(broker_name):
+                _asset_cls_str = getattr(strat.asset_class, "value", None)
+                if not is_market_open(broker_name, _asset_cls_str):
                     from datetime import datetime, timezone
                     now_et_str = datetime.now(
                         tz=__import__('zoneinfo').ZoneInfo('America/New_York')

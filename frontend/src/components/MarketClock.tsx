@@ -5,12 +5,12 @@
  *  - Live ticking clock in ET and UTC
  *  - Per-broker market session status (OPEN / CLOSED / 24/7)
  *
- * The session status is pulled from GET /api/forward/market-status every 60 s.
+ * The session status is pulled from GET /api/forward-test/market-status every 60 s.
  * The clock ticks every second entirely client-side.
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { Clock } from 'lucide-react'
+import { Clock, RefreshCw } from 'lucide-react'
 import axios from 'axios'
 
 interface SessionStatus {
@@ -75,16 +75,20 @@ export default function MarketClock() {
   const [now, setNow]           = useState<Date>(new Date())
   const [status, setStatus]     = useState<MarketStatus | null>(null)
   const [etOffsetMin, setEtOffsetMin] = useState<number>(-300) // default EST
+  const [refreshing, setRefreshing]   = useState(false)
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchStatus = async () => {
+    setRefreshing(true)
     try {
-      const res = await axios.get<MarketStatus>('/api/forward/market-status')
+      const res = await axios.get<MarketStatus>('/api/forward-test/market-status')
       setStatus(res.data)
       setEtOffsetMin(etOffsetToMinutes(res.data.et_offset))
     } catch {
       // silently ignore — clock still ticks, session pills stay stale
+    } finally {
+      setRefreshing(false)
     }
   }
 
@@ -150,6 +154,16 @@ export default function MarketClock() {
           )}
         </div>
       ))}
+
+      {/* Manual refresh — sits at the end of the clock row */}
+      <button
+        onClick={fetchStatus}
+        title="Refresh market status"
+        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 bg-dark-800 border border-dark-600 rounded-lg px-2.5 py-1.5 transition-colors"
+      >
+        <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} />
+        <span>Refresh</span>
+      </button>
     </div>
   )
 }

@@ -215,14 +215,6 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-2">
           <MarketClock />
-          <button
-            onClick={() => fetchAll(true)}
-            disabled={refreshing}
-            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors px-3 py-1.5 bg-dark-700 border border-dark-600 rounded-lg"
-          >
-            <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} />
-            Refresh
-          </button>
         </div>
       </div>
 

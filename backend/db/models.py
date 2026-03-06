@@ -37,6 +37,7 @@ class AssetClass(str, enum.Enum):
     CRYPTO = "crypto"
     STOCK = "stock"
     OPTION = "option"
+    FOREX = "forex"
 
 
 class BrokerName(str, enum.Enum):

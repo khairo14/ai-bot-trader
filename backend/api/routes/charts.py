@@ -23,9 +23,18 @@ _ALPACA_DEFAULTS = [
     "TSMC","SOFI","LCID","RIVN","F","GM","STLA","TM","HMC","RACE",
 ]
 _IBKR_DEFAULTS = [
+    # US stocks
     "SPY","QQQ","IWM","DIA","AAPL","MSFT","NVDA","AMZN","GOOGL","META",
     "TSLA","AMD","JPM","BAC","GS","GLD","SLV","USO","TLT","XLF",
     "BRK.B","V","MA","JNJ","PFE","MRNA","XOM","CVX","BABA","NIO",
+    # Forex (IDEALPRO FX)
+    "EUR/USD","GBP/USD","USD/JPY","AUD/USD","USD/CAD","USD/CHF","NZD/USD","EUR/GBP",
+    # European equities (Alternative European Equities subscription)
+    "SAP","SIE","ALV","BMW","BAYN",           # Xetra
+    "ASML","INGA","PHIA",                      # Amsterdam
+    "AZN","SHEL","HSBA","BP","GSK",           # LSE
+    "NESN","NOVN","ROG",                        # SWX
+    "OR","TTE","BNP",                           # Paris
 ]
 
 

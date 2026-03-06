@@ -93,26 +93,47 @@ def _is_nyse_trading_day(d: _date) -> bool:
     return not sched.empty
 
 
+_FX_MARKET_CLOSE = _time(17, 0)  # 5 PM ET — same for open and close
+
+
+def _is_forex_market_open() -> bool:
+    """
+    FX spot market hours: Sunday 17:00 ET → Friday 17:00 ET (continuous 24 h, DST-aware).
+    Closed all day Saturday and Friday from 17:00 ET until Sunday 17:00 ET.
+    """
+    now_et = _dt.now(tz=_ET)
+    wd = now_et.weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+    if wd == 5:  # Saturday — fully closed
+        return False
+    if wd == 4 and now_et.time() >= _FX_MARKET_CLOSE:  # Friday ≥ 17:00
+        return False
+    if wd == 6 and now_et.time() < _FX_MARKET_CLOSE:   # Sunday < 17:00
+        return False
+    return True
+
+
 def is_crypto_broker(broker_name: str) -> bool:
     """Return True for 24/7 crypto brokers (Binance, etc.)."""
     return broker_name.lower() not in _STOCK_BROKERS
 
 
-def is_market_open(broker_name: str) -> bool:
+def is_market_open(broker_name: str, asset_class: str | None = None) -> bool:
     """
-    Return True if trading is currently allowed for this broker.
+    Return True if trading is currently allowed for this broker / asset-class combo.
 
     - Crypto (Binance): always True — trades 24/7
-    - Stocks (Alpaca) / Options (IBKR):
+    - Forex on IBKR:  FX market hours (Sun 17:00 ET → Fri 17:00 ET, continuous)
+    - Stocks / Options (Alpaca, IBKR):
         * NYSE regular session 09:30–16:00 ET only
         * Blocked on weekends
-        * Blocked on all US market holidays (MLK Day, Presidents Day, Good Friday,
-          Memorial Day, Juneteenth, Independence Day, Labor Day, Thanksgiving,
-          Christmas) via pandas_market_calendars NYSE calendar
+        * Blocked on all US market holidays via pandas_market_calendars NYSE calendar
         * DST handled automatically via ZoneInfo / America/New_York
     """
     if is_crypto_broker(broker_name):
         return True
+    # IBKR forex uses FX session hours, not NYSE stock hours
+    if broker_name.lower() == "ibkr" and str(asset_class or "").upper() == "FOREX":
+        return _is_forex_market_open()
     now_et = _dt.now(tz=_ET)
     if not _is_nyse_trading_day(now_et.date()):
         return False
@@ -475,6 +496,22 @@ async def _run_one_strategy(strat) -> None:
         )
         return
 
+    # Resolve asset-class string once — used in market-hours checks below
+    _asset_cls_str: str | None = getattr(strat.asset_class, "value", None)
+
+    # ── Early market-hours gate ─────────────────────────────────────────────
+    # Skip signal computation when the broker session is closed to avoid
+    # unnecessary broker API calls (e.g., IBKR data fetches during weekends).
+    # This matches scheduler behaviour and prevents SSL-teardown timeouts from
+    # blocking all subsequent strategies in a Run-Now pass.
+    if not is_market_open(strat.broker.value, _asset_cls_str):
+        _now_et_str = _dt.now(tz=_ET).strftime("%a %H:%M ET")
+        logger.debug(
+            f"[ForwardTest] {strat.name} ({timeframe}) — "
+            f"market closed ({_now_et_str}), skip signal run"
+        )
+        return
+
     signal_engine = SignalEngine()
     forward_engine = ForwardEngine()
 
@@ -531,7 +568,7 @@ async def _run_one_strategy(strat) -> None:
         # Signals are always saved to DB — useful for review even overnight.
         # But actual trade placement is suppressed when the broker's session
         # is closed. Crypto (Binance) is 24/7 and always passes this check.
-        if allow_execution and not is_market_open(strat.broker.value):
+        if allow_execution and not is_market_open(strat.broker.value, _asset_cls_str):
             allow_execution = False
             _market_note = f"execution suppressed: {strat.broker.value} session closed"
             sig.reasons = (sig.reasons or []) + [_market_note]
@@ -842,7 +879,8 @@ async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
     # Market hours gate — block live execution when session is closed.
     # Paper execution is always allowed (pure simulation, no real order).
     _exec_broker = db_signal.broker.value if hasattr(db_signal.broker, "value") else str(db_signal.broker)
-    if not is_market_open(_exec_broker):
+    _exec_asset_cls = getattr(db_signal.asset_class, "value", None)
+    if not is_market_open(_exec_broker, _exec_asset_cls):
         # Find strategy to determine paper vs live
         _strat_q_pre = await db.execute(
             select(StrategyModel).where(StrategyModel.name == db_signal.strategy_name, StrategyModel.is_active == True)

@@ -43,7 +43,7 @@ const BROKERS = [
 const BROKER_WATCHLISTS: Record<string, string[]> = {
   binance: ['crypto_major', 'crypto_mid'],
   alpaca:  ['us_stocks', 'us_stocks_mid'],
-  ibkr:    ['us_stocks', 'us_stocks_mid'],
+  ibkr:    ['us_stocks', 'us_stocks_mid', 'eu_stocks', 'forex_major'],
 }
 
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '2h', '4h', '1d']
@@ -53,6 +53,8 @@ const WATCHLIST_LABELS: Record<string, string> = {
   crypto_mid:    'Crypto — Mid Cap (LINK, UNI, ARB…)',
   us_stocks:     'US Stocks — Large Cap (AAPL, NVDA…)',
   us_stocks_mid: 'US Stocks — Mid Cap (COIN, PLTR…)',
+  eu_stocks:     'EU Stocks — Large Cap (ASML, SAP, AZN…)',
+  forex_major:   'Forex — Major Pairs (EUR/USD, GBP/USD…)',
   custom:        'Custom symbols',
 }
 

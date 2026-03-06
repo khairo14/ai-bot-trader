@@ -9,7 +9,7 @@ interface Template {
   name: string
   description: string
   broker: 'binance' | 'alpaca' | 'ibkr'
-  asset_class: 'crypto' | 'stock'
+  asset_class: 'crypto' | 'stock' | 'forex'
   symbol: string
   timeframe: string
   tags: string[]

@@ -1,14 +1,53 @@
 import asyncio
+import math
 import threading
 import time
 import pandas as pd
 from typing import List, Optional, Callable
 from loguru import logger
 
-from ib_insync import IB, Stock, Option, Contract, MarketOrder, LimitOrder, StopLimitOrder, Trade as IBTrade
+from ib_insync import IB, Stock, Forex as IBForex, Option, Contract, MarketOrder, LimitOrder, StopLimitOrder, Trade as IBTrade
 
 from config import settings
 from brokers.base import AbstractBroker, OrderResult, Position, Balance
+
+
+# ── Contract factory ─────────────────────────────────────────────────────────
+
+_FX_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD", "HKD", "SGD"}
+
+# European equity routing: ticker → (exchange, currency)
+_EU_STOCKS: dict[str, tuple[str, str]] = {
+    # Xetra (Frankfurt)
+    "SAP":  ("XETRA", "EUR"), "SIE":  ("XETRA", "EUR"), "ALV":  ("XETRA", "EUR"),
+    "BMW":  ("XETRA", "EUR"), "BAYN": ("XETRA", "EUR"), "DTE":  ("XETRA", "EUR"),
+    # Euronext Amsterdam
+    "ASML": ("AEB",   "EUR"), "INGA": ("AEB",   "EUR"), "PHIA": ("AEB",   "EUR"),
+    # LSE (London)
+    "AZN":  ("LSE",   "GBP"), "SHEL": ("LSE",   "GBP"), "HSBA": ("LSE",   "GBP"),
+    "ULVR": ("LSE",   "GBP"), "BP":   ("LSE",   "GBP"), "GSK":  ("LSE",   "GBP"),
+    # SWX (Switzerland)
+    "NESN": ("SWX",   "CHF"), "NOVN": ("SWX",   "CHF"), "ROG":  ("SWX",   "CHF"),
+    # Euronext Paris
+    "OR":   ("SBF",   "EUR"), "TTE":  ("SBF",   "EUR"), "BNP":  ("SBF",   "EUR"),
+}
+
+def _ibkr_contract(symbol: str):
+    """
+    Return the correct ib_insync contract for a symbol string.
+    - 'EUR/USD' or 'EURUSD' with known 3-letter currencies → IBForex via IDEALPRO
+    - Known EU tickers → Stock on their home exchange with local currency
+    - Everything else → US stock via SMART routing
+    """
+    clean = symbol.replace("/", "").upper()
+    if (len(clean) == 6 and clean.isalpha()
+            and clean[:3] in _FX_CURRENCIES and clean[3:] in _FX_CURRENCIES):
+        return IBForex(clean)
+    ticker = symbol.upper()
+    if ticker in _EU_STOCKS:
+        exch, curr = _EU_STOCKS[ticker]
+        return Stock(ticker, exch, curr)
+    return Stock(clean, "SMART", "USD")
 
 
 # ── Persistent singleton IBKR connection ─────────────────────────────────────
@@ -180,15 +219,17 @@ class _IBKRManager:
         if not await self._ensure_connected():
             raise ConnectionError("IBKR Gateway is not reachable")
         assert self._ib is not None
-        contract = Stock(symbol, "SMART", "USD")
+        contract = _ibkr_contract(symbol)
         await self._ib.qualifyContractsAsync(contract)
+        # Forex trades 24/5 — RTH filter must be off; stocks use RTH only
+        use_rth = contract.secType != "CASH"
         bars = await self._ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
             durationStr=duration,
             barSizeSetting=bar_size,
             whatToShow="MIDPOINT",
-            useRTH=True,
+            useRTH=use_rth,
         )
         return bars
 
@@ -204,13 +245,26 @@ class _IBKRManager:
         if not await self._ensure_connected():
             raise ConnectionError("IBKR Gateway is not reachable")
         assert self._ib is not None
-        contract = Stock(symbol, "SMART", "USD")
+        contract = _ibkr_contract(symbol)
         await self._ib.qualifyContractsAsync(contract)
         ticker = self._ib.reqMktData(contract)
         await asyncio.sleep(1)
-        price = ticker.last or ticker.close or ticker.bid or 0.0
+        # ib_insync sets all ticker fields to math.nan (NOT None/0) until the
+        # Gateway pushes the value.  Python's `or` short-circuits at nan (truthy)
+        # so the old  `ticker.last or ticker.close or …`  always returned nan.
+        price = 0.0
+        for _attr in ("last", "bid", "close"):
+            _v = getattr(ticker, _attr, None)
+            if _v is not None:
+                try:
+                    _fv = float(_v)
+                    if not math.isnan(_fv) and _fv > 0:
+                        price = _fv
+                        break
+                except (TypeError, ValueError):
+                    pass
         self._ib.cancelMktData(contract)
-        return float(price)
+        return price
 
     def fetch_price(self, symbol: str) -> float:
         """Thread-safe price fetch via the singleton IB connection."""
@@ -222,7 +276,7 @@ class _IBKRManager:
         if not await self._ensure_connected():
             raise ConnectionError("IBKR Gateway is not reachable")
         assert self._ib is not None
-        contract = Stock(symbol, "SMART", "USD")
+        contract = _ibkr_contract(symbol)
         await self._ib.qualifyContractsAsync(contract)
         ticker = self._ib.reqMktDepth(contract)
         await asyncio.sleep(1)
@@ -241,7 +295,7 @@ class _IBKRManager:
         if not await self._ensure_connected():
             raise ConnectionError("IBKR Gateway is not reachable")
         assert self._ib is not None
-        contract = Stock(symbol, "SMART", "USD")
+        contract = _ibkr_contract(symbol)
         await self._ib.qualifyContractsAsync(contract)
         chains = await self._ib.reqSecDefOptParamsAsync(
             symbol, "", contract.secType, contract.conId
@@ -413,7 +467,19 @@ class IBKRClient(AbstractBroker):
             "1d": "1 day",
         }
         bar_size = bar_size_map.get(timeframe, "1 hour")
-        duration = f"{max(1, limit // 24)} D" if "hour" in bar_size else f"{max(1, limit // 390)} D"
+        # Convert bar_size to minutes per bar so we can compute the correct duration.
+        # The old formula was broken:
+        #   'hour' branch: max(1, 200//24)= 8 D → only ~13 4h bars, ~52 1h bars
+        #   else branch:   max(1, 200//390)= 1 D → only 1 daily bar or ~78 5m bars
+        # Fix: compute calendar days from trading minutes needed (390 min/trading day).
+        _bar_minutes = {
+            "1 min": 1, "5 mins": 5, "15 mins": 15, "30 mins": 30,
+            "1 hour": 60, "4 hours": 240, "1 day": 390,
+        }
+        mins_per_bar = _bar_minutes.get(bar_size, 60)
+        trading_days_needed = (limit * mins_per_bar + 390) / 390
+        calendar_days = int(trading_days_needed * 7 / 5) + 5  # +5 day buffer
+        duration = f"{max(1, calendar_days)} D"
 
         loop = asyncio.get_event_loop()
         bars = await loop.run_in_executor(
@@ -513,7 +579,7 @@ class IBKRClient(AbstractBroker):
         if option_expiry and option_strike and option_right:
             contract = Option(symbol, option_expiry, option_strike, option_right, "SMART")
         else:
-            contract = Stock(symbol, "SMART", "USD")
+            contract = _ibkr_contract(symbol)
         _place_loop = asyncio.get_event_loop()
         await _place_loop.run_in_executor(None, _manager.qualify_contract_sync, contract)
 

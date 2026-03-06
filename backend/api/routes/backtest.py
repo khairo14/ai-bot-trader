@@ -28,32 +28,52 @@ class BacktestRequest(BaseModel):
     parameters: Optional[dict] = None
 
 
-# Symbols that contain '/' are crypto pairs — only valid on Binance
-_CRYPTO_BROKERS = {"binance"}
-_STOCK_BROKERS  = {"alpaca", "ibkr"}
+# Broker capability rules:
+#   Binance  — only X/Y crypto pairs (e.g. BTC/USDT)
+#   Alpaca   — only plain stock tickers (e.g. AAPL)
+#   IBKR     — plain tickers (stocks) OR X/Y forex pairs (e.g. EUR/USD) — both valid
+_FX_CURRENCIES = {"USD","EUR","GBP","JPY","AUD","CAD","CHF","NZD","HKD","SGD"}
+
+def _is_forex_pair(symbol: str) -> bool:
+    """True if symbol looks like an FX pair (e.g. EUR/USD) rather than a crypto pair."""
+    parts = symbol.upper().split("/")
+    return len(parts) == 2 and all(p in _FX_CURRENCIES for p in parts)
 
 
 def _validate_broker_symbol(broker: str, symbol: str):
     """Raise HTTPException 422 if broker/symbol combination is clearly wrong."""
-    is_crypto_symbol = "/" in symbol
-    if is_crypto_symbol and broker in _STOCK_BROKERS:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Symbol '{symbol}' looks like a crypto pair but broker '{broker}' "
-                f"only supports stock tickers (e.g. AAPL, SHOP, SPY). "
-                f"Either change the symbol to a stock ticker or switch the broker to 'binance'."
-            ),
-        )
-    if not is_crypto_symbol and broker in _CRYPTO_BROKERS:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Symbol '{symbol}' looks like a stock ticker but broker '{broker}' "
-                f"only supports crypto pairs (e.g. BTC/USDT, ETH/USDT). "
-                f"Either use a crypto pair symbol or switch the broker to 'alpaca' or 'ibkr'."
-            ),
-        )
+    has_slash = "/" in symbol
+    if has_slash:
+        if broker == "alpaca":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Symbol '{symbol}' contains '/' but broker 'alpaca' only supports "
+                    f"stock tickers (e.g. AAPL, SPY). Switch the broker to 'binance' for "
+                    f"crypto or 'ibkr' for forex pairs."
+                ),
+            )
+        # IBKR accepts X/Y only for recognized FX pairs
+        if broker == "ibkr" and not _is_forex_pair(symbol):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Symbol '{symbol}' looks like a crypto pair. IBKR supports "
+                    f"forex pairs (e.g. EUR/USD) and stock tickers — not crypto. "
+                    f"Switch the broker to 'binance' for crypto."
+                ),
+            )
+    else:
+        # Plain ticker — only invalid on Binance
+        if broker == "binance":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Symbol '{symbol}' looks like a stock ticker but broker 'binance' "
+                    f"only supports crypto pairs (e.g. BTC/USDT, ETH/USDT). "
+                    f"Switch the broker to 'alpaca' or 'ibkr'."
+                ),
+            )
 
 
 @router.post("/run")

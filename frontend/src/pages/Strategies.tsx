@@ -18,7 +18,10 @@ interface Strategy {
 }
 
 const BROKERS = ['binance', 'alpaca', 'ibkr']
-const ASSET_CLASSES = ['crypto', 'stock', 'option']
+const ASSET_CLASSES = ['crypto', 'stock', 'forex', 'option']
+
+// Regex to detect a forex pair like EUR/USD, GBP/JPY, etc.
+const FX_SYMBOL_RE = /^[A-Z]{3}\/[A-Z]{3}$/
 
 // Strategies valid per broker — mirrors backend BROKER_STRATEGIES in scanner.py
 const BROKER_STRATEGIES: Record<string, string[]> = {
@@ -28,11 +31,17 @@ const BROKER_STRATEGIES: Record<string, string[]> = {
              'iron_condor', 'covered_call', 'bull_call_spread'],
 }
 
-// Default asset class per broker
+// Default asset class per broker (IBKR can be stock or forex — resolved by symbol)
 const BROKER_ASSET_CLASS: Record<string, string> = {
   binance: 'crypto',
   alpaca:  'stock',
   ibkr:    'stock',
+}
+
+function deriveAssetClass(broker: string, symbol: string, currentStratType: string): string {
+  if (OPTION_STRATEGIES.has(currentStratType)) return 'option'
+  if (broker === 'ibkr' && FX_SYMBOL_RE.test(symbol.trim().toUpperCase())) return 'forex'
+  return BROKER_ASSET_CLASS[broker] ?? 'stock'
 }
 
 // Option-only strategies always force asset_class = 'option'
@@ -171,9 +180,9 @@ export default function Strategies() {
   const createStrategy = async () => {
     const errors: { name?: string; symbol?: string } = {}
     if (!form.name.trim()) errors.name = 'Name is required'
-    if (!form.symbol.trim()) errors.symbol = 'Symbol is required (e.g. BTC/USDT)'
-    else if (!/^[A-Z0-9]+\/[A-Z0-9]+$|^[A-Z]{1,5}$/.test(form.symbol.trim().toUpperCase()))
-      errors.symbol = 'Use format BTC/USDT (crypto) or AAPL (stocks)'
+    if (!form.symbol.trim()) errors.symbol = 'Symbol is required (e.g. BTC/USDT or EUR/USD)'
+    else if (!/^[A-Z0-9]+\/[A-Z0-9]+$|^[A-Z]{1,6}$/.test(form.symbol.trim().toUpperCase()))
+      errors.symbol = 'Use format BTC/USDT, EUR/USD (forex) or AAPL (stocks)'
     if (Object.keys(errors).length) { setFormErrors(errors); return }
     setFormErrors({})
     setSaving(true)
@@ -399,10 +408,11 @@ export default function Strategies() {
                   <input
                     value={form.symbol}
                     onChange={e => {
-                      setForm(f => ({ ...f, symbol: e.target.value }))
+                      const sym = e.target.value
+                      setForm(f => ({ ...f, symbol: sym, asset_class: deriveAssetClass(f.broker, sym, f.strategy_type) }))
                       if (formErrors.symbol) setFormErrors(fe => ({ ...fe, symbol: undefined }))
                     }}
-                    placeholder="BTC/USDT"
+                    placeholder="BTC/USDT or EUR/USD"
                     className={`w-full bg-dark-700 border rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-brand-500 ${
                       formErrors.symbol ? 'border-red-500' : 'border-dark-500'
                     }`}

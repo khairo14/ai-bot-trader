@@ -33,13 +33,24 @@ WATCHLISTS: dict[str, list[str]] = {
         "COIN", "HOOD", "PLTR", "SQ", "SHOP",
         "NET", "DKNG", "RIVN", "LCID", "SOFI",
     ],
+    "forex_major": [
+        "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD",
+        "USD/CAD", "USD/CHF", "NZD/USD", "EUR/GBP",
+    ],
+    "eu_stocks": [
+        "SAP", "SIE", "ALV", "BMW", "BAYN",           # Xetra
+        "ASML", "INGA", "PHIA",                        # Amsterdam
+        "AZN", "SHEL", "HSBA", "BP", "GSK",           # LSE
+        "NESN", "NOVN", "ROG",                         # SWX
+        "OR", "TTE", "BNP",                            # Paris
+    ],
 }
 
 # Watchlists available per broker (keeps crypto off stock brokers and vice-versa)
 BROKER_WATCHLISTS: dict[str, list[str]] = {
     "binance": ["crypto_major", "crypto_mid"],
     "alpaca":  ["us_stocks", "us_stocks_mid"],
-    "ibkr":    ["us_stocks", "us_stocks_mid"],
+    "ibkr":    ["us_stocks", "us_stocks_mid", "eu_stocks", "forex_major"],
 }
 
 # Strategies available per broker — options strategies require IBKR only
