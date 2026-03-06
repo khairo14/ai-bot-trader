@@ -7,6 +7,7 @@ from loguru import logger
 from config import settings
 from db.database import init_db
 from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications, ml, charts, auth as auth_routes, regime, analytics, strategy_code, confluence, portfolio_optimizer, risk, scanner
+from api.routes import kline_ws
 from api.websocket import ws_endpoint
 from core.auth import get_current_user
 
@@ -236,8 +237,9 @@ async def _internal_ml_reload():
     logger.info("[internal] MLScorer cache flushed via /internal/ml/reload")
     return {"status": "ok"}
 
-# WebSocket endpoint for real-time signal/trade broadcasts
+# WebSocket endpoints
 app.add_api_websocket_route("/ws", ws_endpoint)
+app.include_router(kline_ws.router, prefix="/ws")  # /ws/kline — live candle stream
 
 
 @app.get("/health", tags=["Health"])

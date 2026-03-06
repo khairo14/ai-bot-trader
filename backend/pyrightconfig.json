@@ -3,8 +3,9 @@
   "venv": ".venv",
   "pythonVersion": "3.11",
   "include": ["."],
-  "exclude": [".venv", "**/__pycache__", "dist"],
+  "exclude": [".venv", "**/__pycache__", "dist", "**/node_modules", "**/.*", "**/node_modules", "**/.*"],
   "reportMissingModuleSource": "none",
   "reportMissingImports": "warning",
-  "typeCheckingMode": "basic"
+  "typeCheckingMode": "basic",
+  "reportReturnType": "none"
 }

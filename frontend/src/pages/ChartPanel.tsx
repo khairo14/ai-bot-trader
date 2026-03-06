@@ -73,6 +73,16 @@ function computeBB(closes: number[], period = 20, mult = 2): BBResult {
   return { upper, mid, lower }
 }
 
+function computeMA(closes: number[], period: number): (number | null)[] {
+  const result: (number | null)[] = new Array(closes.length).fill(null)
+  for (let i = period - 1; i < closes.length; i++) {
+    let sum = 0
+    for (let j = i - period + 1; j <= i; j++) sum += closes[j]
+    result[i] = sum / period
+  }
+  return result
+}
+
 // ─── Date range helpers ────────────────────────────────────────────────────────
 const PRESET_MS: Record<string, number> = {
   '1W': 7*24*3600*1000, '1M': 30*24*3600*1000, '3M': 90*24*3600*1000,
@@ -103,7 +113,10 @@ interface TradeMarker {
   pnl: number | null; pnl_pct: number | null; quantity: number
 }
 
+interface MAOverlay { id: string; period: number; color: string }
+
 // ─── Constants ─────────────────────────────────────────────────────────────────
+const MA_COLORS  = ['#06b6d4', '#f97316', '#84cc16', '#ec4899', '#8b5cf6', '#14b8a6']
 const BROKERS    = ['binance', 'alpaca', 'ibkr'] as const
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d', '3d', '1w']
 const PRESETS    = ['1W', '1M', '3M', '6M', '1Y', 'Custom'] as const
@@ -156,6 +169,10 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const [tradeCount, setTradeCount]   = useState(0)
   const [candleCount, setCandleCount] = useState(0)
   const [showTrades, setShowTrades]   = useState(true)
+  const [maOverlays, setMaOverlays]   = useState<MAOverlay[]>([])
+  const [showAddMA, setShowAddMA]     = useState(false)
+  const [newMAPeriod, setNewMAPeriod] = useState(20)
+  const [wsLive, setWsLive]           = useState(false)
 
   // Symbol combobox
   const [allSymbols, setAllSymbols] = useState<string[]>([])
@@ -180,6 +197,13 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const lastCandleTimeRef = useRef<number | null>(null)   // unix seconds of last known candle
   const livePollRef       = useRef<ReturnType<typeof setInterval> | null>(null)
   const isFetchingRef     = useRef(false)   // guard: don't live-update during full fetch
+
+  // MA overlay refs
+  const maSeriesRefs   = useRef<Map<string, ISeriesApi<'Line'>>>(new Map())
+  const candlesDataRef = useRef<Candle[]>([])
+  const maOverlaysRef  = useRef<MAOverlay[]>([])
+  // Live WebSocket ref
+  const wsRef = useRef<WebSocket | null>(null)
 
   // Series refs
   const candleRef  = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -422,8 +446,18 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
       subChart.current?.timeScale().fitContent()
       setCandleCount(candleRes.data.candle_count ?? candleRes.data.candles?.length ?? 0)
       setLastUpdated(new Date().toLocaleTimeString())
-      // Record last candle time for live poll
-      if (candles.length > 0) lastCandleTimeRef.current = candles[candles.length - 1].time
+      // Record last candle time for live poll and refresh all MA overlays
+      if (candles.length > 0) {
+        lastCandleTimeRef.current = candles[candles.length - 1].time
+        candlesDataRef.current = candles
+        const maCloses = candles.map(c => c.close)
+        for (const m of maOverlaysRef.current) {
+          const s = maSeriesRefs.current.get(m.id)
+          if (!s) continue
+          const maData = computeMA(maCloses, m.period)
+          s.setData(candles.flatMap((c, i) => maData[i] !== null ? [{ time: c.time as any, value: maData[i]! }] : []))
+        }
+      }
     } catch (err: any) {
       toast.error(err?.response?.data?.detail ?? 'Failed to load chart data.')
     } finally {
@@ -440,22 +474,36 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   // or appends a new one when a new period starts. Exactly like TradingView.
   const fetchLiveUpdate = useCallback(async () => {
     if (!candleRef.current || lastCandleTimeRef.current === null || isFetchingRef.current) return
-    const tfMs  = TF_TO_MS[timeframe] ?? 3_600_000
-    const since = lastCandleTimeRef.current * 1000 - tfMs   // include 1 bar back for safety
+    // Request from last known candle onwards (no backward buffer so we never try
+    // to update a non-last bar, which lightweight-charts forbids and throws on).
+    const since = lastCandleTimeRef.current * 1000
     const until = Date.now()
     try {
       const res = await axios.get('/api/charts/candles', {
         params: { symbol, timeframe, broker, since, until },
       })
       const fresh: Candle[] = (res.data.candles as Candle[]).sort((a, b) => a.time - b.time)
+      let didUpdate = false
       for (const c of fresh) {
-        candleRef.current?.update({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close })
-        volRef.current?.update({ time: c.time as any, value: c.volume, color: c.close >= c.open ? '#22c55e33' : '#ef444433' })
+        // lightweight-charts only allows update() on the last bar or appending a
+        // newer bar — skip anything strictly older than our last known candle.
+        if (c.time < (lastCandleTimeRef.current ?? 0)) continue
+        try {
+          candleRef.current?.update({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close })
+          volRef.current?.update({ time: c.time as any, value: c.volume, color: c.close >= c.open ? '#22c55e33' : '#ef444433' })
+          didUpdate = true
+        } catch {
+          // time ordering violated for this bar — skip it
+        }
         if (c.time > (lastCandleTimeRef.current ?? 0)) lastCandleTimeRef.current = c.time
       }
-      if (fresh.length > 0) setLastUpdated(new Date().toLocaleTimeString())
+      if (didUpdate) {
+        setLastUpdated(new Date().toLocaleTimeString())
+        // Keep the view scrolled to the latest bar when updates arrive
+        mainChart.current?.timeScale().scrollToRealTime()
+      }
     } catch {
-      // silently ignore — next full fetchAndRender will recover
+      // silently ignore network errors — next full fetchAndRender will recover
     }
   }, [symbol, timeframe, broker])
 
@@ -465,6 +513,68 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     livePollRef.current = setInterval(fetchLiveUpdate, secs * 1000)
     return () => { if (livePollRef.current) clearInterval(livePollRef.current) }
   }, [fetchLiveUpdate, timeframe])
+
+  // Keep maOverlaysRef in sync (avoids stale closures in fetchAndRender)
+  useEffect(() => { maOverlaysRef.current = maOverlays }, [maOverlays])
+
+  // MA series management — create/destroy series and re-apply data when overlays change
+  useEffect(() => {
+    if (!mainChart.current) return
+    const activeIds = new Set(maOverlays.map(m => m.id))
+    for (const [id, series] of Array.from(maSeriesRefs.current)) {
+      if (!activeIds.has(id)) {
+        try { mainChart.current.removeSeries(series) } catch {}
+        maSeriesRefs.current.delete(id)
+      }
+    }
+    for (const m of maOverlays) {
+      if (!maSeriesRefs.current.has(m.id)) {
+        const s = mainChart.current.addSeries(LineSeries, {
+          color: m.color, lineWidth: 1,
+          priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+        })
+        maSeriesRefs.current.set(m.id, s)
+      }
+    }
+    if (candlesDataRef.current.length > 0) {
+      const closes = candlesDataRef.current.map(c => c.close)
+      for (const m of maOverlays) {
+        const s = maSeriesRefs.current.get(m.id)
+        if (!s) continue
+        const ma = computeMA(closes, m.period)
+        s.setData(candlesDataRef.current.flatMap((c, i) => ma[i] !== null ? [{ time: c.time as any, value: ma[i]! }] : []))
+      }
+    }
+  }, [maOverlays])
+
+  // Live WebSocket — real-time candle updates for all brokers
+  // Falls back to the REST poll (above) automatically when the WS closes.
+  useEffect(() => {
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
+    setWsLive(false)
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const url = `${proto}//${window.location.host}/ws/kline?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&broker=${encodeURIComponent(broker)}`
+    const ws = new WebSocket(url)
+    wsRef.current = ws
+    ws.onopen  = () => setWsLive(true)
+    ws.onerror = () => setWsLive(false)
+    ws.onclose = () => setWsLive(false)
+    ws.onmessage = (evt) => {
+      try {
+        const d = JSON.parse(evt.data) as { time: number; open: number; high: number; low: number; close: number; volume: number }
+        if (!candleRef.current || !d.time || !d.close) return
+        if (lastCandleTimeRef.current !== null && d.time < lastCandleTimeRef.current) return
+        try {
+          candleRef.current.update({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })
+          volRef.current?.update({ time: d.time as any, value: d.volume ?? 0, color: d.close >= d.open ? '#22c55e33' : '#ef444433' })
+          if (d.time > (lastCandleTimeRef.current ?? 0)) lastCandleTimeRef.current = d.time
+          setLastUpdated(new Date().toLocaleTimeString())
+          mainChart.current?.timeScale().scrollToRealTime()
+        } catch {}
+      } catch {}
+    }
+    return () => { ws.close(); setWsLive(false) }
+  }, [symbol, timeframe, broker])
 
   // Fetch symbols when broker changes (keep symbol in sync atomically)
   useEffect(() => {
@@ -483,6 +593,14 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
 
   const filteredSymbols = allSymbols.filter(s => s.toLowerCase().includes(symQuery.toLowerCase())).slice(0, 50)
   const selectSymbol = (s: string) => { setSymbol(s); setSymQuery(s); setSymOpen(false) }
+  const addMaOverlay = () => {
+    const period = Math.max(2, Math.min(500, newMAPeriod))
+    const id = `ma_${Date.now()}`
+    const color = MA_COLORS[maOverlays.length % MA_COLORS.length]
+    setMaOverlays(prev => [...prev, { id, period, color }])
+    setShowAddMA(false)
+  }
+  const removeMaOverlay = (id: string) => setMaOverlays(prev => prev.filter(m => m.id !== id))
 
   const sel = 'bg-dark-700 border border-dark-500 text-gray-200 text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand-500'
 
@@ -598,6 +716,34 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
           </label>
         </div>
 
+        {/* MA overlays */}
+        <div className="flex items-center gap-1.5 border-l border-dark-600 pl-2">
+          {maOverlays.map(m => (
+            <span key={m.id} className="flex items-center gap-0.5 text-xs font-medium" style={{ color: m.color }}>
+              MA{m.period}
+              <button onClick={() => removeMaOverlay(m.id)} className="text-gray-500 hover:text-gray-200 leading-none ml-0.5 text-[10px]">×</button>
+            </span>
+          ))}
+          {maOverlays.length < 6 && (
+            <div className="relative">
+              <button onClick={() => setShowAddMA(v => !v)}
+                className="text-xs px-1.5 py-1 rounded-md bg-dark-600 text-cyan-400 hover:bg-dark-500 hover:text-cyan-300">
+                + MA
+              </button>
+              {showAddMA && (
+                <div className="absolute z-50 top-full mt-1 left-0 bg-dark-800 border border-dark-600 rounded-lg p-2 shadow-xl flex flex-col gap-1.5 w-28">
+                  <span className="text-xs text-gray-400">Period</span>
+                  <input type="number" min={2} max={500} value={newMAPeriod}
+                    onChange={e => setNewMAPeriod(Number(e.target.value))}
+                    className="bg-dark-700 text-gray-200 text-xs rounded px-2 py-1 border border-dark-500 w-full" />
+                  <button onClick={addMaOverlay}
+                    className="text-xs py-1 rounded-md bg-cyan-600 text-white hover:bg-cyan-500">Add</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Sub-panel toggle */}
         <div className="flex items-center gap-1 border-l border-dark-600 pl-2">
           {(['RSI', 'MACD'] as const).map(ind => (
@@ -613,6 +759,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
         {/* Status */}
         {!compact && (
           <div className="ml-auto flex items-center gap-2 text-xs text-gray-500">
+            {wsLive && <span className="flex items-center gap-1 text-green-400 font-medium"><span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block" />LIVE</span>}
             {signalCount > 0 && <span className="text-brand-400">{signalCount} signal{signalCount !== 1 ? 's' : ''}</span>}
             {tradeCount > 0 && <span className="text-sky-400">{tradeCount} trade{tradeCount !== 1 ? 's' : ''}</span>}
             {candleCount > 0 && <span className="text-gray-600">{candleCount.toLocaleString()} candles</span>}
@@ -633,6 +780,12 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
           <span className="flex items-center gap-1.5"><span className="w-4 border-t-2 border-dashed border-red-500" /> SL</span>
           <span className="flex items-center gap-1.5"><span className="w-4 h-px bg-amber-400" /> EMA 20</span>
           <span className="flex items-center gap-1.5"><span className="w-4 h-px bg-violet-400" /> EMA 50</span>
+          {maOverlays.map(m => (
+            <span key={m.id} className="flex items-center gap-1.5">
+              <span className="w-4 h-px" style={{ backgroundColor: m.color }} />
+              MA {m.period}
+            </span>
+          ))}
           {showBB && <span className="flex items-center gap-1.5"><span className="w-4 border-t-2 border-dashed border-indigo-400" /> BB(20,2)</span>}
           {subPanel === 'RSI' && <span className="flex items-center gap-1.5"><span className="w-4 h-px bg-sky-400" /> RSI 14</span>}
           {subPanel === 'MACD' && <>

@@ -272,6 +272,34 @@ class _IBKRManager:
         self._start()
         self._submit(self._do_qualify(contract))
 
+    # ── Live market data subscription (used by /ws/kline endpoint) ───────────
+
+    async def _do_subscribe_mkt_data(self, contract):
+        """Subscribe to live price ticks on the manager's background loop."""
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        try:
+            await self._ib.qualifyContractsAsync(contract)
+        except Exception:
+            pass
+        ticker = self._ib.reqMktData(contract, "", False, False)
+        await asyncio.sleep(1.5)  # let Gateway push the initial snapshot
+        return ticker
+
+    def subscribe_mkt_data(self, contract):
+        """Thread-safe: open a live price tick subscription. Returns the Ticker object."""
+        self._start()
+        return self._submit(self._do_subscribe_mkt_data(contract), timeout=15.0)
+
+    def unsubscribe_mkt_data(self, contract) -> None:
+        """Cancel a live market data subscription (fire-and-forget)."""
+        if self._loop and self._ib:
+            try:
+                self._loop.call_soon_threadsafe(self._ib.cancelMktData, contract)
+            except Exception:
+                pass
+
 
 _manager = _IBKRManager()
 
@@ -283,6 +311,11 @@ def ibkr_balance_sync() -> Balance:
     IB connection on every call.
     """
     return _manager.get_balance()
+
+
+def get_ibkr_manager() -> "_IBKRManager":
+    """Return the singleton IBKR manager (used by /ws/kline for live tick streaming)."""
+    return _manager
 
 
 class IBKRClient(AbstractBroker):
