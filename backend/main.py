@@ -139,7 +139,6 @@ async def _forward_test_scheduler():
 
         except Exception as exc:
             logger.error(f"[Scheduler] Tick error: {exc}", exc_info=True)
-            logger.error(f"[Scheduler] Tick error: {exc}", exc_info=True)
 
 
 @asynccontextmanager

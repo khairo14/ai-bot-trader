@@ -1,16 +1,4 @@
 import asyncio
-import random
-import pandas as pd
-from typing import List, Optional, Callable
-from loguru import logger
-
-from ib_insync import IB, Stock, Option, Contract, MarketOrder, LimitOrder, StopLimitOrder, Trade as IBTrade
-
-from config import settings
-from brokers.base import AbstractBroker, OrderResult, Position, Balance
-
-
-import asyncio
 import threading
 import time
 import pandas as pd
@@ -212,6 +200,61 @@ class _IBKRManager:
         self._start()
         return self._submit(self._do_price(symbol))
 
+    async def _do_orderbook(self, symbol: str) -> dict:
+        """Fetch market depth on the background loop."""
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        contract = Stock(symbol, "SMART", "USD")
+        await self._ib.qualifyContractsAsync(contract)
+        ticker = self._ib.reqMktDepth(contract)
+        await asyncio.sleep(1)
+        bids = [[b.price, b.size] for b in ticker.domBids[:10]]
+        asks = [[a.price, a.size] for a in ticker.domAsks[:10]]
+        self._ib.cancelMktDepth(contract)
+        return {"bids": bids, "asks": asks}
+
+    def fetch_orderbook(self, symbol: str) -> dict:
+        """Thread-safe orderbook fetch via the singleton IB connection."""
+        self._start()
+        return self._submit(self._do_orderbook(symbol))
+
+    async def _do_options_chain(self, symbol: str) -> dict:
+        """Fetch options chain parameters on the background loop."""
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        contract = Stock(symbol, "SMART", "USD")
+        await self._ib.qualifyContractsAsync(contract)
+        chains = await self._ib.reqSecDefOptParamsAsync(
+            symbol, "", contract.secType, contract.conId
+        )
+        if not chains:
+            return {}
+        chain = chains[0]
+        return {
+            "expirations": list(chain.expirations),
+            "strikes": list(chain.strikes),
+            "exchange": chain.exchange,
+        }
+
+    def fetch_options_chain(self, symbol: str) -> dict:
+        """Thread-safe options chain fetch via the singleton IB connection."""
+        self._start()
+        return self._submit(self._do_options_chain(symbol))
+
+    async def _do_qualify(self, contract) -> None:
+        """Qualify a contract on the background loop (fills in conId etc.)."""
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        await self._ib.qualifyContractsAsync(contract)
+
+    def qualify_contract_sync(self, contract) -> None:
+        """Thread-safe contract qualification via the singleton IB connection."""
+        self._start()
+        self._submit(self._do_qualify(contract))
+
 
 _manager = _IBKRManager()
 
@@ -342,15 +385,8 @@ class IBKRClient(AbstractBroker):
         return df
 
     async def get_orderbook(self, symbol: str) -> dict:
-        self._ensure_connected()
-        contract = Stock(symbol, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
-        ticker = self.ib.reqMktDepth(contract)
-        await asyncio.sleep(1)
-        bids = [[b.price, b.size] for b in ticker.domBids[:10]]
-        asks = [[a.price, a.size] for a in ticker.domAsks[:10]]
-        self.ib.cancelMktDepth(contract)
-        return {"bids": bids, "asks": asks}
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _manager.fetch_orderbook, symbol)
 
     # ── Options Chain ────────────────────────────────────
 
@@ -359,20 +395,8 @@ class IBKRClient(AbstractBroker):
         Fetch the full options chain for an underlying symbol.
         Returns strikes, expirations, IVs, and Greeks via IBKR.
         """
-        self._ensure_connected()
-        contract = Stock(symbol, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
-        chains = await self.ib.reqSecDefOptParamsAsync(
-            symbol, "", contract.secType, contract.conId
-        )
-        if not chains:
-            return {}
-        chain = chains[0]
-        return {
-            "expirations": list(chain.expirations),
-            "strikes": list(chain.strikes),
-            "exchange": chain.exchange,
-        }
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _manager.fetch_options_chain, symbol)
 
     # ── Account ──────────────────────────────────────────
 
@@ -433,12 +457,13 @@ class IBKRClient(AbstractBroker):
         self._ensure_connected()
         logger.info(f"[IBKR] Placing {order_type.upper()} {side.upper()} {quantity} {symbol}")
 
-        # Build contract
+        # Build and qualify contract on the background loop (avoids 'event loop already running')
         if option_expiry and option_strike and option_right:
             contract = Option(symbol, option_expiry, option_strike, option_right, "SMART")
         else:
             contract = Stock(symbol, "SMART", "USD")
-        self.ib.qualifyContracts(contract)
+        _place_loop = asyncio.get_event_loop()
+        await _place_loop.run_in_executor(None, _manager.qualify_contract_sync, contract)
 
         # Build order
         action = "BUY" if side.lower() == "buy" else "SELL"
@@ -499,7 +524,9 @@ class IBKRClient(AbstractBroker):
         """Stream real-time prices via IBKR market data subscription."""
         self._ensure_connected()
         contracts = [Stock(s, "SMART", "USD") for s in symbols]
-        self.ib.qualifyContracts(*contracts)
+        _stream_loop = asyncio.get_event_loop()
+        for _c in contracts:
+            await _stream_loop.run_in_executor(None, _manager.qualify_contract_sync, _c)
 
         tickers = [self.ib.reqMktData(c) for c in contracts]
         logger.info(f"[IBKR] Starting price stream for: {symbols}")
