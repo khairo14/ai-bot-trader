@@ -36,6 +36,11 @@ backend/models/saved/*.h5
 backend/models/saved/*.json
 backend/runtime/*.json
 
+# Celery
+celerybeat-schedule
+celerybeat-schedule.db
+celery*.pid
+
 # Node
 node_modules/
 frontend/node_modules/
