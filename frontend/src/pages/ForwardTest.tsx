@@ -4,6 +4,7 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import toast from 'react-hot-toast'
 import { SkeletonLine } from '../components/Skeleton'
 import axios from 'axios'
+import MarketClock from '../components/MarketClock'
 
 const API = ''   // relative — proxied by Vite to http://localhost:8000
 const WS_URL = (() => {
@@ -253,16 +254,19 @@ export default function ForwardTest() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-xl font-bold text-white">Forward Testing</h1>
           <p className="text-sm text-gray-500 mt-0.5">Paper trading on live market data. Validates strategy before real execution.</p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-gray-600">
-          {lastUpdated && <span>Updated {lastUpdated.toLocaleTimeString()}</span>}
-          <button onClick={fetchAll} className="p-1.5 rounded-lg hover:bg-dark-700 text-gray-500 hover:text-gray-300 transition-all">
-            <RefreshCw size={14} />
-          </button>
+        <div className="flex items-center gap-2">
+          <MarketClock />
+          <div className="flex items-center gap-2 text-xs text-gray-600">
+            {lastUpdated && <span>Updated {lastUpdated.toLocaleTimeString()}</span>}
+            <button onClick={fetchAll} className="p-1.5 rounded-lg hover:bg-dark-700 text-gray-500 hover:text-gray-300 transition-all">
+              <RefreshCw size={14} />
+            </button>
+          </div>
         </div>
       </div>
 

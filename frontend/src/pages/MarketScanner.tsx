@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { ScanSearch, Play, Loader2, AlertTriangle, ChevronDown } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
+import MarketClock from '../components/MarketClock'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -190,14 +191,17 @@ export default function MarketScanner() {
   return (
     <div className="p-6 space-y-6 max-w-6xl mx-auto">
       {/* Header */}
-      <div>
-        <div className="flex items-center gap-2">
-          <ScanSearch size={20} className="text-brand-400" />
-          <h1 className="text-xl font-bold text-white">Market Scanner</h1>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <div className="flex items-center gap-2">
+            <ScanSearch size={20} className="text-brand-400" />
+            <h1 className="text-xl font-bold text-white">Market Scanner</h1>
+          </div>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Run a strategy across an entire watchlist in parallel — find the strongest signals instantly.
+          </p>
         </div>
-        <p className="text-sm text-gray-500 mt-0.5">
-          Run a strategy across an entire watchlist in parallel — find the strongest signals instantly.
-        </p>
+        <MarketClock />
       </div>
 
       {/* Config panel */}

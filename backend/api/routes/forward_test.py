@@ -248,6 +248,77 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
 # Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
+@router.get("/market-status")
+async def get_market_status():
+    """
+    Return current server time plus open/closed status for each broker.
+    Polled by the frontend clock widget (~every 60 s).
+    """
+    now_utc = _dt.now(tz=_ZI("UTC"))
+    now_et  = _dt.now(tz=_ET)
+
+    def _next_nyse_open(from_et: _dt) -> _dt:
+        """Return the next NYSE open datetime (ET) from the given moment."""
+        candidate = from_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        # If we haven't passed today's open yet AND today is a trading day, use today
+        if candidate > from_et and _is_nyse_trading_day(candidate.date()):
+            return candidate
+        # Otherwise advance day by day
+        candidate = candidate + _pd.Timedelta(days=1)
+        for _ in range(10):
+            if _is_nyse_trading_day(candidate.date()):
+                return candidate
+            candidate += _pd.Timedelta(days=1)
+        return candidate
+
+    def _nyse_close_today(from_et: _dt) -> _dt:
+        return from_et.replace(hour=16, minute=0, second=0, microsecond=0)
+
+    sessions = []
+    for broker in ["binance", "alpaca", "ibkr"]:
+        if is_crypto_broker(broker):
+            sessions.append({
+                "broker": broker,
+                "open": True,
+                "label": "24 / 7",
+                "next_event": None,
+                "next_event_label": None,
+            })
+        else:
+            open_now = is_market_open(broker)
+            if open_now:
+                close_et = _nyse_close_today(now_et)
+                mins_left = int((close_et - now_et).total_seconds() / 60)
+                sessions.append({
+                    "broker": broker,
+                    "open": True,
+                    "label": "Open",
+                    "next_event": close_et.strftime("%H:%M ET"),
+                    "next_event_label": f"Closes in {mins_left} min" if mins_left < 120 else f"Closes {close_et.strftime('%H:%M ET')}",
+                })
+            else:
+                next_open = _next_nyse_open(now_et)
+                # If next open is today
+                if next_open.date() == now_et.date():
+                    mins_away = int((next_open - now_et).total_seconds() / 60)
+                    event_label = f"Opens in {mins_away} min"
+                else:
+                    event_label = f"Opens {next_open.strftime('%a %H:%M ET')}"
+                sessions.append({
+                    "broker": broker,
+                    "open": False,
+                    "label": "Closed",
+                    "next_event": next_open.strftime("%H:%M ET"),
+                    "next_event_label": event_label,
+                })
+
+    return {
+        "server_utc": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "et_offset": now_et.strftime("%z"),  # e.g. "-0500" or "-0400"
+        "sessions": sessions,
+    }
+
+
 @router.get("/status")
 async def get_status(db: AsyncSession = Depends(get_db)):
     """Aggregate paper trading stats."""
@@ -447,6 +518,19 @@ async def _run_one_strategy(strat) -> None:
                     f"[ForwardTest] ⚠ Low confluence {conf:.0%} for "
                     f"{sig.signal} {symbol} on {timeframe} — not executing"
                 )
+
+        # ── Market-hours gate (execution only) ─────────────────────────
+        # Signals are always saved to DB — useful for review even overnight.
+        # But actual trade placement is suppressed when the broker's session
+        # is closed. Crypto (Binance) is 24/7 and always passes this check.
+        if allow_execution and not is_market_open(strat.broker.value):
+            allow_execution = False
+            _market_note = f"execution suppressed: {strat.broker.value} session closed"
+            sig.reasons = (sig.reasons or []) + [_market_note]
+            logger.info(
+                f"[ForwardTest] ⏸ Market closed for {strat.broker.value} — "
+                f"signal saved but trade suppressed"
+            )
 
         # ── ML-03: Portfolio weight multiplier ───────────────────────────
         port_weight = 1.0

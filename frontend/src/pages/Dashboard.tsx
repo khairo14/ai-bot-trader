@@ -4,6 +4,7 @@ import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
 import { SkeletonStat, SkeletonList } from '../components/Skeleton'
+import MarketClock from '../components/MarketClock'
 
 interface Signal {
   id: number
@@ -212,14 +213,17 @@ export default function Dashboard() {
           <h1 className="text-xl font-bold text-white">Dashboard</h1>
           <p className="text-sm text-gray-500 mt-0.5">Live signals, positions, and portfolio overview</p>
         </div>
-        <button
-          onClick={() => fetchAll(true)}
-          disabled={refreshing}
-          className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors px-3 py-1.5 bg-dark-700 border border-dark-600 rounded-lg"
-        >
-          <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <MarketClock />
+          <button
+            onClick={() => fetchAll(true)}
+            disabled={refreshing}
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors px-3 py-1.5 bg-dark-700 border border-dark-600 rounded-lg"
+          >
+            <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Broker Balances */}

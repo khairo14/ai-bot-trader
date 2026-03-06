@@ -264,6 +264,22 @@ def run_signals(self):
                                     f"{sig.signal} {symbol} on {timeframe} — not executing"
                                 )
 
+                        # ── Market-hours gate (execution only) ──────────────────
+                        # Signals are always saved — useful visibility even overnight.
+                        # Trade execution (paper or live) is suppressed when the
+                        # broker's session is closed. Crypto (Binance) is always open.
+                        if allow_execution:
+                            from api.routes.forward_test import is_market_open as _is_mkt_open
+                            if not _is_mkt_open(strat.broker.value):
+                                allow_execution = False
+                                _market_note = f"execution suppressed: {strat.broker.value} session closed"
+                                sig.reasons = (sig.reasons or []) + [_market_note]
+                                db_signal.reasons = sig.reasons
+                                logger.info(
+                                    f"[signal_runner] ⏸ Market closed for {strat.broker.value} — "
+                                    f"signal saved but trade suppressed"
+                                )
+
                         # ── ML-03: Portfolio weight multiplier ───────────────────
                         # Strategies with a higher Sharpe-based weight (set by the
                         # portfolio optimizer) get proportionally larger position sizes.
