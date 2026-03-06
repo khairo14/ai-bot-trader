@@ -9,12 +9,19 @@ from core.risk_manager import RiskManager
 from brokers import get_broker
 from db.models import Trade, OrderStatus, ExecutionMode
 
-PAPER_INITIAL_CAPITAL = 10_000.0
+PAPER_INITIAL_CAPITAL = 10_000.0  # kept for legacy DB migration reference only
 
 
 class ForwardEngine:
     """
     Paper trading and live execution engine.
+
+    Paper mode: routes orders through each broker's paper/testnet API using
+    the paper credentials configured in .env.  This means:
+      - Alpaca  → paper-api.alpaca.markets   (paper account)
+      - Binance → testnet.binance.vision     (testnet account)
+      - IBKR    → TWS paper gateway          (paper account)
+    Trades appear in the broker's own dashboard just like live trades.
 
     Modes (per strategy):
       suggestion  → Signal generated, no auto-execution
@@ -31,8 +38,8 @@ class ForwardEngine:
 
     def __init__(self):
         self.risk_manager = RiskManager()
-        self._paper_positions: dict = {}     # symbol → Trade (open paper positions)
-        self._paper_balance: float = PAPER_INITIAL_CAPITAL
+        self._paper_positions: dict = {}     # symbol → Trade (open positions, any mode)
+        self._paper_balance: float = PAPER_INITIAL_CAPITAL  # fallback if broker unreachable
         self._emergency_stop_active: bool = False
         self._initialized: bool = False
 
@@ -118,14 +125,19 @@ class ForwardEngine:
         await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
 
         # ── Get balance + open count ──────────────────────
-        if is_paper:
-            balance = self._paper_balance
-            open_count = len(self._paper_positions)
-        else:
+        # Both paper and live use the real broker API — paper broker instances
+        # are already configured with paper/testnet credentials by get_broker().
+        try:
             bal = await broker.get_balance()
             balance = bal.available
+        except Exception as _bal_err:
+            logger.warning(f"[ForwardEngine] Could not fetch balance from {signal.broker}: {_bal_err} — using fallback")
+            balance = self._paper_balance  # fallback: last known in-memory value
+        try:
             positions = await broker.get_positions()
             open_count = len(positions)
+        except Exception:
+            open_count = len(self._paper_positions)  # fallback
 
         # ── Daily P&L from DB (for circuit breaker) ──────
         daily_pnl = 0.0
@@ -178,67 +190,65 @@ class ForwardEngine:
             opened_at=datetime.utcnow(),
         )
 
-        if is_paper:
-            trade.status = OrderStatus.OPEN
-            trade.broker_order_id = f"paper_{signal.symbol}_{int(datetime.utcnow().timestamp())}"
-            self._paper_positions[signal.symbol] = trade
-            # Update in-memory balance (will be recomputed from DB on next initialize())
-            self._paper_balance -= effective_size * (signal.entry_price or 0)
-            logger.info(f"[ForwardEngine] 📄 PAPER FILL: {signal.signal} {signal.symbol} @ {signal.entry_price} qty={effective_size}")
-        else:
-            # ── Live order — broker API call ──────────────────────────────────────
-            # Brokers reject orders during:
-            #   • Market-wide circuit breakers (NYSE L1/L2/L3 halts — 7%/13%/20% drops)
-            #   • Individual stock LULD (Limit-Up Limit-Down) halts
-            #   • Exchange emergency halts / forced closures
-            #   • Crypto exchange maintenance windows
-            # We catch all broker errors here so the scheduler never crashes.
-            # A FAILED trade record is written to the DB so you have a full audit trail.
-            side = "buy" if signal.signal == "BUY" else "sell"
-            # ── Options extra kwargs (single-leg only; multi-leg is paper-only) ──
-            option_kwargs: dict = {}
-            meta = getattr(signal, "options_meta", None)
-            if meta and isinstance(meta, dict):
-                legs = meta.get("legs", [])
-                if len(legs) == 1:
-                    option_kwargs = {
-                        "option_expiry": meta.get("expiry"),
-                        "option_strike": legs[0].get("strike"),
-                        "option_right":  legs[0].get("right"),
-                    }
-                elif len(legs) > 1:
-                    logger.warning(
-                        f"[ForwardEngine] Multi-leg option ({meta.get('strategy_type', '?')}) for "
-                        f"{signal.symbol} — live execution not supported; switch to paper mode."
-                    )
-            try:
-                result = await broker.place_order(
-                    symbol=signal.symbol,
-                    side=side,
-                    quantity=effective_size,
-                    order_type="market",
-                    stop_price=signal.stop_loss,
-                    take_profit_price=signal.take_profit,
-                    **option_kwargs,
-                )
-                trade.broker_order_id = result.order_id
-                trade.status = OrderStatus.OPEN
-                logger.info(f"[ForwardEngine] ✅ LIVE ORDER: {result.order_id}")
-            except Exception as order_err:
-                # Broker rejected or is unreachable — record FAILED trade for audit
-                trade.status = OrderStatus.REJECTED
-                trade.broker_order_id = f"rejected_{signal.symbol}_{int(datetime.utcnow().timestamp())}"
-                trade.notes = f"Order rejected: {order_err}"
+        # ── Broker API order (paper OR live) ────────────────────────────────────
+        # Paper strategies use paper/testnet credentials via get_broker(), so
+        # the order appears in the broker's own paper trading dashboard (Alpaca
+        # paper portal, Binance testnet, IBKR paper TWS).  Live strategies use
+        # live credentials.  The routing is already handled by get_broker().
+        #
+        # Brokers reject orders during:
+        #   • Market-wide circuit breakers (NYSE L1/L2/L3 halts — 7%/13%/20% drops)
+        #   • Individual stock LULD (Limit-Up Limit-Down) halts
+        #   • Exchange emergency halts / forced closures
+        #   • Crypto exchange maintenance windows
+        # We catch all broker errors here so the scheduler never crashes.
+        # A FAILED trade record is written to the DB so you have a full audit trail.
+        side = "buy" if signal.signal == "BUY" else "sell"
+        # ── Options extra kwargs (single-leg only; multi-leg is paper-only) ──
+        option_kwargs: dict = {}
+        meta = getattr(signal, "options_meta", None)
+        if meta and isinstance(meta, dict):
+            legs = meta.get("legs", [])
+            if len(legs) == 1:
+                option_kwargs = {
+                    "option_expiry": meta.get("expiry"),
+                    "option_strike": legs[0].get("strike"),
+                    "option_right":  legs[0].get("right"),
+                }
+            elif len(legs) > 1:
                 logger.warning(
-                    f"[ForwardEngine] ⚠️  LIVE ORDER REJECTED for {signal.symbol}: {order_err}. "
-                    f"Likely causes: market halt, circuit breaker, exchange maintenance, "
-                    f"insufficient funds, or invalid symbol. Trade saved as FAILED."
+                    f"[ForwardEngine] Multi-leg option ({meta.get('strategy_type', '?')}) for "
+                    f"{signal.symbol} — live execution not supported; switch to paper mode."
                 )
-                # Persist FAILED record then return — do NOT expose the exception upward
-                if db_session:
-                    db_session.add(trade)
-                    await db_session.commit()
-                return None
+        mode_tag = "PAPER" if is_paper else "LIVE"
+        try:
+            result = await broker.place_order(
+                symbol=signal.symbol,
+                side=side,
+                quantity=effective_size,
+                order_type="market",
+                stop_price=signal.stop_loss,
+                take_profit_price=signal.take_profit,
+                **option_kwargs,
+            )
+            trade.broker_order_id = result.order_id
+            trade.status = OrderStatus.OPEN
+            self._paper_positions[signal.symbol] = trade  # track in-memory too
+            logger.info(f"[ForwardEngine] ✅ {mode_tag} ORDER PLACED: {result.order_id} | {signal.signal} {signal.symbol} @ {signal.entry_price} qty={effective_size}")
+        except Exception as order_err:
+            # Broker rejected or is unreachable — record FAILED trade for audit
+            trade.status = OrderStatus.REJECTED
+            trade.broker_order_id = f"rejected_{signal.symbol}_{int(datetime.utcnow().timestamp())}"
+            trade.notes = f"Order rejected: {order_err}"
+            logger.warning(
+                f"[ForwardEngine] ⚠️  {mode_tag} ORDER REJECTED for {signal.symbol}: {order_err}. "
+                f"Likely causes: market halt, circuit breaker, exchange maintenance, "
+                f"insufficient funds, or invalid symbol. Trade saved as FAILED."
+            )
+            if db_session:
+                db_session.add(trade)
+                await db_session.commit()
+            return None
 
         if db_session:
             db_session.add(trade)
@@ -279,15 +289,17 @@ class ForwardEngine:
                 f"[ForwardEngine] Could not fetch exit price for {trade.symbol}: {_price_err}"
             )
 
-        # ── Send closing market order for live trades ─────────────────────
-        if not trade.is_paper:
-            side = "sell" if trade.side == "buy" else "buy"
+        # ── Send closing market order (paper and live both call broker API) ─────
+        side = "sell" if trade.side == "buy" else "buy"
+        try:
             await broker.place_order(
                 symbol=trade.symbol,
                 side=side,
                 quantity=trade.quantity,
                 order_type="market",
             )
+        except Exception as _close_err:
+            logger.warning(f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err}")
 
         # ── Compute realised PnL ──────────────────────────────────────────
         if exit_price and trade.entry_price:
