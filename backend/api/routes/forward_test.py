@@ -228,6 +228,9 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
     first_opened: Optional[datetime] = first_q.scalar_one_or_none()
     days_running = 0
     if first_opened:
+        # Strip tz safely — first_opened may be tz-aware or tz-naive depending on DB driver
+        if hasattr(first_opened, 'tzinfo') and first_opened.tzinfo is not None:
+            first_opened = first_opened.replace(tzinfo=None)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         days_running = max(0, (now - first_opened).days)
 

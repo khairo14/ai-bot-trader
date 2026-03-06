@@ -77,18 +77,26 @@ class RiskManager:
             logger.warning(f"[RiskManager] Could not load risk state: {exc}")
 
     def _save_state(self) -> None:
-        """Persist circuit-breaker and consecutive-loss state to disk."""
+        """Persist circuit-breaker and consecutive-loss state to disk atomically.
+        Uses write-to-temp-then-rename to avoid partial writes corrupting the state
+        file when FastAPI and Celery workers both call _save_state concurrently.
+        """
         try:
+            import tempfile
             os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
-            with open(_STATE_FILE, "w") as fh:
-                json.dump(
-                    {
-                        "circuit_breaker_active": self._circuit_breaker_active,
-                        "circuit_breaker_date": str(date.today()),
-                        "consecutive_losses": self.consecutive_losses,
-                    },
-                    fh,
-                )
+            payload = json.dumps(
+                {
+                    "circuit_breaker_active": self._circuit_breaker_active,
+                    "circuit_breaker_date": str(date.today()),
+                    "consecutive_losses": self.consecutive_losses,
+                }
+            )
+            # Write to a sibling temp file, then atomically rename
+            dir_ = os.path.dirname(_STATE_FILE)
+            with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False, suffix=".tmp") as tmp:
+                tmp.write(payload)
+                tmp_path = tmp.name
+            os.replace(tmp_path, _STATE_FILE)
         except Exception as exc:
             logger.warning(f"[RiskManager] Could not save risk state: {exc}")
 

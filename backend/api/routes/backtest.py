@@ -157,10 +157,13 @@ async def export_backtest_trades(result_id: int, db: AsyncSession = Depends(get_
         ])
     buf.seek(0)
     filename = f"backtest_{result_id}_{item.symbol.replace('/', '')}_{item.strategy_name}.csv"
+    # Sanitize filename to prevent HTTP header injection
+    import re
+    filename = re.sub(r'[^\w\-.]', '_', filename)
     return StreamingResponse(
         buf,
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

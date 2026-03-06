@@ -350,9 +350,13 @@ class ForwardEngine:
         logger.warning("[ForwardEngine] ⚠️ EMERGENCY STOP ACTIVATED")
 
         if db_session is not None:
-            # DB-authoritative: close every open trade regardless of in-memory state
+            # DB-authoritative: close every open paper trade.
+            # Live trades are intentionally excluded — use the broker platform for live emergency stops.
             open_q = await db_session.execute(
-                select(Trade).where(Trade.status == OrderStatus.OPEN)
+                select(Trade).where(
+                    Trade.status == OrderStatus.OPEN,
+                    Trade.is_paper == True,
+                )
             )
             all_open = open_q.scalars().all()
             for trade in all_open:

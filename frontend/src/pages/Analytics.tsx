@@ -71,7 +71,7 @@ export default function Analytics() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
 
-  const fetch = async (spinner = false) => {
+  const fetchAnalytics = async (spinner = false) => {
     if (spinner) setRefreshing(true)
     try {
       const r = await axios.get('/api/analytics/summary')
@@ -81,7 +81,7 @@ export default function Analytics() {
     setRefreshing(false)
   }
 
-  useEffect(() => { fetch() }, [])
+  useEffect(() => { fetchAnalytics() }, [])
 
   const s = data?.summary
 
@@ -94,7 +94,7 @@ export default function Analytics() {
           <p className="text-xs text-gray-500 mt-0.5">Historical signal outcomes · rolling statistics</p>
         </div>
         <button
-          onClick={() => fetch(true)}
+          onClick={() => fetchAnalytics(true)}
           disabled={refreshing}
           className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors"
         >

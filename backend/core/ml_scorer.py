@@ -15,7 +15,7 @@ Usage
 
 import json
 import pathlib
-import threading
+import asyncio
 from typing import Optional
 from loguru import logger
 
@@ -103,6 +103,9 @@ class MLScorer:
 
     def __init__(self):
         self._models: dict = {}        # symbol → loaded model dict
+        # Use a reentrant threading lock (safe from both sync and async contexts
+        # since _get_model is called synchronously within predict_proba).
+        import threading
         self._lock = threading.Lock()
 
     def _load_model(self, symbol: str) -> Optional[dict]:
@@ -119,12 +122,16 @@ class MLScorer:
         # Try exact symbol first, then normalised (BTC/USDT → BTC_USDT)
         model_path = registry.get(symbol) or registry.get(symbol.replace("/", "_"))
         if not model_path:
-            # Try fuzzy: check if any key starts with the base currency
-            base = symbol.split("/")[0]
-            for k, v in registry.items():
-                if k.startswith(base):
-                    model_path = v
-                    break
+            # Tighter fallback: only match if base AND quote both match.
+            # e.g. 'BTC/USDT' matches 'BTC_USDT' but NOT 'BTC/BUSD' or 'BTC/BTC'.
+            parts = symbol.split("/")
+            if len(parts) == 2:
+                base, quote = parts
+                for k, v in registry.items():
+                    k_norm = k.replace("/", "_")
+                    if k_norm == f"{base}_{quote}":
+                        model_path = v
+                        break
 
         if not model_path or not pathlib.Path(model_path).exists():
             return None

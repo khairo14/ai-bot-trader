@@ -94,7 +94,11 @@ async def portfolio_summary(db: AsyncSession = Depends(get_db)):
     open_count = int(open_result.scalar() or 0)
 
     # Today's realised P&L (all trades closed since midnight UTC)
-    today_start = datetime.combine(date.today(), datetime.min.time())
+    from datetime import timezone as _tz_mod
+    today_start = datetime.combine(
+        datetime.now(_tz_mod.utc).date(),
+        datetime.min.time(),
+    )
     pnl_result = await db.execute(
         select(func.coalesce(func.sum(Trade.pnl), 0.0))
         .where(Trade.status == OrderStatus.FILLED)

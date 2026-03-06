@@ -93,21 +93,27 @@ export default function Strategies() {
   useEffect(() => { load() }, [])
 
   const toggleActive = async (s: Strategy) => {
-    await axios.patch(`/api/strategies/${s.id}`, { is_active: !s.is_active })
-    toast.success(`Strategy ${s.is_active ? 'paused' : 'activated'}`)
-    load()
+    try {
+      await axios.patch(`/api/strategies/${s.id}`, { is_active: !s.is_active })
+      toast.success(`Strategy ${s.is_active ? 'paused' : 'activated'}`)
+      load()
+    } catch { toast.error('Failed to update strategy') }
   }
 
   const changeMode = async (s: Strategy, mode: string) => {
-    await axios.patch(`/api/strategies/${s.id}`, { execution_mode: mode })
-    toast.success(`Mode changed to ${mode}`)
-    load()
+    try {
+      await axios.patch(`/api/strategies/${s.id}`, { execution_mode: mode })
+      toast.success(`Mode changed to ${mode}`)
+      load()
+    } catch { toast.error('Failed to change mode') }
   }
 
   const togglePaper = async (s: Strategy) => {
-    await axios.patch(`/api/strategies/${s.id}`, { is_paper: !s.is_paper })
-    toast.success(s.is_paper ? 'Switched to Live trading' : 'Switched to Paper trading')
-    load()
+    try {
+      await axios.patch(`/api/strategies/${s.id}`, { is_paper: !s.is_paper })
+      toast.success(s.is_paper ? 'Switched to Live trading' : 'Switched to Paper trading')
+      load()
+    } catch { toast.error('Failed to toggle paper mode') }
   }
 
   const deleteStrategy = (s: Strategy) => {

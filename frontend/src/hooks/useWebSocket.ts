@@ -4,14 +4,15 @@ type MessageHandler = (data: unknown) => void
 
 interface UseWebSocketOptions {
   onMessage?: MessageHandler
-  reconnectDelay?: number
+  maxReconnectDelay?: number
 }
 
 export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
-  const { onMessage, reconnectDelay = 3000 } = options
+  const { onMessage, maxReconnectDelay = 30000 } = options
   const wsRef = useRef<WebSocket | null>(null)
   const [connected, setConnected] = useState(false)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reconnectDelay = useRef(1000)  // starts at 1s, doubles up to maxReconnectDelay
   const mountedRef = useRef(true)
   // Keep onMessage in a ref so changing the callback never triggers a reconnect
   const onMessageRef = useRef<MessageHandler | undefined>(onMessage)
@@ -24,7 +25,10 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
       wsRef.current = ws
 
       ws.onopen = () => {
-        if (mountedRef.current) setConnected(true)
+        if (mountedRef.current) {
+          setConnected(true)
+          reconnectDelay.current = 1000  // reset backoff on successful connect
+        }
       }
 
       ws.onmessage = (event) => {
@@ -35,15 +39,20 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
         } catch {}
       }
 
-      ws.onerror = () => {}
+      ws.onerror = (event) => {
+        console.error('[WebSocket] connection error:', event)
+      }
 
       ws.onclose = () => {
         if (!mountedRef.current) return
         setConnected(false)
-        reconnectTimer.current = setTimeout(connect, reconnectDelay)
+        const delay = reconnectDelay.current
+        reconnectTimer.current = setTimeout(connect, delay)
+        // Exponential backoff: double the delay each attempt, cap at maxReconnectDelay
+        reconnectDelay.current = Math.min(delay * 2, maxReconnectDelay)
       }
     } catch {}
-  }, [url, reconnectDelay])  // onMessage intentionally excluded — stored in ref above
+  }, [url, maxReconnectDelay])  // onMessage intentionally excluded — stored in ref above
 
   useEffect(() => {
     mountedRef.current = true

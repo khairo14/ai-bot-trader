@@ -31,10 +31,17 @@ def retrain_all(self):
             try:
                 import httpx
                 from config import settings
-                resp = httpx.post(
-                    f"{settings.api_internal_url}/internal/ml/reload",
-                    headers={"X-Internal-Secret": settings.internal_api_secret},
-                    timeout=5.0,
+                # httpx.post is synchronous here (inside asyncio.run context already),
+                # but runs in a thread executor to avoid blocking the event loop.
+                import asyncio as _aio
+                loop = _aio.get_event_loop()
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: httpx.post(
+                        f"{settings.api_internal_url}/internal/ml/reload",
+                        headers={"X-Internal-Secret": settings.internal_api_secret},
+                        timeout=5.0,
+                    ),
                 )
                 logger.info(
                     f"[ml_retrain] FastAPI MLScorer cache flush: HTTP {resp.status_code}"

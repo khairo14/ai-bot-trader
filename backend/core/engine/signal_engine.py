@@ -25,10 +25,11 @@ STRATEGY_REGISTRY = {
 # Used to correct Signal metadata after generation, since the OHLCV strategy
 # classes are hardcoded binance/crypto but the underlying indicator logic
 # (MACD, RSI, BB, ADX) works identically on any OHLCV data.
+# IBKR is intentionally absent — its asset_class is set by the strategy itself
+# (stocks, forex, options) and must not be overridden here.
 BROKER_ASSET_CLASS: Dict[str, str] = {
     "binance": "crypto",
     "alpaca":  "stock",
-    "ibkr":    "stock",
 }
 
 # Options strategies manage their own broker/asset_class metadata — never override them.

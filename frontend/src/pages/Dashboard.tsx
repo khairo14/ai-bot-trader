@@ -20,7 +20,7 @@ interface Signal {
   asset_class: string
   broker: string
   execution_mode: string | null
-  reasons: string
+  reasons: string[]
   acted_on: boolean
   dismissed: boolean
   created_at: string

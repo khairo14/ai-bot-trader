@@ -9,6 +9,7 @@ All calculations run in-process from the DB; no heavy ML needed.
 
 from __future__ import annotations
 
+import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -38,7 +39,6 @@ def _sharpe(pnl_list: list[float], window: int = 30) -> list[dict]:
         if len(chunk) < 2:
             results.append(None)
             continue
-        import statistics
         mean = statistics.mean(chunk)
         std = statistics.stdev(chunk)
         results.append(round((mean / std) * ANNUALISATION, 3) if std > 0 else None)
@@ -65,11 +65,12 @@ async def get_analytics_summary(db: AsyncSession = Depends(get_db)):
     }
     """
 
-    # Fetch all resolved outcomes ordered by creation time
+    # Fetch resolved outcomes ordered by creation time — limit to last 5000 to prevent memory blowup
     q = await db.execute(
         select(TradeOutcome)
         .where(TradeOutcome.resolved == True)
         .order_by(TradeOutcome.resolved_at)
+        .limit(5000)
     )
     outcomes: list[TradeOutcome] = list(q.scalars().all())
 
@@ -118,7 +119,7 @@ async def get_analytics_summary(db: AsyncSession = Depends(get_db)):
         s["total"] += 1
         pnl = _safe_pnl(o.pnl_pct)
         s["pnl_sum"] += pnl
-        if o.ml_label == 1:
+        if o.outcome is not None and o.outcome.value == "win":
             s["wins"] += 1
 
     by_strategy = [
@@ -140,7 +141,7 @@ async def get_analytics_summary(db: AsyncSession = Depends(get_db)):
         s["total"] += 1
         pnl = _safe_pnl(o.pnl_pct)
         s["pnl_sum"] += pnl
-        if o.ml_label == 1:
+        if o.outcome is not None and o.outcome.value == "win":
             s["wins"] += 1
 
     by_symbol = [
@@ -162,7 +163,7 @@ async def get_analytics_summary(db: AsyncSession = Depends(get_db)):
         if dt:
             h = dt.hour
             hour_stats[h]["total"] += 1
-            if o.ml_label == 1:
+            if o.outcome is not None and o.outcome.value == "win":
                 hour_stats[h]["wins"] += 1
 
     by_hour = [
@@ -185,7 +186,7 @@ async def get_analytics_summary(db: AsyncSession = Depends(get_db)):
 
     # ── Summary stats ─────────────────────────────────────────────────────────
     total = len(outcomes)
-    wins  = sum(1 for o in outcomes if o.ml_label == 1)
+    wins  = sum(1 for o in outcomes if o.outcome is not None and o.outcome.value == "win")
     all_pnl = [_safe_pnl(o.pnl_pct) for o in outcomes]
 
     summary = {

@@ -68,8 +68,9 @@ class Settings(BaseSettings):
     forward_test_interval_minutes: int = 1  # non-zero = enabled
 
     # Internal API — used by Celery workers to call back into the FastAPI server
-    # (e.g. flush MLScorer cache after weekly retrain)
-    api_internal_url: str = "http://127.0.0.1:8000"
+    # (e.g. flush MLScorer cache after weekly retrain).
+    # In Docker Compose this must point at the service name, not 127.0.0.1.
+    api_internal_url: str = "http://backend:8000"
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:5173"]

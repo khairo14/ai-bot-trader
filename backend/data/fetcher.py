@@ -29,6 +29,10 @@ class DataFetcher:
         timestamp, open, high, low, close, volume
         """
         raw = await self.broker.get_ohlcv(symbol, timeframe, limit, since)
+        # Broker clients return a DataFrame directly — don't re-wrap it.
+        if isinstance(raw, pd.DataFrame):
+            return raw
+        # Legacy path: list of lists/tuples
         df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df.set_index("timestamp", inplace=True)

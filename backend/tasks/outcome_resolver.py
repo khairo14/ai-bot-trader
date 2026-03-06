@@ -96,7 +96,7 @@ def _resolve_outcome(
     with the price peak and overrides the fixed stop_loss once it would be
     more favourable to the trade.
     """
-    is_long = signal_type in ("BUY",)
+    is_long = signal_type in ("BUY", "COVER")   # COVER closes a short → long direction P&L
     is_short = signal_type in ("SELL", "SHORT")
 
     # Trailing state — initialised to entry price so the trail starts tight
