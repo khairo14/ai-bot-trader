@@ -38,7 +38,7 @@ backend/runtime/*.json
 
 # Celery
 celerybeat-schedule
-celerybeat-schedule.db
+celerybeat-schedule.*
 celery*.pid
 
 # Node
