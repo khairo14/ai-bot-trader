@@ -33,6 +33,7 @@ def retrain_all(self):
                 from config import settings
                 resp = httpx.post(
                     f"{settings.api_internal_url}/internal/ml/reload",
+                    headers={"X-Internal-Secret": settings.internal_api_secret},
                     timeout=5.0,
                 )
                 logger.info(

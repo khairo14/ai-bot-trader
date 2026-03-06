@@ -7,7 +7,7 @@ from datetime import datetime
 
 from db.database import get_db
 from db.models import Strategy, ExecutionMode, AssetClass, BrokerName
-from core.auth import get_current_user, require_admin
+from core.auth import get_current_user, require_admin, audit
 
 router = APIRouter()
 
@@ -181,4 +181,5 @@ async def delete_strategy(strategy_id: int, db: AsyncSession = Depends(get_db), 
         raise HTTPException(status_code=404, detail="Strategy not found")
     await db.delete(strategy)
     await db.commit()
+    audit("strategy.delete", strategy_id=strategy_id)
     return {"message": f"Strategy {strategy_id} deleted."}

@@ -101,6 +101,8 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
     from notifications.notifier import notifier as _notify
     engine = ForwardEngine()
     closed = await engine.emergency_stop(db_session=db)
+    from core.auth import audit
+    audit("emergency_stop", closed_positions=closed)
     await _notify.emergency(
         db,
         title="⚠️ Emergency Stop Activated",

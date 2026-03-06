@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: List[str] = ["http://localhost:3000", "http://localhost:5173"]
 
+    # Internal security
+    # Random secret shared between Celery workers and FastAPI for /internal/* endpoints.
+    # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    internal_api_secret: str = ""
+
     # OpenAI (optional — not used by core trading engine; reserved for future LLM features)
     openai_api_key: str = ""
 
@@ -99,6 +104,23 @@ class Settings(BaseSettings):
                 "Generate a real key: python -c \"import secrets; print(secrets.token_hex(32))\" "
                 "and set it in your .env file."
             )
+
+        # ── Live-mode broker key enforcement ────────────────────────────────
+        # Raise (not just warn) if a broker is in LIVE mode without real credentials.
+        if not self.binance_testnet:
+            if not self.binance_api_key or not self.binance_api_secret:
+                raise ValueError(
+                    "BINANCE_TESTNET=false but BINANCE_API_KEY / BINANCE_API_SECRET are empty. "
+                    "Set live credentials or switch back to testnet mode."
+                )
+        _alpaca_is_live = "paper-api" not in self.alpaca_base_url
+        if _alpaca_is_live:
+            if not self.alpaca_api_key_live or not self.alpaca_api_secret_live:
+                raise ValueError(
+                    "Alpaca live URL configured but ALPACA_API_KEY_LIVE / ALPACA_API_SECRET_LIVE "
+                    "are empty. Set live credentials or switch back to paper mode."
+                )
+
         warnings = []
         if not self.binance_api_key:
             warnings.append("BINANCE_API_KEY")

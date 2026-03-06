@@ -115,6 +115,16 @@ async def approve_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
     if sig_row.acted_on:
         raise HTTPException(status_code=400, detail="Signal already acted on")
 
+    # Market-hours gate — refuse to execute live signals outside trading hours
+    from api.routes.forward_test import is_market_open
+    broker_name = sig_row.broker.value if hasattr(sig_row.broker, "value") else str(sig_row.broker)
+    asset_cls = sig_row.asset_class.value if hasattr(sig_row.asset_class, "value") else str(sig_row.asset_class)
+    if not is_market_open(broker_name, asset_cls):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Market is currently closed for {broker_name}/{asset_cls}. Signal approval blocked outside trading hours.",
+        )
+
     # Look up the originating strategy to get is_paper
     strat_row = (await db.execute(
         select(Strategy).where(
@@ -163,6 +173,8 @@ async def approve_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
     if trade:
         trade.signal_id = sig_row.id
     await db.commit()
+    from core.auth import audit
+    audit("signal.approve", signal_id=signal_id, symbol=sig_row.symbol, trade_placed=trade is not None)
 
     return {
         "message": "Signal approved and executed.",

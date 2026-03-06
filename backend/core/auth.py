@@ -18,6 +18,7 @@ import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from loguru import logger
 
 from config import settings
 
@@ -96,3 +97,13 @@ async def require_admin(user=Depends(get_current_user)):
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return user
+
+
+def audit(action: str, actor: str = "system", **details) -> None:
+    """
+    Write a structured audit-log entry.
+    Output goes to the application log at INFO level with a recognisable prefix
+    so it can be filtered independently (e.g. grep AUDIT or shipped to SIEM).
+    """
+    extras = " | ".join(f"{k}={v}" for k, v in details.items())
+    logger.info(f"[AUDIT] action={action} actor={actor}{' | ' + extras if extras else ''}")

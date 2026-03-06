@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, Depends
+from fastapi import FastAPI, WebSocket, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
@@ -228,11 +228,13 @@ app.include_router(scanner.router, prefix="/api/scanner", tags=["Scanner"], depe
 # They are only reachable from localhost / the same machine, never exposed externally.
 
 @app.post("/internal/ml/reload", include_in_schema=False)
-async def _internal_ml_reload():
+async def _internal_ml_reload(x_internal_secret: str = Header(default="")):
     """Flush the in-process MLScorer model cache.
     Called automatically by the Celery ml_retrain worker after every weekly retrain
     so the FastAPI server picks up the new model without a manual restart.
     """
+    if not settings.internal_api_secret or x_internal_secret != settings.internal_api_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
     from core.ml_scorer import ml_scorer
     ml_scorer.reload()
     logger.info("[internal] MLScorer cache flushed via /internal/ml/reload")

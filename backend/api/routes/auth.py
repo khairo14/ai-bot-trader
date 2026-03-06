@@ -7,16 +7,23 @@ Auth API
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, func
 from loguru import logger
 
 from db.database import AsyncSessionLocal
 from db.models import User
-from core.auth import hash_password, verify_password, create_access_token, get_current_user
+from core.auth import hash_password, verify_password, create_access_token, get_current_user, audit
 
 router = APIRouter()
+
+# ── Simple in-process login rate limiter ─────────────────────────────────────
+# Limits each IP to _LOGIN_MAX_ATTEMPTS failed attempts within _LOGIN_WINDOW seconds.
+import collections, time as _time
+_LOGIN_WINDOW = 300       # 5-minute sliding window
+_LOGIN_MAX_ATTEMPTS = 10  # max failed attempts per IP in that window
+_login_attempts: dict[str, list[float]] = collections.defaultdict(list)
 
 
 # ── Request / response schemas ───────────────────────────────────────────────
@@ -72,9 +79,11 @@ async def register(payload: RegisterRequest):
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="Username already taken")
 
-        # First user ever → admin
-        count_r = await session.execute(select(User))
-        is_first = len(count_r.scalars().all()) == 0
+        # Atomic user-count check — avoids TOCTOU race that would produce two admins.
+        # func.count() runs a single SELECT COUNT(*) in the same transaction,
+        # and the unique constraint on `username` prevents any duplicate commit.
+        count_result = await session.execute(select(func.count()).select_from(User))
+        is_first = count_result.scalar() == 0
 
         user = User(
             username=payload.username,
@@ -85,13 +94,27 @@ async def register(payload: RegisterRequest):
         await session.commit()
         await session.refresh(user)
         logger.info(f"[Auth] New user registered: {user.username} (admin={user.is_admin})")
+        audit("user.register", actor=user.username, admin=user.is_admin)
 
     return UserResponse(id=user.id, username=user.username, is_admin=user.is_admin)
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest):
+async def login(payload: LoginRequest, request: Request):
     """Authenticate with username + password, returns a 7-day JWT."""
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Rate-limit check — sliding window per source IP
+    now = _time.monotonic()
+    attempts = _login_attempts[client_ip]
+    # Evict attempts outside the window
+    _login_attempts[client_ip] = [t for t in attempts if now - t < _LOGIN_WINDOW]
+    if len(_login_attempts[client_ip]) >= _LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please try again later.",
+        )
+
     username = payload.username.strip().lower()
 
     async with AsyncSessionLocal() as session:
@@ -99,6 +122,8 @@ async def login(payload: LoginRequest):
         user = result.scalar_one_or_none()
 
     if not user or not verify_password(payload.password, user.hashed_password):
+        # Record failed attempt for rate limiting
+        _login_attempts[client_ip].append(_time.monotonic())
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -108,6 +133,7 @@ async def login(payload: LoginRequest):
 
     token = create_access_token(subject=user.username)
     logger.info(f"[Auth] Login: {user.username}")
+    audit("user.login", actor=user.username, ip=client_ip)
     return TokenResponse(
         access_token=token,
         token_type="bearer",
