@@ -91,7 +91,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _warn_missing_secrets(self) -> "Settings":
-        """Warn at startup if critical API keys are missing (I-03)."""
+        """Abort startup if SECRET_KEY is the default; warn on missing broker keys."""
+        _INSECURE_DEFAULTS = {"change_this", "change_this_to_a_random_64_char_string", ""}
+        if self.secret_key.lower() in _INSECURE_DEFAULTS:
+            raise ValueError(
+                "SECRET_KEY is set to an insecure default. "
+                "Generate a real key: python -c \"import secrets; print(secrets.token_hex(32))\" "
+                "and set it in your .env file."
+            )
         warnings = []
         if not self.binance_api_key:
             warnings.append("BINANCE_API_KEY")
@@ -101,8 +108,6 @@ class Settings(BaseSettings):
             warnings.append("ALPACA_API_SECRET")
         if self.database_url in ("postgresql://trader:password@db:5432/ai_trader", ""):
             warnings.append("DATABASE_URL (still at default)")
-        if self.secret_key == "change_this":
-            warnings.append("SECRET_KEY (still at default 'change_this')")
         if warnings:
             logger.warning(
                 f"[Config] Missing or default secrets detected: {', '.join(warnings)}. "

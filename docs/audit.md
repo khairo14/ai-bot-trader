@@ -10,9 +10,9 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 
 | # | Status | Location | Issue |
 |---|--------|----------|-------|
-| F-001 | ⏳ | `config.py` | `SECRET_KEY` defaults to `"change_this"` — only a warning logged, never a startup block. Forged JWTs possible. |
+| F-001 | ✅ | `config.py` | `SECRET_KEY` defaults to `"change_this"` — only a warning logged, never a startup block. Forged JWTs possible. |
 | F-037 | ⏳ | `tasks/outcome_resolver.py` | Outcome resolver always fetches **daily** OHLCV regardless of signal timeframe. Intraday (1m/1h) SL/TP hits are entirely missed. All ML training labels for intraday strategies are systematically wrong. |
-| F-050 | ⏳ | `frontend/src/App.tsx` | Sidebar Emergency Stop uses native `fetch()` (no auth header) instead of axios. The emergency stop button always fails silently with HTTP 401. |
+| F-050 | ✅ | `frontend/src/App.tsx` | Sidebar Emergency Stop uses native `fetch()` (no auth header) instead of axios. The emergency stop button always fails silently with HTTP 401. |
 
 ---
 

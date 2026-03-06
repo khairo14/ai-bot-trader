@@ -22,9 +22,9 @@ import StrategyEditor from './pages/StrategyEditor'
 import MultiTimeframe from './pages/MultiTimeframe'
 import MarketScanner from './pages/MarketScanner'
 import Login from './pages/Login'
-import { isAuthenticated, clearAuth, getUsername } from './lib/auth'
+import axios from 'axios'
 
-const navItems = [
+import { isAuthenticated, clearAuth, getUsername } from './lib/auth'
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/strategies', label: 'Strategies', icon: Layers },
   { to: '/strategy-library', label: 'Library', icon: BookOpen },
@@ -158,11 +158,14 @@ function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
                   <div className="flex gap-2">
                     <button
                       className="flex-1 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-all"
-                      onClick={() => {
+                      onClick={async () => {
                         toast.dismiss(t.id)
-                        fetch('/api/positions/emergency-stop', { method: 'POST' })
-                          .then(() => toast.success('Emergency stop executed.'))
-                          .catch(() => toast.error('Emergency stop failed.'))
+                        try {
+                          await axios.post('/api/positions/emergency-stop')
+                          toast.success('Emergency stop executed.')
+                        } catch {
+                          toast.error('Emergency stop failed.')
+                        }
                       }}
                     >Yes, stop all</button>
                     <button
