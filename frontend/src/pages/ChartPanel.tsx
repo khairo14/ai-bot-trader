@@ -14,7 +14,7 @@ import {
 import type { IChartApi, ISeriesApi } from 'lightweight-charts'
 import axios from 'axios'
 import toast from 'react-hot-toast'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, LayoutGrid } from 'lucide-react'
 
 // ─── Indicator math ───────────────────────────────────────────────────────────
 function computeEMA(closes: number[], period: number): (number | null)[] {
@@ -115,6 +115,27 @@ interface TradeMarker {
 
 interface MAOverlay { id: string; period: number; color: string }
 
+/** Returns the next NYSE open time as a human-readable ET string. */
+function nextNYSEOpen(): string {
+  const now = new Date()
+  // Parse ET time into a "local" Date object for day-arithmetic, then correct with offset
+  const nyNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+  const offsetMs = nyNow.getTime() - now.getTime()
+  const d = nyNow.getDay(), h = nyNow.getHours(), m = nyNow.getMinutes()
+  const next = new Date(nyNow)
+  if (d >= 1 && d <= 5 && (h < 9 || (h === 9 && m < 30))) {
+    next.setHours(9, 30, 0, 0)                           // today before open
+  } else {
+    next.setDate(next.getDate() + 1)
+    while (next.getDay() === 0 || next.getDay() === 6) next.setDate(next.getDate() + 1)
+    next.setHours(9, 30, 0, 0)
+  }
+  return new Date(next.getTime() - offsetMs).toLocaleString('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', month: 'short',
+    day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  }) + ' ET'
+}
+
 // ─── Constants ─────────────────────────────────────────────────────────────────
 const MA_COLORS  = ['#06b6d4', '#f97316', '#84cc16', '#ec4899', '#8b5cf6', '#14b8a6']
 const BROKERS    = ['binance', 'alpaca', 'ibkr'] as const
@@ -173,6 +194,8 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const [showAddMA, setShowAddMA]     = useState(false)
   const [newMAPeriod, setNewMAPeriod] = useState(20)
   const [wsLive, setWsLive]           = useState(false)
+  const [marketClosed, setMarketClosed] = useState(false)
+  const [showIndPanel, setShowIndPanel] = useState(false)
 
   // Symbol combobox
   const [allSymbols, setAllSymbols] = useState<string[]>([])
@@ -197,6 +220,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const lastCandleTimeRef = useRef<number | null>(null)   // unix seconds of last known candle
   const livePollRef       = useRef<ReturnType<typeof setInterval> | null>(null)
   const isFetchingRef     = useRef(false)   // guard: don't live-update during full fetch
+  const wsLiveRef         = useRef(false)   // true while WS is connected — disables REST poll
 
   // MA overlay refs
   const maSeriesRefs   = useRef<Map<string, ISeriesApi<'Line'>>>(new Map())
@@ -204,6 +228,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const maOverlaysRef  = useRef<MAOverlay[]>([])
   // Live WebSocket ref
   const wsRef = useRef<WebSocket | null>(null)
+  const indPanelRef = useRef<HTMLDivElement>(null)
 
   // Series refs
   const candleRef  = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -473,6 +498,9 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   // series.update() — lightweight-charts updates the current bar in place
   // or appends a new one when a new period starts. Exactly like TradingView.
   const fetchLiveUpdate = useCallback(async () => {
+    // Skip REST poll entirely when the WebSocket is live — both updating
+    // series.update() concurrently will crash lightweight-charts.
+    if (wsLiveRef.current) return
     if (!candleRef.current || lastCandleTimeRef.current === null || isFetchingRef.current) return
     // Request from last known candle onwards (no backward buffer so we never try
     // to update a non-last bar, which lightweight-charts forbids and throws on).
@@ -499,7 +527,6 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
       }
       if (didUpdate) {
         setLastUpdated(new Date().toLocaleTimeString())
-        // Keep the view scrolled to the latest bar when updates arrive
         mainChart.current?.timeScale().scrollToRealTime()
       }
     } catch {
@@ -552,13 +579,14 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   useEffect(() => {
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
     setWsLive(false)
+    setMarketClosed(false)
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const url = `${proto}//${window.location.host}/ws/kline?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&broker=${encodeURIComponent(broker)}`
     const ws = new WebSocket(url)
     wsRef.current = ws
-    ws.onopen  = () => setWsLive(true)
-    ws.onerror = () => setWsLive(false)
-    ws.onclose = () => setWsLive(false)
+    ws.onopen  = () => { wsLiveRef.current = true;  setWsLive(true); setMarketClosed(false) }
+    ws.onerror = () => { wsLiveRef.current = false; setWsLive(false) }
+    ws.onclose = () => { wsLiveRef.current = false; setWsLive(false); if (broker !== 'binance') setMarketClosed(true) }
     // Throttle the React state update (setLastUpdated) to at most once per 2s.
     // series.update() is called every message but is a DOM mutation with no
     // React re-render — safe to call at full rate.
@@ -566,7 +594,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     ws.onmessage = (evt) => {
       try {
         const d = JSON.parse(evt.data) as { time: number; open: number; high: number; low: number; close: number; volume: number }
-        if (!candleRef.current || !d.time || !d.close) return
+        if (!candleRef.current || !d.time || !d.close || d.open <= 0 || d.high <= 0 || d.low <= 0) return
         if (lastCandleTimeRef.current !== null && d.time < lastCandleTimeRef.current) return
         try {
           candleRef.current.update({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })
@@ -582,7 +610,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
         } catch {}
       } catch {}
     }
-    return () => { ws.close(); setWsLive(false) }
+    return () => { ws.close(); wsLiveRef.current = false; setWsLive(false) }
   }, [symbol, timeframe, broker])
 
   // Fetch symbols when broker changes (keep symbol in sync atomically)
@@ -596,6 +624,13 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   // Close symbol dropdown on outside click
   useEffect(() => {
     const h = (e: MouseEvent) => { if (symRef.current && !symRef.current.contains(e.target as Node)) setSymOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [])
+
+  // Close indicator panel on outside click
+  useEffect(() => {
+    const h = (e: MouseEvent) => { if (indPanelRef.current && !indPanelRef.current.contains(e.target as Node)) setShowIndPanel(false) }
     document.addEventListener('mousedown', h)
     return () => document.removeEventListener('mousedown', h)
   }, [])
@@ -705,61 +740,121 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
           {!compact && (loading ? 'Loading…' : 'Refresh')}
         </button>
 
-        {/* Indicator toggles */}
-        <div className="flex items-center gap-2 border-l border-dark-600 pl-2">
-          <label className="flex items-center gap-1 text-xs cursor-pointer select-none">
-            <input type="checkbox" checked={showEMA} onChange={e => setShowEMA(e.target.checked)} className="accent-amber-400" />
-            <span className="text-amber-400">EMA</span>
-          </label>
-          <label className="flex items-center gap-1 text-xs cursor-pointer select-none">
-            <input type="checkbox" checked={showBB} onChange={e => setShowBB(e.target.checked)} className="accent-indigo-400" />
-            <span className="text-indigo-400">BB</span>
-          </label>
-          <label className="flex items-center gap-1 text-xs text-gray-400 cursor-pointer select-none">
-            <input type="checkbox" checked={showVolume} onChange={e => setShowVolume(e.target.checked)} />
-            <span>Vol</span>
-          </label>
-          <label className="flex items-center gap-1 text-xs cursor-pointer select-none">
-            <input type="checkbox" checked={showTrades} onChange={e => setShowTrades(e.target.checked)} className="accent-sky-400" />
-            <span className="text-sky-400">Trades</span>
-          </label>
-        </div>
+        {/* ─── Indicators dropdown ───────────────────────────────── */}
+        <div ref={indPanelRef} className="relative border-l border-dark-600 pl-2">
+          <button
+            onClick={() => setShowIndPanel(v => !v)}
+            className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded-lg border transition-all ${
+              showIndPanel
+                ? 'bg-brand-500/20 border-brand-500/60 text-brand-400'
+                : 'bg-dark-700 border-dark-500 text-gray-300 hover:text-white hover:bg-dark-600'
+            }`}
+          >
+            <LayoutGrid size={12} />
+            {!compact && <span>Indicators</span>}
+          </button>
 
-        {/* MA overlays */}
-        <div className="flex items-center gap-1.5 border-l border-dark-600 pl-2">
-          {maOverlays.map(m => (
-            <span key={m.id} className="flex items-center gap-0.5 text-xs font-medium" style={{ color: m.color }}>
-              MA{m.period}
-              <button onClick={() => removeMaOverlay(m.id)} className="text-gray-500 hover:text-gray-200 leading-none ml-0.5 text-[10px]">×</button>
-            </span>
-          ))}
-          {maOverlays.length < 6 && (
-            <div className="relative">
-              <button onClick={() => setShowAddMA(v => !v)}
-                className="text-xs px-1.5 py-1 rounded-md bg-dark-600 text-cyan-400 hover:bg-dark-500 hover:text-cyan-300">
-                + MA
-              </button>
-              {showAddMA && (
-                <div className="absolute z-50 top-full mt-1 left-0 bg-dark-800 border border-dark-600 rounded-lg p-2 shadow-xl flex flex-col gap-1.5 w-28">
-                  <span className="text-xs text-gray-400">Period</span>
-                  <input type="number" min={2} max={500} value={newMAPeriod}
-                    onChange={e => setNewMAPeriod(Number(e.target.value))}
-                    className="bg-dark-700 text-gray-200 text-xs rounded px-2 py-1 border border-dark-500 w-full" />
-                  <button onClick={addMaOverlay}
-                    className="text-xs py-1 rounded-md bg-cyan-600 text-white hover:bg-cyan-500">Add</button>
+          {showIndPanel && (
+            <div className="absolute z-50 top-full mt-1 left-0 bg-dark-900 border border-dark-600 rounded-xl shadow-2xl p-3 flex flex-col gap-3 w-52">
+
+              {/* Overlays group */}
+              <div>
+                <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Overlays</p>
+                <div className="flex flex-col gap-1">
+                  {[
+                    { label: 'EMA (20 / 50)', color: 'text-amber-400', accent: 'accent-amber-400', checked: showEMA, set: setShowEMA },
+                    { label: 'Bollinger Bands', color: 'text-indigo-400', accent: 'accent-indigo-400', checked: showBB, set: setShowBB },
+                    { label: 'Volume', color: 'text-gray-400', accent: '', checked: showVolume, set: setShowVolume },
+                    { label: 'Trade markers', color: 'text-sky-400', accent: 'accent-sky-400', checked: showTrades, set: setShowTrades },
+                  ].map(({ label, color, accent, checked, set }) => (
+                    <label key={label} className="flex items-center gap-2 cursor-pointer select-none px-1 py-0.5 rounded hover:bg-dark-700">
+                      <input type="checkbox" checked={checked} onChange={e => set(e.target.checked)} className={accent || undefined} />
+                      <span className={`text-xs ${color}`}>{label}</span>
+                    </label>
+                  ))}
                 </div>
-              )}
+              </div>
+
+              {/* Oscillator group */}
+              <div className="border-t border-dark-700 pt-2">
+                <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Oscillator</p>
+                <div className="flex gap-1">
+                  {(['RSI', 'MACD'] as const).map(ind => (
+                    <button key={ind} onClick={() => setSubPanel(ind)}
+                      className={`flex-1 text-xs py-1 rounded-md transition-all border ${
+                        subPanel === ind
+                          ? ind === 'RSI'
+                            ? 'bg-sky-500/20 border-sky-500/50 text-sky-400 font-medium'
+                            : 'bg-yellow-500/20 border-yellow-500/50 text-yellow-400 font-medium'
+                          : 'bg-dark-700 border-dark-600 text-gray-400 hover:text-gray-200'
+                      }`}>
+                      {ind}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* MA group */}
+              <div className="border-t border-dark-700 pt-2">
+                <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Moving Averages</p>
+                <div className="flex flex-col gap-1">
+                  {maOverlays.map(m => (
+                    <div key={m.id} className="flex items-center justify-between px-1 py-0.5 rounded hover:bg-dark-700">
+                      <span className="text-xs font-medium" style={{ color: m.color }}>MA {m.period}</span>
+                      <button onClick={() => removeMaOverlay(m.id)}
+                        className="text-gray-600 hover:text-red-400 text-xs leading-none">×</button>
+                    </div>
+                  ))}
+                  {maOverlays.length < 6 && (
+                    <div className="flex flex-col gap-1.5 mt-1">
+                      {!showAddMA ? (
+                        <button onClick={() => setShowAddMA(true)}
+                          className="text-xs py-1 rounded-md bg-dark-700 border border-dark-600 text-cyan-400 hover:bg-dark-600 hover:text-cyan-300">
+                          + Add MA
+                        </button>
+                      ) : (
+                        <div className="flex gap-1">
+                          <input type="number" min={2} max={500} value={newMAPeriod}
+                            onChange={e => setNewMAPeriod(Number(e.target.value))}
+                            onKeyDown={e => e.key === 'Enter' && addMaOverlay()}
+                            autoFocus
+                            className="bg-dark-700 text-gray-200 text-xs rounded px-2 py-1 border border-dark-500 w-full" />
+                          <button onClick={addMaOverlay}
+                            className="text-xs px-2 py-1 rounded-md bg-cyan-600 text-white hover:bg-cyan-500 shrink-0">Add</button>
+                          <button onClick={() => setShowAddMA(false)}
+                            className="text-xs px-1.5 py-1 rounded-md bg-dark-700 text-gray-400 hover:text-gray-200 shrink-0">×</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
             </div>
           )}
         </div>
 
-        {/* Sub-panel toggle */}
+        {/* Active MA tags in toolbar (quick remove) */}
+        {maOverlays.length > 0 && (
+          <div className="flex items-center gap-1">
+            {maOverlays.map(m => (
+              <span key={m.id} className="flex items-center gap-0.5 text-xs font-medium px-1 py-0.5 rounded bg-dark-700" style={{ color: m.color }}>
+                MA{m.period}
+                <button onClick={() => removeMaOverlay(m.id)} className="text-gray-500 hover:text-red-400 leading-none ml-0.5 text-[10px]">×</button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {/* Oscillator quick badge */}
         <div className="flex items-center gap-1 border-l border-dark-600 pl-2">
           {(['RSI', 'MACD'] as const).map(ind => (
             <button key={ind} onClick={() => setSubPanel(ind)}
-              className={`text-xs px-1.5 py-1 rounded-md transition-all ${subPanel === ind
-                ? ind === 'RSI' ? 'bg-sky-500/20 text-sky-400 font-medium' : 'bg-yellow-500/20 text-yellow-400 font-medium'
-                : 'text-gray-500 hover:text-gray-300'}`}>
+              className={`text-xs px-1.5 py-1 rounded-md transition-all ${
+                subPanel === ind
+                  ? ind === 'RSI' ? 'bg-sky-500/20 text-sky-400 font-medium' : 'bg-yellow-500/20 text-yellow-400 font-medium'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}>
               {ind}
             </button>
           ))}
@@ -805,7 +900,15 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
       )}
 
       {/* ─── Charts ───────────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex-1 flex flex-col min-h-0 relative">
+        {broker !== 'binance' && marketClosed && (
+          <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
+            <div className="bg-dark-900/90 border border-dark-600 rounded-xl px-5 py-4 text-center backdrop-blur-sm">
+              <p className="text-sm font-semibold text-gray-300">Market Closed</p>
+              <p className="text-xs text-gray-500 mt-1">NYSE opens {nextNYSEOpen()}</p>
+            </div>
+          </div>
+        )}
         <div ref={mainRef} className="flex-[3] min-h-0 w-full" />
         <div className="relative flex-1 min-h-0 border-t border-dark-700">
           <span className={`absolute top-1 left-2 text-[9px] font-medium z-10 pointer-events-none

@@ -143,7 +143,18 @@ async def _stream_alpaca(ws: WebSocket, symbol: str, timeframe: str, tf_secs: in
         sub_raw = await asyncio.wait_for(aws.recv(), timeout=5)
         logger.debug(f"[KlineWS][Alpaca] Subscribe: {sub_raw[:120]}")
 
-        async for raw in aws:
+        # No-data timeout: if no valid trade arrives within 60 s the market is
+        # likely closed.  Close the WS so the frontend shows the overlay.
+        NO_DATA_TIMEOUT = 60.0
+        while True:
+            try:
+                raw = await asyncio.wait_for(aws.recv(), timeout=NO_DATA_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.info(
+                    f"[KlineWS][Alpaca] No trades for {NO_DATA_TIMEOUT:.0f}s "
+                    f"— market likely closed for {sym}"
+                )
+                return  # causes ws.onclose on the frontend
             try:
                 msgs = json.loads(raw)
                 if not isinstance(msgs, list):
