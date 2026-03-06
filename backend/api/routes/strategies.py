@@ -7,6 +7,7 @@ from datetime import datetime
 
 from db.database import get_db
 from db.models import Strategy, ExecutionMode, AssetClass, BrokerName
+from core.auth import get_current_user, require_admin
 
 router = APIRouter()
 
@@ -40,7 +41,7 @@ async def list_strategies(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/")
-async def create_strategy(payload: StrategyCreate, db: AsyncSession = Depends(get_db)):
+async def create_strategy(payload: StrategyCreate, db: AsyncSession = Depends(get_db), _: object = Depends(require_admin)):
     """Create a new strategy configuration."""
     strategy = Strategy(
         name=payload.name,
@@ -96,7 +97,7 @@ _SEED_TEMPLATES = [
 
 
 @router.post("/seed")
-async def seed_default_strategies(db: AsyncSession = Depends(get_db)):
+async def seed_default_strategies(db: AsyncSession = Depends(get_db), _: object = Depends(require_admin)):
     """
     Idempotently insert the 9 default curated strategies (3 per broker).
     Strategies whose name already exists are skipped.
@@ -140,6 +141,7 @@ async def update_strategy(
     strategy_id: int,
     payload: StrategyUpdate,
     db: AsyncSession = Depends(get_db),
+    _: object = Depends(require_admin),
 ):
     """Update strategy settings (execution mode, active state, parameters)."""
     result = await db.execute(select(Strategy).where(Strategy.id == strategy_id))
@@ -171,7 +173,7 @@ async def update_strategy(
 
 
 @router.delete("/{strategy_id}")
-async def delete_strategy(strategy_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_strategy(strategy_id: int, db: AsyncSession = Depends(get_db), _: object = Depends(require_admin)):
     """Delete a strategy."""
     result = await db.execute(select(Strategy).where(Strategy.id == strategy_id))
     strategy = result.scalar_one_or_none()

@@ -89,3 +89,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exc
 
     return user
+
+
+async def require_admin(user=Depends(get_current_user)):
+    """Dependency that raises HTTP 403 for non-admin users."""
+    if not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user
