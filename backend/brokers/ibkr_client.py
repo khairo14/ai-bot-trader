@@ -53,7 +53,20 @@ class _IBKRManager:
     def _run_loop(self) -> None:
         assert self._loop is not None
         asyncio.set_event_loop(self._loop)
+        self._loop.create_task(self._reconnect_loop())
         self._loop.run_forever()
+
+    async def _reconnect_loop(self) -> None:
+        """Background task: silently reconnect whenever the Gateway drops us."""
+        _RECONNECT_INTERVAL = 30  # seconds between checks
+        while True:
+            await asyncio.sleep(_RECONNECT_INTERVAL)
+            try:
+                if self._ib is not None and not self._ib.isConnected():
+                    logger.info("[IBKR] Connection lost — attempting auto-reconnect …")
+                    await self._ensure_connected()
+            except Exception as exc:
+                logger.debug(f"[IBKR] Auto-reconnect attempt failed: {exc}")
 
     def _submit(self, coro, timeout: float = 30.0):
         """Run a coroutine on the background loop and block until done."""
@@ -66,6 +79,10 @@ class _IBKRManager:
     async def _ensure_connected(self) -> bool:
         if self._ib is None:
             self._ib = IB()
+            # Log cleanly when Gateway drops us
+            self._ib.disconnectedEvent += lambda: logger.warning(
+                "[IBKR] Gateway disconnected — will auto-reconnect within 30 s"
+            )
         if self._ib.isConnected():
             return True
         try:
