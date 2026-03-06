@@ -14,6 +14,7 @@ const WS_URL = (() => {
 interface ForwardStatus {
   active_strategies: number
   strategy_names: string[]
+  brokers: string[]
   paper_balance: number
   initial_capital: number
   open_positions: number
@@ -321,7 +322,11 @@ export default function ForwardTest() {
           {
             label: 'Paper Balance',
             value: status ? fmtUSD(status.paper_balance) : '—',
-            sub: status ? `Started at ${fmtUSD(status.initial_capital)}` : '',
+            sub: status
+              ? status.brokers.length
+                ? `Simulated on ${status.brokers.join(', ')} · started ${fmtUSD(status.initial_capital)}`
+                : `Started at ${fmtUSD(status.initial_capital)}`
+              : '',
           },
           {
             label: 'Open Positions',

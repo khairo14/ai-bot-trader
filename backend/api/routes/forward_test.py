@@ -178,9 +178,12 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         })
     next_scheduled = min(schedule_details, key=lambda x: x["next_fire"]) if schedule_details else None
 
+    brokers = sorted({s.broker.value for s in active_strategies})
+
     return {
         "active_strategies": len(active_strategies),
         "strategy_names": [s.name for s in active_strategies],
+        "brokers": brokers,
         "paper_balance": round(INITIAL_CAPITAL + realized_pnl + unrealized_pnl, 2),
         "initial_capital": INITIAL_CAPITAL,
         "open_positions": open_count,
