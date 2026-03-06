@@ -127,21 +127,6 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
     """Compute aggregated paper trading statistics from the DB."""
     INITIAL_CAPITAL = 10_000.0
 
-    # Sum closed paper trade P&L
-    closed = await db.execute(
-        select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.FILLED)
-    )
-    closed_trades = closed.scalars().all()
-    realized_pnl = sum(t.pnl or 0.0 for t in closed_trades)
-
-    # Open paper trades
-    open_q = await db.execute(
-        select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.OPEN)
-    )
-    open_trades = open_q.scalars().all()
-    open_count = len(open_trades)
-    unrealized_pnl = sum(t.pnl or 0.0 for t in open_trades)
-
     # Active paper strategies
     strat_q = await db.execute(
         select(StrategyModel).where(
@@ -150,6 +135,48 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         )
     )
     active_strategies = strat_q.scalars().all()
+    active_brokers = sorted({s.broker.value for s in active_strategies})
+
+    # Sum closed paper trade P&L
+    closed = await db.execute(
+        select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.FILLED)
+    )
+    closed_trades = closed.scalars().all()
+
+    # Open paper trades
+    open_q = await db.execute(
+        select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.OPEN)
+    )
+    open_trades = open_q.scalars().all()
+
+    # ── Per-broker breakdown ──────────────────────────────────────────────────
+    # Each broker starts with its own INITIAL_CAPITAL pool; its balance is
+    # computed from trades that belong to that broker only.
+    broker_breakdown = []
+    all_broker_names = sorted({
+        *{t.broker.value for t in closed_trades},
+        *{t.broker.value for t in open_trades},
+        *active_brokers,
+    })
+    for b in all_broker_names:
+        b_closed_pnl  = sum(t.pnl or 0.0 for t in closed_trades  if t.broker.value == b)
+        b_open_pnl    = sum(t.pnl or 0.0 for t in open_trades    if t.broker.value == b)
+        b_open_count  = sum(1              for t in open_trades    if t.broker.value == b)
+        b_strats      = [s.name for s in active_strategies if s.broker.value == b]
+        broker_breakdown.append({
+            "broker":           b,
+            "balance":          round(INITIAL_CAPITAL + b_closed_pnl + b_open_pnl, 2),
+            "initial_capital":  INITIAL_CAPITAL,
+            "pnl":              round(b_closed_pnl + b_open_pnl, 4),
+            "open_positions":   b_open_count,
+            "strategies":       b_strats,
+        })
+
+    # ── Aggregates (sum across all brokers) ───────────────────────────────────
+    realized_pnl   = sum(t.pnl or 0.0 for t in closed_trades)
+    unrealized_pnl = sum(t.pnl or 0.0 for t in open_trades)
+    open_count     = len(open_trades)
+    total_initial  = INITIAL_CAPITAL * max(len(all_broker_names), 1)
 
     # Days running — from earliest trade
     first_q = await db.execute(
@@ -178,14 +205,13 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         })
     next_scheduled = min(schedule_details, key=lambda x: x["next_fire"]) if schedule_details else None
 
-    brokers = sorted({s.broker.value for s in active_strategies})
-
     return {
         "active_strategies": len(active_strategies),
         "strategy_names": [s.name for s in active_strategies],
-        "brokers": brokers,
-        "paper_balance": round(INITIAL_CAPITAL + realized_pnl + unrealized_pnl, 2),
-        "initial_capital": INITIAL_CAPITAL,
+        "brokers": active_brokers,
+        "broker_breakdown": broker_breakdown,
+        "paper_balance": round(total_initial + realized_pnl + unrealized_pnl, 2),
+        "initial_capital": total_initial,
         "open_positions": open_count,
         "realized_pnl": round(realized_pnl, 4),
         "unrealized_pnl": round(unrealized_pnl, 4),
