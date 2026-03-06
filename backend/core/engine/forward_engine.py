@@ -79,7 +79,7 @@ class ForwardEngine:
     @staticmethod
     async def _daily_pnl(db_session) -> float:
         """Return the sum of realised P&L for trades closed today (UTC)."""
-        today_start = datetime.now(timezone.utc).replace(
+        today_start = datetime.utcnow().replace(
             hour=0, minute=0, second=0, microsecond=0
         )
         q = await db_session.execute(
