@@ -81,7 +81,7 @@ function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
                 <Zap className="text-brand-500 shrink-0" size={22} />
                 <span className="font-bold text-white text-sm tracking-wide">AI Bot Trader</span>
               </div>
-              <p className="text-xs text-gray-500 mt-0.5">v0.1.0 — Phase 1</p>
+              <p className="text-xs text-gray-500 mt-0.5">v2.5.0 — Phase 2</p>
             </div>
           )}
           {collapsed && <Zap className="text-brand-500" size={22} />}

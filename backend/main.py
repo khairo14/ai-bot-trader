@@ -184,7 +184,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AI Bot Trader API",
     description="Hybrid rule-based + ML trading bot supporting Crypto, Stocks, and Options.",
-    version="0.1.0",
+    version="2.5.0",
     lifespan=lifespan,
 )
 
@@ -243,7 +243,7 @@ app.add_api_websocket_route("/ws", ws_endpoint)
 @app.get("/health", tags=["Health"])
 async def health_check(deep: bool = False):
     """Basic liveness check. Add ?deep=true for dependency status."""
-    result: dict = {"status": "ok", "version": "0.1.0"}
+    result: dict = {"status": "ok", "version": "2.5.0"}
     if not deep:
         return result
 
