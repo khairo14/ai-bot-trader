@@ -114,6 +114,17 @@ const THEME = {
   up: '#22c55e', down: '#ef4444',
 }
 
+// Milliseconds per timeframe — mirrors backend _TF_MS
+const TF_TO_MS: Record<string, number> = {
+  '1m': 60_000, '5m': 300_000, '15m': 900_000,
+  '1h': 3_600_000, '4h': 14_400_000,
+  '1d': 86_400_000, '3d': 259_200_000, '1w': 604_800_000,
+}
+// How often (seconds) to poll for the live candle update per timeframe
+const TF_POLL_SECS: Record<string, number> = {
+  '1m': 10, '5m': 20, '15m': 30, '1h': 60, '4h': 120, '1d': 300, '3d': 1800, '1w': 3600,
+}
+
 // ─── Props ─────────────────────────────────────────────────────────────────────
 interface ChartPanelProps {
   /** When true, toolbar is condensed — used in 4-panel grid */
@@ -164,6 +175,11 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
 
   // Price-line refs for trade TP/SL — cleaned up on each fetch
   const tradeLineRefs = useRef<any[]>([])
+
+  // Live candle update refs
+  const lastCandleTimeRef = useRef<number | null>(null)   // unix seconds of last known candle
+  const livePollRef       = useRef<ReturnType<typeof setInterval> | null>(null)
+  const isFetchingRef     = useRef(false)   // guard: don't live-update during full fetch
 
   // Series refs
   const candleRef  = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -272,6 +288,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   // ─── Fetch & render ──────────────────────────────────────────────────────
   const fetchAndRender = useCallback(async () => {
     if (!candleRef.current) return
+    isFetchingRef.current = true
     setLoading(true)
     try {
       // Compute since/until ms from preset or custom date pickers
@@ -405,14 +422,49 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
       subChart.current?.timeScale().fitContent()
       setCandleCount(candleRes.data.candle_count ?? candleRes.data.candles?.length ?? 0)
       setLastUpdated(new Date().toLocaleTimeString())
+      // Record last candle time for live poll
+      if (candles.length > 0) lastCandleTimeRef.current = candles[candles.length - 1].time
     } catch (err: any) {
       toast.error(err?.response?.data?.detail ?? 'Failed to load chart data.')
     } finally {
       setLoading(false)
+      isFetchingRef.current = false
     }
   }, [symbol, timeframe, broker, rangePreset, customFrom, customTo, showTrades])
 
   useEffect(() => { fetchAndRender() }, [fetchAndRender])
+
+  // ─── Live candle poll ─────────────────────────────────────────────────────
+  // Fetches the last 2 candles at TF-appropriate intervals and calls
+  // series.update() — lightweight-charts updates the current bar in place
+  // or appends a new one when a new period starts. Exactly like TradingView.
+  const fetchLiveUpdate = useCallback(async () => {
+    if (!candleRef.current || lastCandleTimeRef.current === null || isFetchingRef.current) return
+    const tfMs  = TF_TO_MS[timeframe] ?? 3_600_000
+    const since = lastCandleTimeRef.current * 1000 - tfMs   // include 1 bar back for safety
+    const until = Date.now()
+    try {
+      const res = await axios.get('/api/charts/candles', {
+        params: { symbol, timeframe, broker, since, until },
+      })
+      const fresh: Candle[] = (res.data.candles as Candle[]).sort((a, b) => a.time - b.time)
+      for (const c of fresh) {
+        candleRef.current?.update({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close })
+        volRef.current?.update({ time: c.time as any, value: c.volume, color: c.close >= c.open ? '#22c55e33' : '#ef444433' })
+        if (c.time > (lastCandleTimeRef.current ?? 0)) lastCandleTimeRef.current = c.time
+      }
+      if (fresh.length > 0) setLastUpdated(new Date().toLocaleTimeString())
+    } catch {
+      // silently ignore — next full fetchAndRender will recover
+    }
+  }, [symbol, timeframe, broker])
+
+  useEffect(() => {
+    if (livePollRef.current) clearInterval(livePollRef.current)
+    const secs = TF_POLL_SECS[timeframe] ?? 60
+    livePollRef.current = setInterval(fetchLiveUpdate, secs * 1000)
+    return () => { if (livePollRef.current) clearInterval(livePollRef.current) }
+  }, [fetchLiveUpdate, timeframe])
 
   // Fetch symbols when broker changes (keep symbol in sync atomically)
   useEffect(() => {

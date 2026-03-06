@@ -136,18 +136,26 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
     active_strategies = strat_q.scalars().all()
     active_brokers = sorted({s.broker.value for s in active_strategies})
 
-    # Real broker API balances (same source as Dashboard broker cards)
+    # Real broker API balances — capped at 5 s total so a slow IBKR connection
+    # never delays the entire status response and makes Alpaca/Binance look offline.
     from api.routes.portfolio import _safe_balance
-    binance_bal, alpaca_bal, ibkr_bal = await _asyncio.gather(
-        _safe_balance("binance"),
-        _safe_balance("alpaca"),
-        _safe_balance("ibkr"),
-        return_exceptions=True,
-    )
+    _bal_tasks = {
+        "binance": _asyncio.create_task(_safe_balance("binance")),
+        "alpaca":  _asyncio.create_task(_safe_balance("alpaca")),
+        "ibkr":    _asyncio.create_task(_safe_balance("ibkr")),
+    }
+    _done, _pending = await _asyncio.wait(list(_bal_tasks.values()), timeout=5.0)
+    for _t in _pending:
+        _t.cancel()   # IBKR timed out — leave as disconnected
     api_balances: dict = {}
-    for b in [binance_bal, alpaca_bal, ibkr_bal]:
-        if not isinstance(b, Exception):
-            api_balances[b["broker"]] = b
+    for _bname, _task in _bal_tasks.items():
+        if _task in _done:
+            try:
+                _result = _task.result()
+                if isinstance(_result, dict):
+                    api_balances[_result.get("broker", _bname)] = _result
+            except Exception:
+                pass
 
     # Sum closed paper trade P&L
     closed = await db.execute(
@@ -830,6 +838,22 @@ async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=409, detail="Signal already executed.")
     if db_signal.signal == SignalType.HOLD:
         raise HTTPException(status_code=400, detail="Cannot execute a HOLD signal.")
+
+    # Market hours gate — block live execution when session is closed.
+    # Paper execution is always allowed (pure simulation, no real order).
+    _exec_broker = db_signal.broker.value if hasattr(db_signal.broker, "value") else str(db_signal.broker)
+    if not is_market_open(_exec_broker):
+        # Find strategy to determine paper vs live
+        _strat_q_pre = await db.execute(
+            select(StrategyModel).where(StrategyModel.name == db_signal.strategy_name, StrategyModel.is_active == True)
+        )
+        _strat_pre = _strat_q_pre.scalar_one_or_none()
+        _is_paper_pre = _strat_pre.is_paper if _strat_pre else True
+        if not _is_paper_pre:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Market is closed for {_exec_broker}. Live orders can only be placed during trading hours.",
+            )
 
     # Find strategy to know is_paper
     strat_q = await db.execute(
