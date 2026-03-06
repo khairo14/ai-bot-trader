@@ -137,6 +137,16 @@ class _IBKRManager:
     def is_connected(self) -> bool:
         return bool(self._ib and self._ib.isConnected())
 
+    def ensure_connected_sync(self) -> bool:
+        """
+        Synchronously ensure the singleton IB connection is live.
+        Runs _ensure_connected() on the background loop (where ib_insync lives).
+        Returns True if connected, False if Gateway is unreachable.
+        Unlike get_balance(), exceptions are NOT swallowed here.
+        """
+        self._start()
+        return self._submit(self._ensure_connected())
+
     def get_ib(self) -> "IB":
         """
         Return the live, connected IB instance.
@@ -247,18 +257,23 @@ class IBKRClient(AbstractBroker):
     async def connect(self) -> None:
         """
         Ensure the singleton IBKR manager is connected (idempotent).
-        Safe to call multiple times; triggers auto-reconnect if Gateway was restarted.
+        Submits _ensure_connected directly to the background loop so the real
+        socket state is checked — no exception swallowing.
         """
         _manager._start()
-        if not _manager.is_connected():
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _manager.get_balance)
-        if not _manager.is_connected():
+        loop = asyncio.get_event_loop()
+        try:
+            connected = await loop.run_in_executor(None, _manager.ensure_connected_sync)
+        except Exception as exc:
             raise ConnectionError(
-                "IBKRClient: failed to connect to IB Gateway. Ensure IB Gateway is running."
+                f"IBKRClient: could not connect to IB Gateway: {exc}"
+            ) from exc
+        if not connected:
+            raise ConnectionError(
+                "IBKRClient: IB Gateway is not reachable. Ensure IB Gateway is running."
             )
         mode = "PAPER" if self._paper else "LIVE"
-        logger.info(f"[IBKR] IBKRClient ready — using singleton connection ({mode}, port={settings.ibkr_port})")
+        logger.info(f"[IBKR] IBKRClient ready — singleton connected ({mode}, port={settings.ibkr_port})")
 
     async def disconnect(self) -> None:
         """No-op: the singleton manager owns the connection lifecycle."""
@@ -276,10 +291,8 @@ class IBKRClient(AbstractBroker):
     async def get_price(self, symbol: str) -> float:
         """
         Fetch current market price via the singleton IB connection.
-        Runs the ib_insync async call on the manager's dedicated event loop
-        to avoid cross-loop issues.
+        Runs the ib_insync async call on the manager's dedicated event loop.
         """
-        self._ensure_connected()
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _manager.fetch_price, symbol)
 
@@ -294,8 +307,8 @@ class IBKRClient(AbstractBroker):
         Fetch historical OHLCV bars via the singleton IB connection.
         reqHistoricalDataAsync must run on the manager's background loop;
         we dispatch it there via run_in_executor so FastAPI's loop stays free.
+        The manager's _do_ohlcv() handles reconnection internally.
         """
-        self._ensure_connected()
 
         bar_size_map = {
             "1m": "1 min",
