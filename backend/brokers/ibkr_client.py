@@ -176,7 +176,7 @@ class _IBKRManager:
             raise ConnectionError("IBKR Gateway is not reachable")
         assert self._ib is not None
         contract = Stock(symbol, "SMART", "USD")
-        self._ib.qualifyContracts(contract)
+        await self._ib.qualifyContractsAsync(contract)
         bars = await self._ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
@@ -200,7 +200,7 @@ class _IBKRManager:
             raise ConnectionError("IBKR Gateway is not reachable")
         assert self._ib is not None
         contract = Stock(symbol, "SMART", "USD")
-        self._ib.qualifyContracts(contract)
+        await self._ib.qualifyContractsAsync(contract)
         ticker = self._ib.reqMktData(contract)
         await asyncio.sleep(1)
         price = ticker.last or ticker.close or ticker.bid or 0.0
