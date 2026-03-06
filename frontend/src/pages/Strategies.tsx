@@ -19,6 +19,25 @@ interface Strategy {
 
 const BROKERS = ['binance', 'alpaca', 'ibkr']
 const ASSET_CLASSES = ['crypto', 'stock', 'option']
+
+// Strategies valid per broker — mirrors backend BROKER_STRATEGIES in scanner.py
+const BROKER_STRATEGIES: Record<string, string[]> = {
+  binance: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
+  alpaca:  ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
+  ibkr:    ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb',
+             'iron_condor', 'covered_call', 'bull_call_spread'],
+}
+
+// Default asset class per broker
+const BROKER_ASSET_CLASS: Record<string, string> = {
+  binance: 'crypto',
+  alpaca:  'stock',
+  ibkr:    'stock',
+}
+
+// Option-only strategies always force asset_class = 'option'
+const OPTION_STRATEGIES = new Set(['iron_condor', 'covered_call', 'bull_call_spread'])
+
 const STRATEGY_TYPES = ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb']
 const TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d']
 
@@ -362,9 +381,17 @@ export default function Strategies() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-gray-500 block mb-1">Strategy Type</label>
-                  <select value={form.strategy_type} onChange={e => setForm(f => ({ ...f, strategy_type: e.target.value }))}
+                  <select value={form.strategy_type} onChange={e => {
+                    const st = e.target.value
+                    setForm(f => ({
+                      ...f,
+                      strategy_type: st,
+                      // Force asset_class to 'option' for options strategies
+                      asset_class: OPTION_STRATEGIES.has(st) ? 'option' : BROKER_ASSET_CLASS[f.broker] ?? f.asset_class,
+                    }))
+                  }}
                     className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
-                    {STRATEGY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    {(BROKER_STRATEGIES[form.broker] ?? STRATEGY_TYPES).map(t => <option key={t} value={t}>{t}</option>)}
                   </select>
                 </div>
                 <div>
@@ -388,7 +415,19 @@ export default function Strategies() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-gray-500 block mb-1">Broker</label>
-                  <select value={form.broker} onChange={e => setForm(f => ({ ...f, broker: e.target.value }))}
+                  <select value={form.broker} onChange={e => {
+                    const broker = e.target.value
+                    const validStrats = BROKER_STRATEGIES[broker] ?? STRATEGY_TYPES
+                    const newStratType = validStrats.includes(form.strategy_type)
+                      ? form.strategy_type
+                      : validStrats[0]
+                    setForm(f => ({
+                      ...f,
+                      broker,
+                      asset_class: OPTION_STRATEGIES.has(newStratType) ? 'option' : BROKER_ASSET_CLASS[broker] ?? f.asset_class,
+                      strategy_type: newStratType,
+                    }))
+                  }}
                     className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
                     {BROKERS.map(b => <option key={b} value={b}>{b}</option>)}
                   </select>

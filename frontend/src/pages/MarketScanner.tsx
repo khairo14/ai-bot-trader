@@ -21,8 +21,16 @@ interface Watchlists {
   [key: string]: string[]
 }
 
+// Strategies available per broker — mirrors backend BROKER_STRATEGIES in scanner.py
+const BROKER_STRATEGIES: Record<string, string[]> = {
+  binance: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
+  alpaca:  ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
+  ibkr:    ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb',
+             'iron_condor', 'covered_call', 'bull_call_spread'],
+}
+
 // Hardcoded fallback — matches STRATEGY_REGISTRY in signal_engine.py
-const DEFAULT_STRATEGIES = ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb']
+const DEFAULT_STRATEGIES = BROKER_STRATEGIES.binance
 
 const BROKERS = [
   { value: 'binance', label: 'Binance (Crypto)' },
@@ -76,7 +84,7 @@ const fmtPrice = (n: number | null) =>
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function MarketScanner() {
-  const [strategies, setStrategies] = useState<string[]>(DEFAULT_STRATEGIES)
+  const [allStrategies, setAllStrategies] = useState<string[]>(DEFAULT_STRATEGIES)
   const [watchlists, setWatchlists] = useState<Watchlists>({})
   const [form, setForm] = useState({
     strategy: 'momentum_breakout',
@@ -92,6 +100,10 @@ export default function MarketScanner() {
   const [expandedRow, setExpandedRow] = useState<string | null>(null)
   const [filterSignal, setFilterSignal] = useState<string>('all')
 
+  // Strategies filtered to those valid for the current broker
+  const availableStrategies = (BROKER_STRATEGIES[form.broker] ?? allStrategies)
+    .filter(s => allStrategies.includes(s))
+
   // Load strategies + watchlists on mount
   useEffect(() => {
     Promise.allSettled([
@@ -99,18 +111,20 @@ export default function MarketScanner() {
       axios.get('/api/scanner/watchlists'),
     ]).then(([strRes, wlRes]) => {
       if (strRes.status === 'fulfilled' && strRes.value.data.strategies?.length)
-        setStrategies(strRes.value.data.strategies)
+        setAllStrategies(strRes.value.data.strategies)
       if (wlRes.status === 'fulfilled')  setWatchlists(wlRes.value.data.watchlists ?? {})
     })
   }, [])
 
   const set = (k: keyof typeof form, v: string) => setForm(f => ({ ...f, [k]: v }))
 
-  // When broker changes, reset watchlist to first valid one for that broker
+  // When broker changes, reset watchlist + strategy to first valid for that broker
   const setBroker = (broker: string) => {
     const validWatchlists = BROKER_WATCHLISTS[broker] ?? Object.keys(watchlists)
-    const firstValid = validWatchlists[0] ?? 'custom'
-    setForm(f => ({ ...f, broker, watchlist: firstValid }))
+    const firstWl = validWatchlists[0] ?? 'custom'
+    const validStrats = (BROKER_STRATEGIES[broker] ?? allStrategies).filter(s => allStrategies.includes(s))
+    const firstStrat = validStrats[0] ?? allStrategies[0] ?? 'hybrid_macd_rsi'
+    setForm(f => ({ ...f, broker, watchlist: firstWl, strategy: firstStrat }))
   }
 
   // Watchlist keys valid for currently selected broker
@@ -198,7 +212,7 @@ export default function MarketScanner() {
                 onChange={e => set('strategy', e.target.value)}
                 className="w-full appearance-none bg-dark-700 border border-dark-500 text-white text-sm rounded-lg px-3 py-2 pr-8 focus:outline-none focus:border-brand-500"
               >
-                {strategies.map(s => (
+                {availableStrategies.map(s => (
                   <option key={s} value={s}>{s}</option>
                 ))}
               </select>

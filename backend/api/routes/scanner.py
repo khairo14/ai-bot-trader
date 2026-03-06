@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import List, Optional
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from loguru import logger
 
@@ -40,6 +40,14 @@ BROKER_WATCHLISTS: dict[str, list[str]] = {
     "binance": ["crypto_major", "crypto_mid"],
     "alpaca":  ["us_stocks", "us_stocks_mid"],
     "ibkr":    ["us_stocks", "us_stocks_mid"],
+}
+
+# Strategies available per broker — options strategies require IBKR only
+BROKER_STRATEGIES: dict[str, list[str]] = {
+    "binance": ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb"],
+    "alpaca":  ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb"],
+    "ibkr":    ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb",
+                 "iron_condor", "covered_call", "bull_call_spread"],
 }
 
 # ─── Request / response models ────────────────────────────────────────────────
@@ -122,10 +130,13 @@ async def get_watchlists(broker: Optional[str] = None):
 
 
 @router.get("/strategies")
-async def get_strategies():
-    """Return available strategy names for the scanner."""
+async def get_strategies(broker: Optional[str] = None):
+    """Return strategy names valid for `broker`, or all strategies if broker omitted."""
     from core.engine.signal_engine import STRATEGY_REGISTRY
-    return {"strategies": list(STRATEGY_REGISTRY.keys())}
+    all_strats = list(STRATEGY_REGISTRY.keys())
+    if broker and broker in BROKER_STRATEGIES:
+        return {"strategies": [s for s in all_strats if s in BROKER_STRATEGIES[broker]]}
+    return {"strategies": all_strats}
 
 
 @router.post("/scan")
@@ -138,6 +149,15 @@ async def scan_market(body: ScanRequest):
     signal='ERROR' so the user can see which symbols failed.
     """
     from core.engine.signal_engine import SignalEngine
+
+    # Validate strategy is compatible with broker
+    valid_for_broker = BROKER_STRATEGIES.get(body.broker, list(BROKER_STRATEGIES.get("binance", [])))
+    if body.strategy not in valid_for_broker:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Strategy '{body.strategy}' is not compatible with broker '{body.broker}'. "
+                   f"Valid strategies: {', '.join(valid_for_broker)}",
+        )
 
     # Resolve symbol list
     symbols: list[str] = body.symbols or []
