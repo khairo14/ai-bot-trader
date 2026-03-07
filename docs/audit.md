@@ -55,7 +55,7 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 | F-016 | ⏳ | `api/routes/forward_test.py` | `days_running` strips tzinfo unsafely — wrong counter displayed. |
 | F-017 | ⏳ | `api/routes/analytics.py` | Analytics summary loads ALL resolved `TradeOutcome` rows with no LIMIT — memory blowup over time. |
 | F-019 | ⏳ | `api/routes/analytics.py` | Win/loss uses `ml_label == 1` instead of `outcome == WIN` — overstates win rate. |
-| F-020 | ⏳ | `api/routes/backtest.py` | `BacktestResult(**result)` spreads raw dict directly into ORM with no validation. (Pending) |
+| F-020 | ✅ | `api/routes/backtest.py` | `BacktestResult(**result)` spreads raw dict directly into ORM with no validation. |
 | F-022 | ⏳ | `api/routes/portfolio.py` | Today's P&L uses `date.today()` (local TZ) vs UTC-stored trades — off-by-hours on non-UTC servers. |
 | F-024 | ✅ | `api/routes/strategies.py` | `asset_class` / `broker` stored as raw strings, not enum-validated — runtime `ValueError` during execution. |
 | F-025 | ✅ | `api/routes/charts.py` | Charts endpoint can issue 5 sequential broker calls per request; no auth-level rate limit. |

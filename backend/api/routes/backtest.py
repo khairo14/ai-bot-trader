@@ -104,7 +104,16 @@ async def run_backtest(request: BacktestRequest, db: AsyncSession = Depends(get_
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
 
-    db_result = BacktestResult(**result)
+    # F-020: whitelist known model fields to avoid spreading unknown/extra keys
+    # from the engine directly into the ORM constructor.
+    _ALLOWED = {
+        "strategy_name", "symbol", "timeframe", "start_date", "end_date",
+        "initial_capital", "final_capital", "total_return_pct",
+        "annualized_return_pct", "max_drawdown_pct", "sharpe_ratio",
+        "sortino_ratio", "profit_factor", "win_rate_pct", "total_trades",
+        "avg_win", "avg_loss", "rr_ratio", "trades_detail", "parameters",
+    }
+    db_result = BacktestResult(**{k: v for k, v in result.items() if k in _ALLOWED})
     db.add(db_result)
     await db.commit()
     await db.refresh(db_result)
