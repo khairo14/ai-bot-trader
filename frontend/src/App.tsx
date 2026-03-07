@@ -25,6 +25,8 @@ import Login from './pages/Login'
 import axios from 'axios'
 
 import { isAuthenticated, clearAuth, getUsername } from './lib/auth'
+
+const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/strategies', label: 'Strategies', icon: Layers },
   { to: '/strategy-library', label: 'Library', icon: BookOpen },
