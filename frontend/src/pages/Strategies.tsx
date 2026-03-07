@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import { SkeletonCard } from '../components/Skeleton'
+import { useStrategyRegistry } from '../hooks/useStrategyRegistry'
 
 interface Strategy {
   id: number
@@ -23,14 +24,6 @@ const ASSET_CLASSES = ['crypto', 'stock', 'forex', 'option']
 // Regex to detect a forex pair like EUR/USD, GBP/JPY, etc.
 const FX_SYMBOL_RE = /^[A-Z]{3}\/[A-Z]{3}$/
 
-// Strategies valid per broker — mirrors backend BROKER_STRATEGIES in scanner.py
-const BROKER_STRATEGIES: Record<string, string[]> = {
-  binance: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
-  alpaca:  ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
-  ibkr:    ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb',
-             'iron_condor', 'covered_call', 'bull_call_spread'],
-}
-
 // Default asset class per broker (IBKR can be stock or forex — resolved by symbol)
 const BROKER_ASSET_CLASS: Record<string, string> = {
   binance: 'crypto',
@@ -47,7 +40,6 @@ function deriveAssetClass(broker: string, symbol: string, currentStratType: stri
 // Option-only strategies always force asset_class = 'option'
 const OPTION_STRATEGIES = new Set(['iron_condor', 'covered_call', 'bull_call_spread'])
 
-const STRATEGY_TYPES = ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb']
 const TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d']
 
 const ModeBadge = ({ mode }: { mode: string }) => {
@@ -77,6 +69,7 @@ const defaultForm = {
 }
 
 export default function Strategies() {
+  const { brokerStrategies, allStrategies: allStrategyTypes } = useStrategyRegistry()
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [loadingStrategies, setLoadingStrategies] = useState(true)
   const [showModal, setShowModal] = useState(false)
@@ -406,7 +399,7 @@ export default function Strategies() {
                     }))
                   }}
                     className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500">
-                    {(BROKER_STRATEGIES[form.broker] ?? STRATEGY_TYPES).map(t => <option key={t} value={t}>{t}</option>)}
+                    {(brokerStrategies[form.broker] ?? allStrategyTypes).map(t => <option key={t} value={t}>{t}</option>)}
                   </select>
                 </div>
                 <div>
@@ -433,7 +426,7 @@ export default function Strategies() {
                   <label className="text-xs text-gray-500 block mb-1">Broker</label>
                   <select value={form.broker} onChange={e => {
                     const broker = e.target.value
-                    const validStrats = BROKER_STRATEGIES[broker] ?? STRATEGY_TYPES
+                    const validStrats = brokerStrategies[broker] ?? allStrategyTypes
                     const newStratType = validStrats.includes(form.strategy_type)
                       ? form.strategy_type
                       : validStrats[0]

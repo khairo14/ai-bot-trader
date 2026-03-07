@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import { GitBranch, RefreshCw, TrendingUp, TrendingDown, Minus, AlertTriangle } from 'lucide-react'
+import { useStrategyRegistry } from '../hooks/useStrategyRegistry'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface TFResult {
@@ -121,7 +122,6 @@ function ConfluenceCard({ data }: { data: ConfluenceData }) {
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
-const STRATEGY_TYPES = ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb']
 const BROKERS = ['binance', 'alpaca', 'ibkr']
 const TF_OPTIONS = ['5m', '15m', '1h', '4h', '1d']
 const DEFAULT_SYMBOLS: Record<string, string> = {
@@ -131,9 +131,16 @@ const DEFAULT_SYMBOLS: Record<string, string> = {
 }
 
 export default function MultiTimeframe() {
+  const { brokerStrategies, allStrategies } = useStrategyRegistry()
   const [broker, setBroker]             = useState('binance')
   const [symbol, setSymbol]             = useState('BTC/USDT')
   const [strategyType, setStrategyType] = useState('hybrid_macd_rsi')
+
+  // When broker changes, ensure selected strategy is still valid for that broker
+  useEffect(() => {
+    const valid = brokerStrategies[broker] ?? allStrategies
+    if (!valid.includes(strategyType)) setStrategyType(valid[0] ?? strategyType)
+  }, [broker]) // eslint-disable-line react-hooks/exhaustive-deps
   const [timeframes, setTimeframes]     = useState<string[]>(['1h', '4h', '1d'])
   const [symbols, setSymbols]           = useState('BTC/USDT')   // batch input
   const [mode, setMode]                 = useState<'single' | 'batch'>('single')
@@ -218,7 +225,7 @@ export default function MultiTimeframe() {
               onChange={e => setStrategyType(e.target.value)}
               className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
             >
-              {STRATEGY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              {(brokerStrategies[broker] ?? allStrategies).map(t => <option key={t} value={t}>{t}</option>)}
             </select>
           </div>
 

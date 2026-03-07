@@ -3,6 +3,7 @@ import { ScanSearch, Play, Loader2, AlertTriangle, ChevronDown } from 'lucide-re
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import MarketClock from '../components/MarketClock'
+import { useStrategyRegistry } from '../hooks/useStrategyRegistry'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,17 +22,6 @@ interface ScanResult {
 interface Watchlists {
   [key: string]: string[]
 }
-
-// Strategies available per broker — mirrors backend BROKER_STRATEGIES in scanner.py
-const BROKER_STRATEGIES: Record<string, string[]> = {
-  binance: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
-  alpaca:  ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
-  ibkr:    ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb',
-             'iron_condor', 'covered_call', 'bull_call_spread'],
-}
-
-// Hardcoded fallback — matches STRATEGY_REGISTRY in signal_engine.py
-const DEFAULT_STRATEGIES = BROKER_STRATEGIES.binance
 
 const BROKERS = [
   { value: 'binance', label: 'Binance (Crypto)' },
@@ -87,7 +77,7 @@ const fmtPrice = (n: number | null) =>
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function MarketScanner() {
-  const [allStrategies, setAllStrategies] = useState<string[]>(DEFAULT_STRATEGIES)
+  const { brokerStrategies, allStrategies } = useStrategyRegistry()
   const [watchlists, setWatchlists] = useState<Watchlists>({})
   const [form, setForm] = useState({
     strategy: 'momentum_breakout',
@@ -104,19 +94,13 @@ export default function MarketScanner() {
   const [filterSignal, setFilterSignal] = useState<string>('all')
 
   // Strategies filtered to those valid for the current broker
-  const availableStrategies = (BROKER_STRATEGIES[form.broker] ?? allStrategies)
-    .filter(s => allStrategies.includes(s))
+  const availableStrategies = brokerStrategies[form.broker] ?? allStrategies
 
-  // Load strategies + watchlists on mount
+  // Load watchlists on mount (strategy list comes from useStrategyRegistry)
   useEffect(() => {
-    Promise.allSettled([
-      axios.get('/api/scanner/strategies'),
-      axios.get('/api/scanner/watchlists'),
-    ]).then(([strRes, wlRes]) => {
-      if (strRes.status === 'fulfilled' && strRes.value.data.strategies?.length)
-        setAllStrategies(strRes.value.data.strategies)
-      if (wlRes.status === 'fulfilled')  setWatchlists(wlRes.value.data.watchlists ?? {})
-    })
+    axios.get('/api/scanner/watchlists')
+      .then(res => setWatchlists(res.data.watchlists ?? {}))
+      .catch(() => {})
   }, [])
 
   const set = (k: keyof typeof form, v: string) => setForm(f => ({ ...f, [k]: v }))
@@ -125,8 +109,8 @@ export default function MarketScanner() {
   const setBroker = (broker: string) => {
     const validWatchlists = BROKER_WATCHLISTS[broker] ?? Object.keys(watchlists)
     const firstWl = validWatchlists[0] ?? 'custom'
-    const validStrats = (BROKER_STRATEGIES[broker] ?? allStrategies).filter(s => allStrategies.includes(s))
-    const firstStrat = validStrats[0] ?? allStrategies[0] ?? 'hybrid_macd_rsi'
+    const validStrats = brokerStrategies[broker] ?? allStrategies
+    const firstStrat = validStrats[0] ?? 'hybrid_macd_rsi'
     setForm(f => ({ ...f, broker, watchlist: firstWl, strategy: firstStrat }))
   }
 

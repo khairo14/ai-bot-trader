@@ -173,6 +173,32 @@ async def seed_default_strategies(db: AsyncSession = Depends(get_db), _: object 
     return {"created": created, "skipped": skipped, "total_templates": len(_SEED_TEMPLATES)}
 
 
+# ── Strategy type registry ────────────────────────────────────────────────────
+# Must be declared before /{strategy_id} routes so it is not swallowed as a
+# dynamic path parameter.
+
+@router.get("/registry")
+async def strategy_registry():
+    """
+    Return the available algorithm types grouped by broker.
+    Derived live from STRATEGY_REGISTRY — automatically includes any newly added
+    strategy without touching the frontend hardcoded lists.
+    """
+    from core.engine.signal_engine import STRATEGY_REGISTRY, _OPTIONS_STRATEGIES
+    all_strats: list[str] = list(STRATEGY_REGISTRY.keys())
+    options:    list[str] = [s for s in all_strats if s in _OPTIONS_STRATEGIES]
+    non_options: list[str] = [s for s in all_strats if s not in _OPTIONS_STRATEGIES]
+    return {
+        "by_broker": {
+            "binance": non_options,
+            "alpaca":  non_options,
+            "ibkr":    all_strats,
+        },
+        "all": all_strats,
+        "options_strategies": options,
+    }
+
+
 # ── Per-strategy CRUD (must come AFTER /seed so it doesn't shadow it) ───────
 
 @router.patch("/{strategy_id}")

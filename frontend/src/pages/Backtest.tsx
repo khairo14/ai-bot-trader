@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { FlaskConical, Play, AlertTriangle, Download, BookOpen, TrendingUp, History, Eye, X, ChevronUp, ChevronDown, HelpCircle } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
+import { useStrategyRegistry } from '../hooks/useStrategyRegistry'
 
 interface SavedStrategy {
   id: number
@@ -65,15 +66,8 @@ const MetricRow = ({
   </div>
 )
 
-// Strategies valid per broker — mirrors backend BROKER_STRATEGIES in scanner.py
-const BROKER_STRATEGIES: Record<string, string[]> = {
-  binance: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
-  alpaca:  ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
-  ibkr:    ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb',
-             'iron_condor', 'covered_call', 'bull_call_spread'],
-}
-
 export default function Backtest() {
+  const { brokerStrategies } = useStrategyRegistry()
   const [savedStrategies, setSavedStrategies] = useState<SavedStrategy[]>([])
   const [form, setForm] = useState({
     strategy_name: 'hybrid_macd_rsi',
@@ -88,7 +82,7 @@ export default function Backtest() {
   })
 
   // Strategies available for the currently selected broker
-  const availableStrategies = BROKER_STRATEGIES[form.broker] ?? BROKER_STRATEGIES.binance
+  const availableStrategies = brokerStrategies[form.broker] ?? brokerStrategies['binance'] ?? []
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [backtestId, setBacktestId] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
@@ -227,7 +221,7 @@ export default function Backtest() {
               value={form.broker}
               onChange={e => {
                 const broker = e.target.value
-                const strats = BROKER_STRATEGIES[broker] ?? BROKER_STRATEGIES.binance
+                const strats = brokerStrategies[broker] ?? brokerStrategies['binance'] ?? []
                 setForm(f => ({
                   ...f,
                   broker,
