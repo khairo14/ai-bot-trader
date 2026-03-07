@@ -194,8 +194,20 @@ class TestForwardEngine(unittest.IsolatedAsyncioTestCase):
         from core.engine.forward_engine import ForwardEngine
         engine = ForwardEngine()
         engine._initialized = True
-        engine._paper_balance = 10_000.0
+        # _paper_balance is dict[str, float] (keyed by broker name) since F-028
+        engine._paper_balance = {"binance": 10_000.0}
         return engine
+
+    def _make_mock_broker(self):
+        """Return an AsyncMock broker that accepts all calls without hitting a real API."""
+        b = AsyncMock()
+        b.connect = AsyncMock()
+        b.get_balance = AsyncMock(return_value=MagicMock(available=10_000.0))
+        b.get_positions = AsyncMock(return_value=[])
+        _order_result = MagicMock()
+        _order_result.order_id = "test_paper_order_001"
+        b.place_order = AsyncMock(return_value=_order_result)
+        return b
 
     async def test_hold_signal_returns_none(self):
         engine = self._make_engine()
@@ -212,7 +224,8 @@ class TestForwardEngine(unittest.IsolatedAsyncioTestCase):
     async def test_full_auto_paper_creates_trade(self):
         engine = self._make_engine()
         sig = _make_signal("BUY", entry=50000, sl=49000, tp=53000)
-        result = await engine.process_signal(sig, "full_auto", is_paper=True, db_session=None)
+        with patch("core.engine.forward_engine.get_broker", return_value=self._make_mock_broker()):
+            result = await engine.process_signal(sig, "full_auto", is_paper=True, db_session=None)
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.status.value if hasattr(result.status, "value") else result.status, "open")
@@ -223,14 +236,16 @@ class TestForwardEngine(unittest.IsolatedAsyncioTestCase):
         engine = self._make_engine()
         sig = _make_signal("BUY", entry=50000, sl=49000, tp=53000)
         # Without multiplier
-        r1 = await engine.process_signal(sig, "full_auto", is_paper=True, db_session=None)
+        with patch("core.engine.forward_engine.get_broker", return_value=self._make_mock_broker()):
+            r1 = await engine.process_signal(sig, "full_auto", is_paper=True, db_session=None)
         self.assertIsNotNone(r1)
         assert r1 is not None
         qty1 = r1.quantity
 
         engine2 = self._make_engine()
-        r2 = await engine2.process_signal(sig, "full_auto", is_paper=True, db_session=None,
-                                           position_size_multiplier=2.0)
+        with patch("core.engine.forward_engine.get_broker", return_value=self._make_mock_broker()):
+            r2 = await engine2.process_signal(sig, "full_auto", is_paper=True, db_session=None,
+                                               position_size_multiplier=2.0)
         self.assertIsNotNone(r2)
         assert r2 is not None
         qty2 = r2.quantity
@@ -337,10 +352,13 @@ class TestForwardEngine(unittest.IsolatedAsyncioTestCase):
             result = await engine.process_signal(
                 sig, "full_auto", is_paper=False, db_session=mock_db
             )
-        self.assertIsNone(result)
+        # process_signal returns the REJECTED Trade (not None) so callers can set signal_id
+        self.assertIsNotNone(result)
+        assert result is not None
+        from db.models import OrderStatus
+        self.assertEqual(result.status, OrderStatus.REJECTED)
         mock_db.add.assert_called_once()
         saved_trade = mock_db.add.call_args[0][0]
-        from db.models import OrderStatus
         self.assertEqual(saved_trade.status, OrderStatus.REJECTED)
 
 
@@ -582,21 +600,27 @@ class TestForwardEngineInitialize(unittest.IsolatedAsyncioTestCase):
 
         mock_session = AsyncMock()
 
-        # open trades query
+        # Query 1: open trades
         open_result = MagicMock()
         open_result.scalars.return_value.all.return_value = [open_trade]
-        # pnl sum query
+        # Query 2: distinct brokers — initialize() now does per-broker balance (F-028)
+        broker_result = MagicMock()
+        broker_result.all.return_value = [("binance",)]
+        # Query 3: per-broker realised PnL sum
         pnl_result = MagicMock()
         pnl_result.scalar_one.return_value = 500.0
 
-        mock_session.execute = AsyncMock(side_effect=[open_result, pnl_result])
+        mock_session.execute = AsyncMock(side_effect=[open_result, broker_result, pnl_result])
 
         engine = ForwardEngine()
         await engine.initialize(mock_session)
 
         self.assertEqual(len(engine._paper_positions), 1)
         self.assertIn("BTC/USDT", engine._paper_positions)
-        self.assertAlmostEqual(engine._paper_balance, PAPER_INITIAL_CAPITAL + 500.0)
+        # _paper_balance is now dict[str, float] keyed by broker name (F-028)
+        self.assertIsInstance(engine._paper_balance, dict)
+        self.assertIn("binance", engine._paper_balance)
+        self.assertAlmostEqual(engine._paper_balance["binance"], PAPER_INITIAL_CAPITAL + 500.0)
         self.assertTrue(engine._initialized)
 
 

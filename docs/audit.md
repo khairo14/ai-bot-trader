@@ -52,18 +52,18 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 | # | Status | Location | Issue |
 |---|--------|----------|-------|
 | F-010 | ✅ | `celery_app.py` | Celery `run-signals-every-5m` has no timeframe-awareness. A 1d strategy gets evaluated 288×/day, no dedup. |
-| F-016 | ⏳ | `api/routes/forward_test.py` | `days_running` strips tzinfo unsafely — wrong counter displayed. |
-| F-017 | ⏳ | `api/routes/analytics.py` | Analytics summary loads ALL resolved `TradeOutcome` rows with no LIMIT — memory blowup over time. |
-| F-019 | ⏳ | `api/routes/analytics.py` | Win/loss uses `ml_label == 1` instead of `outcome == WIN` — overstates win rate. |
+| F-016 | ✅ | `api/routes/forward_test.py` | `days_running` strips tzinfo unsafely — wrong counter displayed. |
+| F-017 | ✅ | `api/routes/analytics.py` | Analytics summary loads ALL resolved `TradeOutcome` rows with no LIMIT — memory blowup over time. |
+| F-019 | ✅ | `api/routes/analytics.py` | Win/loss uses `ml_label == 1` instead of `outcome == WIN` — overstates win rate. |
 | F-020 | ✅ | `api/routes/backtest.py` | `BacktestResult(**result)` spreads raw dict directly into ORM with no validation. |
-| F-022 | ⏳ | `api/routes/portfolio.py` | Today's P&L uses `date.today()` (local TZ) vs UTC-stored trades — off-by-hours on non-UTC servers. |
+| F-022 | ✅ | `api/routes/portfolio.py` | Today's P&L uses `date.today()` (local TZ) vs UTC-stored trades — off-by-hours on non-UTC servers. |
 | F-024 | ✅ | `api/routes/strategies.py` | `asset_class` / `broker` stored as raw strings, not enum-validated — runtime `ValueError` during execution. |
 | F-025 | ✅ | `api/routes/charts.py` | Charts endpoint can issue 5 sequential broker calls per request; no auth-level rate limit. |
 
 ### Engines
 | # | Status | Location | Issue |
 |---|--------|----------|-------|
-| F-027 | ⏳ | `core/engine/forward_engine.py` | `ForwardEngine.emergency_stop()` has no `is_paper` filter — closes both paper AND live trades. |
+| F-027 | ✅ | `core/engine/forward_engine.py` | `ForwardEngine.emergency_stop()` has no `is_paper` filter — closes both paper AND live trades. |
 | F-028 | ✅ | `core/engine/forward_engine.py` | Paper balance aggregates P&L from ALL brokers — cross-broker contamination of risk sizing. |
 
 ### Core
@@ -78,7 +78,7 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 | # | Status | Location | Issue |
 |---|--------|----------|-------|
 | F-039 | ✅ | `tasks/signal_runner.py` | Celery `signal_runner` has no deduplication. Multiple identical signals per candle persist and trigger duplicate orders. |
-| F-041 | ⏳ | `config.py` | `api_internal_url` defaults to `127.0.0.1` — Celery worker can't reach FastAPI inside Docker; ML cache never flushes. |
+| F-041 | ✅ | `config.py` | `api_internal_url` defaults to `127.0.0.1` — Celery worker can't reach FastAPI inside Docker; ML cache never flushes. |
 
 ### Brokers
 | # | Status | Location | Issue |
