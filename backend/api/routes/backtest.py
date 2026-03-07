@@ -14,6 +14,33 @@ from db.models import BacktestResult
 router = APIRouter()
 
 
+def _backtest_dict(r: BacktestResult) -> dict:
+    return {
+        "id": r.id,
+        "strategy_name": r.strategy_name,
+        "symbol": r.symbol,
+        "timeframe": r.timeframe,
+        "start_date": r.start_date.isoformat() if r.start_date else None,
+        "end_date": r.end_date.isoformat() if r.end_date else None,
+        "initial_capital": r.initial_capital,
+        "final_capital": r.final_capital,
+        "total_return_pct": r.total_return_pct,
+        "annualized_return_pct": r.annualized_return_pct,
+        "max_drawdown_pct": r.max_drawdown_pct,
+        "sharpe_ratio": r.sharpe_ratio,
+        "sortino_ratio": r.sortino_ratio,
+        "profit_factor": r.profit_factor,
+        "win_rate_pct": r.win_rate_pct,
+        "total_trades": r.total_trades,
+        "avg_win": r.avg_win,
+        "avg_loss": r.avg_loss,
+        "rr_ratio": r.rr_ratio,
+        "trades_detail": r.trades_detail,
+        "parameters": r.parameters,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
 class BacktestRequest(BaseModel):
     strategy_name: str
     symbol: str
@@ -126,7 +153,7 @@ async def list_results(db: AsyncSession = Depends(get_db)):
     """List all backtest results."""
     query = select(BacktestResult).order_by(desc(BacktestResult.created_at)).limit(100)
     result = await db.execute(query)
-    return {"results": result.scalars().all()}
+    return {"results": [_backtest_dict(r) for r in result.scalars().all()]}
 
 
 @router.get("/results/{result_id}")
@@ -138,7 +165,7 @@ async def get_result(result_id: int, db: AsyncSession = Depends(get_db)):
     item = result.scalar_one_or_none()
     if not item:
         raise HTTPException(status_code=404, detail="Backtest result not found")
-    return item
+    return _backtest_dict(item)
 
 
 @router.get("/results/{result_id}/export")

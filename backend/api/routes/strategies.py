@@ -12,6 +12,22 @@ from core.auth import get_current_user, require_admin, audit
 router = APIRouter()
 
 
+def _strategy_dict(s: Strategy) -> dict:
+    return {
+        "id": s.id,
+        "name": s.name,
+        "description": s.description,
+        "asset_class": s.asset_class.value if hasattr(s.asset_class, "value") else s.asset_class,
+        "broker": s.broker.value if hasattr(s.broker, "value") else s.broker,
+        "execution_mode": s.execution_mode.value if hasattr(s.execution_mode, "value") else s.execution_mode,
+        "is_active": s.is_active,
+        "is_paper": s.is_paper,
+        "parameters": s.parameters,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
 def _validate_enum_fields(broker: Optional[str], asset_class: Optional[str], execution_mode: Optional[str]) -> None:
     """Raise HTTP 422 if any field value is not a valid enum member."""
     if broker is not None:
@@ -59,7 +75,7 @@ async def list_strategies(db: AsyncSession = Depends(get_db)):
     """List all configured strategies."""
     result = await db.execute(select(Strategy))
     strategies = result.scalars().all()
-    return {"strategies": strategies}
+    return {"strategies": [_strategy_dict(s) for s in strategies]}
 
 
 @router.post("/")
@@ -79,7 +95,7 @@ async def create_strategy(payload: StrategyCreate, db: AsyncSession = Depends(ge
     db.add(strategy)
     await db.commit()
     await db.refresh(strategy)
-    return strategy
+    return _strategy_dict(strategy)
 
 
 # ── Default seed templates ──────────────────────────────────────────────────
@@ -194,7 +210,7 @@ async def update_strategy(
 
     await db.commit()
     await db.refresh(strategy)
-    return strategy
+    return _strategy_dict(strategy)
 
 
 @router.delete("/{strategy_id}")
