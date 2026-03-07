@@ -41,6 +41,7 @@ interface PortfolioSummary {
   max_positions: number
   today_pnl: number
   circuit_breaker_pct: number
+  today_pnl_by_broker: Record<string, number>
 }
 
 function formatBalance(total: number, currency: string): string {
@@ -249,6 +250,14 @@ export default function Dashboard() {
                   ? `${formatBalance(b.available, b.currency)} ${AVAILABLE_LABEL[b.broker] ?? 'available'}`
                   : 'Offline — not configured'}
               </p>
+              {b.connected && portfolio?.today_pnl_by_broker && (() => {
+                const bpnl = portfolio.today_pnl_by_broker[b.broker] ?? 0
+                return (
+                  <p className={`text-xs font-medium mt-1 ${bpnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {formatPnl(bpnl)} today
+                  </p>
+                )
+              })()}
             </div>
           )
         })}

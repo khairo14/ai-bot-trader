@@ -52,6 +52,9 @@ class RiskManager:
         # F-032: per-strategy state — keyed by strategy_name
         # {"my_strat": {"consecutive_losses": 2, "circuit_breaker_active": False, "circuit_breaker_date": "2026-03-07"}}
         self._per_strategy: dict[str, dict] = {}
+        # Per-broker state — keyed by broker name (binance/alpaca/ibkr)
+        # {"binance": {"consecutive_losses": 1, "circuit_breaker_active": False, "circuit_breaker_date": "2026-03-07"}}
+        self._per_broker: dict[str, dict] = {}
         self._load_state()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -84,10 +87,22 @@ class RiskManager:
                     "circuit_breaker_active": cb_active,
                     "circuit_breaker_date": s.get("circuit_breaker_date"),
                 }
+            # Per-broker state — auto-reset CB if set on a previous day
+            raw_per_broker = state.get("per_broker", {})
+            for broker_name, bs in raw_per_broker.items():
+                cb_active = bs.get("circuit_breaker_active", False)
+                if cb_active and bs.get("circuit_breaker_date") != today:
+                    cb_active = False  # new day → reset
+                self._per_broker[broker_name] = {
+                    "consecutive_losses": bs.get("consecutive_losses", 0),
+                    "circuit_breaker_active": cb_active,
+                    "circuit_breaker_date": bs.get("circuit_breaker_date"),
+                }
             logger.info(
                 f"[RiskManager] State loaded — circuit_breaker={self._circuit_breaker_active} "
                 f"consecutive_losses={self.consecutive_losses} "
-                f"per_strategy_count={len(self._per_strategy)}"
+                f"per_strategy_count={len(self._per_strategy)} "
+                f"per_broker_count={len(self._per_broker)}"
             )
         except Exception as exc:
             logger.warning(f"[RiskManager] Could not load risk state: {exc}")
@@ -106,6 +121,7 @@ class RiskManager:
                     "circuit_breaker_date": str(date.today()),
                     "consecutive_losses": self.consecutive_losses,
                     "per_strategy": self._per_strategy,  # F-032
+                    "per_broker": self._per_broker,
                 }
             )
             # Write to a sibling temp file, then atomically rename
@@ -124,12 +140,41 @@ class RiskManager:
         open_positions_count: int,
         daily_pnl: float,
         asset_class_exposure: float = 0.0,
+        broker: str | None = None,
+        broker_settings: dict | None = None,
     ) -> RiskValidation:
         """
         Validate a signal before execution.
         Returns RiskValidation with approved=True/False and calculated position size.
+
+        broker_settings: dict fetched from the broker_risk_settings DB table.
+        Any None value in broker_settings falls back to the global config default.
         """
-        # ── F-032: Per-strategy circuit breaker (checked before portfolio-wide) ──
+        # ── Resolve effective risk parameters ─────────────────────────────────
+        # Per-broker DB overrides take precedence; NULL fields use global config.
+        bs = broker_settings or {}
+        _risk_per_trade    = (bs["risk_per_trade_pct"] / 100.0)    if bs.get("risk_per_trade_pct")          is not None else self.risk_per_trade_pct
+        _max_positions     = int(bs["max_open_positions"])          if bs.get("max_open_positions")          is not None else self.max_open_positions
+        _daily_cb_pct      = (bs["daily_circuit_breaker_pct"] / 100.0) if bs.get("daily_circuit_breaker_pct") is not None else self.daily_circuit_breaker_pct
+        _max_consec        = int(bs["max_consecutive_losses"])      if bs.get("max_consecutive_losses")     is not None else self.max_consecutive_losses
+        _max_asset_exp     = (bs["max_exposure_per_asset_pct"] / 100.0) if bs.get("max_exposure_per_asset_pct") is not None else self.max_exposure_per_asset_pct
+        _max_class_exp     = (bs["max_exposure_per_class_pct"] / 100.0) if bs.get("max_exposure_per_class_pct") is not None else self.max_exposure_per_class_pct
+
+        # ── Per-broker circuit breaker (checked first) ────────────────────────
+        if broker:
+            b_state = self._per_broker.get(broker, {})
+            if b_state.get("circuit_breaker_active", False):
+                return RiskValidation(
+                    approved=False,
+                    position_size=0, position_value=0, risk_amount=0, stop_distance=0,
+                    reason=(
+                        f"Per-broker circuit breaker active for '{broker}'. "
+                        f"Consecutive losses: {b_state.get('consecutive_losses', 0)}. "
+                        f"Reset required."
+                    ),
+                )
+
+        # ── F-032: Per-strategy circuit breaker ───────────────────────────────
         strategy_name = getattr(signal, "strategy_name", None)
         if strategy_name:
             s_state = self._per_strategy.get(strategy_name, {})
@@ -144,7 +189,7 @@ class RiskManager:
                     ),
                 )
 
-        # ── Level 4: Portfolio-wide circuit breaker ───────
+        # ── Level 4: Portfolio-wide circuit breaker ───────────────────────────
         if self._circuit_breaker_active:
             return RiskValidation(
                 approved=False,
@@ -152,14 +197,24 @@ class RiskManager:
                 reason="Daily circuit breaker is active. Reset required."
             )
 
+        # Trip portfolio-wide CB using broker-specific daily P&L threshold
         if account_balance > 0:
             daily_loss_pct = daily_pnl / account_balance
-            if daily_loss_pct <= -self.daily_circuit_breaker_pct:
+            if daily_loss_pct <= -_daily_cb_pct:
                 self._circuit_breaker_active = True
                 self._save_state()
+                # Also trip the per-broker CB so only this broker halts
+                if broker:
+                    b = self._per_broker.setdefault(
+                        broker,
+                        {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
+                    )
+                    b["circuit_breaker_active"] = True
+                    b["circuit_breaker_date"] = str(date.today())
+                    self._save_state()
                 logger.warning(
                     f"[RiskManager] CIRCUIT BREAKER TRIGGERED — "
-                    f"daily loss: {daily_loss_pct*100:.2f}%"
+                    f"broker={broker or 'global'} daily loss: {daily_loss_pct*100:.2f}%"
                 )
                 return RiskValidation(
                     approved=False,
@@ -167,34 +222,34 @@ class RiskManager:
                     reason=f"Circuit breaker triggered: daily loss {daily_loss_pct*100:.2f}%"
                 )
 
-        # ── Level 2: Consecutive losses ──────────────────
-        if self.consecutive_losses >= self.max_consecutive_losses:
+        # ── Level 2: Consecutive losses (effective threshold) ─────────────────
+        if self.consecutive_losses >= _max_consec:
             return RiskValidation(
                 approved=False,
                 position_size=0, position_value=0, risk_amount=0, stop_distance=0,
                 reason=(
                     f"Consecutive loss limit reached ({self.consecutive_losses}/"
-                    f"{self.max_consecutive_losses}). Manual reset required."
+                    f"{_max_consec}). Manual reset required."
                 ),
             )
 
-        # ── Level 3: Open positions limit ────────────────
-        if open_positions_count >= self.max_open_positions:
+        # ── Level 3: Open positions limit (effective threshold) ───────────────
+        if open_positions_count >= _max_positions:
             return RiskValidation(
                 approved=False,
                 position_size=0, position_value=0, risk_amount=0, stop_distance=0,
-                reason=f"Max open positions ({self.max_open_positions}) reached."
+                reason=f"Max open positions ({_max_positions}) reached."
             )
 
-        # ── Level 3: Asset class exposure ────────────────
-        if asset_class_exposure / (account_balance + 1e-10) >= self.max_exposure_per_class_pct:
+        # ── Level 3: Asset class exposure (effective threshold) ───────────────
+        if asset_class_exposure / (account_balance + 1e-10) >= _max_class_exp:
             return RiskValidation(
                 approved=False,
                 position_size=0, position_value=0, risk_amount=0, stop_distance=0,
                 reason=f"Max exposure for {signal.asset_class} reached."
             )
 
-        # ── Level 1: Check stop loss exists ──────────────
+        # ── Level 1: Check stop loss exists ──────────────────────────────────
         if signal.stop_loss is None:
             return RiskValidation(
                 approved=False,
@@ -202,8 +257,8 @@ class RiskManager:
                 reason="Signal has no stop loss defined. Rejecting."
             )
 
-        # ── Level 1: Position sizing ─────────────────────
-        risk_amount = account_balance * self.risk_per_trade_pct
+        # ── Level 1: Position sizing (broker-specific risk %) ─────────────────
+        risk_amount = account_balance * _risk_per_trade
         stop_distance = abs(signal.entry_price - signal.stop_loss)
 
         if stop_distance <= 0:
@@ -216,15 +271,15 @@ class RiskManager:
         position_size = risk_amount / stop_distance
         position_value = position_size * signal.entry_price
 
-        # Cap at 15% of account in one asset
-        max_position_value = account_balance * self.max_exposure_per_asset_pct
+        # Cap at effective max-per-asset of account in one asset
+        max_position_value = account_balance * _max_asset_exp
         if position_value > max_position_value:
             position_value = max_position_value
             position_size = position_value / signal.entry_price
             risk_amount = position_size * stop_distance
             logger.debug(f"[RiskManager] Position capped to max_exposure_per_asset.")
 
-        # ── Level 1: Minimum R:R check ───────────────────
+        # ── Level 1: Minimum R:R check ────────────────────────────────────────
         if signal.take_profit:
             reward = abs(signal.take_profit - signal.entry_price)
             rr = reward / stop_distance
@@ -235,9 +290,9 @@ class RiskManager:
                     reason=f"R:R ratio {rr:.2f} below minimum 1.5."
                 )
 
-        # ── All checks passed ────────────────────────────
+        # ── All checks passed ─────────────────────────────────────────────────
         logger.info(
-            f"[RiskManager] ✓ Signal approved | "
+            f"[RiskManager] ✓ Signal approved | broker={broker or 'any'} | "
             f"size: {position_size:.4f} | value: ${position_value:.2f} | "
             f"max loss: ${risk_amount:.2f}"
         )
@@ -264,14 +319,40 @@ class RiskManager:
             self._save_state()
         logger.info(f"[RiskManager] Circuit breaker reset for strategy '{strategy_name}'.")
 
+    def reset_broker_circuit_breaker(self, broker: str) -> None:
+        """Manually reset the per-broker circuit breaker."""
+        b = self._per_broker.get(broker)
+        if b:
+            b["circuit_breaker_active"] = False
+            b["consecutive_losses"] = 0
+            self._save_state()
+        logger.info(f"[RiskManager] Circuit breaker reset for broker '{broker}'.")
+
+    def reset_broker_consecutive_losses(self, broker: str) -> None:
+        """Manually reset the per-broker consecutive-loss counter."""
+        b = self._per_broker.get(broker)
+        if b:
+            b["consecutive_losses"] = 0
+            self._save_state()
+        logger.info(f"[RiskManager] Consecutive-loss counter reset for broker '{broker}'.")
+
     def is_circuit_breaker_active(self) -> bool:
         return self._circuit_breaker_active
 
-    def record_outcome(self, won: bool, strategy_name: str | None = None) -> None:
+    def get_broker_state(self, broker: str) -> dict:
+        """Return the current per-broker risk state dict."""
+        self._load_state()
+        return dict(self._per_broker.get(broker, {
+            "consecutive_losses": 0,
+            "circuit_breaker_active": False,
+            "circuit_breaker_date": None,
+        }))
+
+    def record_outcome(self, won: bool, strategy_name: str | None = None, broker: str | None = None) -> None:
         """
         Call after each trade resolves.
-        Updates both portfolio-wide and per-strategy (F-032) consecutive-loss counters.
-        Trips per-strategy circuit breaker when that strategy hits max_consecutive_losses.
+        Updates portfolio-wide, per-strategy (F-032), and per-broker consecutive-loss counters.
+        Trips per-strategy and per-broker circuit breakers when thresholds are hit.
         """
         # ── Portfolio-wide counter ────────────────────────
         if won:
@@ -313,6 +394,34 @@ class RiskManager:
                     logger.warning(
                         f"[RiskManager] 🔴 PER-STRATEGY CIRCUIT BREAKER: '{strategy_name}' "
                         f"halted after {s['consecutive_losses']} consecutive losses."
+                    )
+
+        # Per-broker counter + circuit breaker
+        if broker:
+            b = self._per_broker.setdefault(
+                broker,
+                {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
+            )
+            if won:
+                if b["consecutive_losses"] > 0:
+                    logger.info(
+                        f"[RiskManager] Win on broker '{broker}' — resetting its "
+                        f"consecutive_losses (was {b['consecutive_losses']})"
+                    )
+                b["consecutive_losses"] = 0
+                b["circuit_breaker_active"] = False
+            else:
+                b["consecutive_losses"] += 1
+                logger.warning(
+                    f"[RiskManager] Loss on broker '{broker}' — "
+                    f"consecutive_losses={b['consecutive_losses']}"
+                )
+                if b["consecutive_losses"] >= self.max_consecutive_losses:
+                    b["circuit_breaker_active"] = True
+                    b["circuit_breaker_date"] = str(date.today())
+                    logger.warning(
+                        f"[RiskManager] 🔴 PER-BROKER CIRCUIT BREAKER: '{broker}' "
+                        f"halted after {b['consecutive_losses']} consecutive losses."
                     )
 
         self._save_state()

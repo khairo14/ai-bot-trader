@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from db.database import get_db
-from db.models import Trade, OrderStatus
+from db.models import Trade, OrderStatus, BrokerName
 from config import settings
 
 router = APIRouter()
@@ -106,6 +106,17 @@ async def portfolio_summary(db: AsyncSession = Depends(get_db)):
     )
     today_pnl = round(float(pnl_result.scalar() or 0.0), 2)
 
+    # Per-broker daily P&L (same window — trades closed since midnight UTC)
+    today_pnl_by_broker: dict[str, float] = {}
+    for _broker in [BrokerName.BINANCE, BrokerName.ALPACA, BrokerName.IBKR]:
+        _pnl_q = await db.execute(
+            select(func.coalesce(func.sum(Trade.pnl), 0.0))
+            .where(Trade.status == OrderStatus.FILLED)
+            .where(Trade.closed_at >= today_start)
+            .where(Trade.broker == _broker)
+        )
+        today_pnl_by_broker[_broker.value] = round(float(_pnl_q.scalar() or 0.0), 2)
+
     # Max open positions from config
     max_positions = settings.max_open_positions
 
@@ -114,5 +125,6 @@ async def portfolio_summary(db: AsyncSession = Depends(get_db)):
         "open_positions": open_count,
         "max_positions": max_positions,
         "today_pnl": today_pnl,
+        "today_pnl_by_broker": today_pnl_by_broker,
         "circuit_breaker_pct": settings.daily_circuit_breaker_pct,
     }

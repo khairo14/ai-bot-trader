@@ -93,27 +93,34 @@ class ForwardEngine:
     # ──────────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    async def _daily_pnl(db_session) -> float:
-        """Return the sum of realised P&L for trades closed today (UTC)
-        plus the unrealized PnL of open trades that have a pnl value (F-033)."""
+    async def _daily_pnl(db_session, broker: str | None = None) -> float:
+        """Return today's realised + unrealized P&L, optionally filtered to one broker."""
         from datetime import timezone as _tz
         today_start = datetime.now(_tz.utc).replace(
             hour=0, minute=0, second=0, microsecond=0, tzinfo=None
         )
-        # Realised P&L from closed trades today
+        # Build optional broker filter
+        broker_filter: list = []
+        if broker:
+            try:
+                from db.models import BrokerName as _BN
+                broker_filter = [Trade.broker == _BN(broker)]
+            except ValueError:
+                pass
+
         q_realised = await db_session.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
                 Trade.status == OrderStatus.FILLED,
                 Trade.closed_at >= today_start,
+                *broker_filter,
             )
         )
         realised: float = q_realised.scalar_one()
-        # Unrealized component: open trades where pnl has been updated (non-null).
-        # Captures mid-day losses that haven't been closed yet.
         q_open = await db_session.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
                 Trade.status == OrderStatus.OPEN,
                 Trade.pnl.isnot(None),
+                *broker_filter,
             )
         )
         unrealized: float = q_open.scalar_one()
@@ -162,20 +169,46 @@ class ForwardEngine:
         except Exception:
             open_count = len(self._paper_positions)  # fallback
 
-        # ── Daily P&L from DB (for circuit breaker) ──────
+        broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
+
+        # ── Load per-broker risk settings from DB ────────────────
+        broker_settings: dict | None = None
+        if db_session is not None:
+            try:
+                from sqlalchemy import select as _sel
+                from db.models import BrokerRiskSettings, BrokerName as _BN
+                _bs_q = await db_session.execute(
+                    _sel(BrokerRiskSettings).where(BrokerRiskSettings.broker == _BN(broker_key))
+                )
+                _bs_row = _bs_q.scalar_one_or_none()
+                if _bs_row is not None:
+                    broker_settings = {
+                        "risk_per_trade_pct":       _bs_row.risk_per_trade_pct,
+                        "max_open_positions":        _bs_row.max_open_positions,
+                        "daily_circuit_breaker_pct": _bs_row.daily_circuit_breaker_pct,
+                        "max_consecutive_losses":    _bs_row.max_consecutive_losses,
+                        "max_exposure_per_asset_pct":_bs_row.max_exposure_per_asset_pct,
+                        "max_exposure_per_class_pct":_bs_row.max_exposure_per_class_pct,
+                    }
+            except Exception as _bs_err:
+                logger.debug(f"[ForwardEngine] Could not load broker settings for {broker_key}: {_bs_err}")
+
+        # ── Daily P&L from DB filtered to this broker (for circuit breaker) ──
         daily_pnl = 0.0
         if db_session is not None:
             try:
-                daily_pnl = await self._daily_pnl(db_session)
+                daily_pnl = await self._daily_pnl(db_session, broker=broker_key)
             except Exception as exc:
                 logger.warning(f"[ForwardEngine] Could not compute daily_pnl: {exc}")
 
-        # ── Risk validation ──────────────────────────────
+        # ── Risk validation ──────────────────
         validation = self.risk_manager.validate(
             signal=signal,
             account_balance=balance,
             open_positions_count=open_count,
             daily_pnl=daily_pnl,
+            broker=broker_key,
+            broker_settings=broker_settings,
         )
 
         if not validation.approved:
@@ -353,11 +386,13 @@ class ForwardEngine:
         # Remove from in-memory cache
         self._paper_positions.pop(trade.symbol, None)
 
-        # ── Update consecutive-loss counter ───────────────────────────────
+        # ── Update consecutive-loss counter (portfolio, strategy, broker) ────────
         if trade.pnl is not None:
+            _broker_val = trade.broker.value if hasattr(trade.broker, 'value') else None
             self.risk_manager.record_outcome(
                 won=trade.pnl > 0,
-                strategy_name=getattr(trade, "strategy_name", None),  # F-032
+                strategy_name=getattr(trade, "strategy_name", None),
+                broker=_broker_val,
             )
 
         logger.info(

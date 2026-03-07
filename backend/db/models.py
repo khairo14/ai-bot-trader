@@ -253,3 +253,26 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow)
+
+
+# ─────────────────────────────────────────────────────────
+# Per-broker Risk Settings
+# ─────────────────────────────────────────────────────────
+class BrokerRiskSettings(Base):
+    """
+    Per-broker overrides for risk parameters.
+    One row per broker (binance / alpaca / ibkr).
+    Any NULL field means "use the global config default".
+    Editable from the Settings page without restarting Docker.
+    """
+    __tablename__ = "broker_risk_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    broker: Mapped[BrokerName] = mapped_column(SAEnum(BrokerName), nullable=False, unique=True, index=True)
+    risk_per_trade_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)         # e.g. 2.0 → 2%
+    max_open_positions: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    daily_circuit_breaker_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # e.g. 5.0 → -5%
+    max_consecutive_losses: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    max_exposure_per_asset_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True) # e.g. 15.0 → 15%
+    max_exposure_per_class_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True) # e.g. 40.0 → 40%
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
