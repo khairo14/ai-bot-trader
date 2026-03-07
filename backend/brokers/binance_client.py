@@ -48,13 +48,18 @@ class BinanceClient(AbstractBroker):
             logger.info("BinanceClient initialized in TESTNET (paper) mode.")
         else:
             logger.info("BinanceClient initialized in LIVE mode.")
+        # Separate unauthenticated exchange for public market-data (OHLCV).
+        # Testnet has very limited historical candles; always use the production
+        # endpoint for OHLCV regardless of paper/live mode.
+        self._data_exchange = ccxt.binance({"enableRateLimit": True, "timeout": 10000})  # type: ignore[call-arg]
 
     async def close(self) -> None:
-        """Close the underlying ccxt aiohttp session."""
-        try:
-            await self.exchange.close()
-        except Exception:
-            pass
+        """Close the underlying ccxt aiohttp sessions."""
+        for ex in (self.exchange, self._data_exchange):
+            try:
+                await ex.close()
+            except Exception:
+                pass
 
     async def _ensure_markets(self) -> None:
         """Load spot markets once; silently skip sapi/margin timeouts."""
@@ -95,8 +100,9 @@ class BinanceClient(AbstractBroker):
         limit: int = 500,
         since: Optional[int] = None,
     ) -> pd.DataFrame:
-        await self._ensure_markets()
-        raw = await self.exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+        # Always use the unauthenticated production endpoint for OHLCV.
+        # The testnet has very limited historical candles and fails on 1h/4h/1d.
+        raw = await self._data_exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df.set_index("timestamp", inplace=True)
