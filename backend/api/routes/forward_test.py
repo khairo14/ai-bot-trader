@@ -612,7 +612,7 @@ async def _run_one_strategy(strat) -> None:
                 "1h": 75, "2h": 150, "4h": 300, "1d": 1440,
             }
             _dedup_window = timedelta(minutes=_TF_DEDUP_MINUTES.get(timeframe, 75))
-            _cutoff = datetime.utcnow() - _dedup_window
+            _cutoff = datetime.now(timezone.utc) - _dedup_window
             _existing = await session.execute(
                 select(SignalModel).where(
                     SignalModel.symbol == sig.symbol,

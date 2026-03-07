@@ -120,7 +120,7 @@ async def optimize_portfolio() -> dict:
     from db.models import TradeOutcome, Strategy
     from sqlalchemy import select
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     # 1. Load resolved outcomes
     async with AsyncSessionLocal() as session:

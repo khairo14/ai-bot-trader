@@ -119,3 +119,20 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 | F-053 | ✅ | `frontend/src/hooks/useWebSocket.ts` | WS reconnect uses fixed 3s delay, no exponential backoff. |
 | F-054 | ✅ | `frontend/src/pages/Analytics.tsx` | Local function named `fetch` shadows `window.fetch`. |
 | F-055 | ✅ | `frontend/src/pages/Strategies.tsx` | `toggleActive`/`changeMode` have no try/catch — failures invisible to user. |
+
+---
+
+## Round 2 Audit — Full Re-audit Pass
+**Date:** Current  
+**Scope:** Full codebase re-audit targeting all 11 application code files not previously audited, after all 60 original findings were closed. 6 new findings identified; all resolved in the same pass.
+
+| # | Status | Location | Issue / Fix |
+|---|--------|----------|-------------|
+| F-061 | ✅ | `core/engine/forward_engine.py` | `datetime.utcnow()` still used for `opened_at`, `closed_at`, and rejected-order ID (3 occurrences). Deprecated in Python 3.12; will raise in Python 3.14. **Fix:** replaced with `datetime.now(timezone.utc)`. |
+| F-062 | ✅ | `api/routes/forward_test.py` | Dedup cutoff `_cutoff = datetime.utcnow() - _dedup_window` — naive utcnow() in deduplication WHERE clause. **Fix:** replaced with `datetime.now(timezone.utc)`. |
+| F-063 | ✅ | `core/auth.py` | JWT `expire = datetime.utcnow() + ...` — same deprecated call for token expiry. **Fix:** added `timezone` to import, replaced with `datetime.now(timezone.utc)`. |
+| F-064 | ✅ | `api/routes/signals.py` | `cutoff = datetime.utcnow() - timedelta(hours=...)` in dismiss-expired endpoint. **Fix:** added `timezone` to import, replaced with `datetime.now(timezone.utc)`. |
+| F-065 | ✅ | `tasks/outcome_resolver.py` (×2) | Two `datetime.datetime.utcnow()` calls — one for arithmetic with a naive DB datetime (would break with tz-aware), one for a DB cutoff. **Fix:** both replaced with `datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)` to keep naive-UTC semantics for Python arithmetic and DB comparisons. |
+| F-066 | ✅ | `models/trainer.py` (×2) | `datetime.datetime.utcnow().isoformat()` in two return dicts. **Fix:** replaced with `datetime.datetime.now(datetime.timezone.utc).isoformat()`. |
+| F-067 | ✅ | `models/portfolio_optimizer.py` | `datetime.datetime.utcnow()` for `optimized_at` timestamp in return dict. **Fix:** replaced with `datetime.datetime.now(datetime.timezone.utc)`. |
+| F-068 | ✅ | `api/routes/auth.py` | `_login_attempts` dict (IP → list[timestamp]) never evicts stale IP keys — unbounded memory growth on high-traffic servers (scanner/brute-force bots each add a permanent key). **Fix:** delete IP entry from dict when its pruned list is empty; also refactored to use single `pruned` list to avoid re-reading the dict. |

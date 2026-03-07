@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, update, or_, and_
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from db.database import get_db
 from db.models import Signal, Strategy, ExecutionMode, SignalType
@@ -78,7 +78,7 @@ async def dismiss_expired_signals(
     - Un-acted-on signals older than `older_than_hours` (default 24h)
     Signals are hidden from Recent Signals but kept in DB for ML auditing.
     """
-    cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
     result = await db.execute(
         update(Signal)
         .where(

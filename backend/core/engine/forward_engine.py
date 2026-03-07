@@ -210,7 +210,7 @@ class ForwardEngine:
             asset_class=signal.asset_class,
             is_paper=is_paper,
             strategy_name=signal.strategy_name,
-            opened_at=datetime.utcnow(),
+            opened_at=datetime.now(timezone.utc),
         )
 
         # ── Broker API order (paper OR live) ────────────────────────────────────
@@ -265,7 +265,7 @@ class ForwardEngine:
         except Exception as order_err:
             # Broker rejected or is unreachable — record FAILED trade for audit
             trade.status = OrderStatus.REJECTED
-            trade.broker_order_id = f"rejected_{signal.symbol}_{int(datetime.utcnow().timestamp())}"
+            trade.broker_order_id = f"rejected_{signal.symbol}_{int(datetime.now(timezone.utc).timestamp())}"
             trade.notes = f"Order rejected: {order_err}"
             logger.warning(
                 f"[ForwardEngine] ⚠️  {mode_tag} ORDER REJECTED for {signal.symbol}: {order_err}. "
@@ -349,7 +349,7 @@ class ForwardEngine:
             trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
 
         trade.status = OrderStatus.FILLED
-        trade.closed_at = datetime.utcnow()
+        trade.closed_at = datetime.now(timezone.utc)
         # Remove from in-memory cache
         self._paper_positions.pop(trade.symbol, None)
 

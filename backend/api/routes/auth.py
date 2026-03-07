@@ -108,10 +108,13 @@ async def login(payload: LoginRequest, request: Request, response: Response):
 
     # Rate-limit check — sliding window per source IP
     now = _time.monotonic()
-    attempts = _login_attempts[client_ip]
-    # Evict attempts outside the window
-    _login_attempts[client_ip] = [t for t in attempts if now - t < _LOGIN_WINDOW]
-    if len(_login_attempts[client_ip]) >= _LOGIN_MAX_ATTEMPTS:
+    pruned = [t for t in _login_attempts[client_ip] if now - t < _LOGIN_WINDOW]
+    # Evict the IP entry entirely when its window is empty to prevent unbounded dict growth.
+    if pruned:
+        _login_attempts[client_ip] = pruned
+    else:
+        _login_attempts.pop(client_ip, None)
+    if len(pruned) >= _LOGIN_MAX_ATTEMPTS:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts. Please try again later.",

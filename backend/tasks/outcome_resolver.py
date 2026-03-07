@@ -59,7 +59,7 @@ async def _fetch_ohlcv_broker(
     since_ms = int(since.timestamp() * 1000)
 
     # How long since the oldest outcome — convert to candle count
-    elapsed_secs = (datetime.datetime.utcnow() - since).total_seconds()
+    elapsed_secs = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - since).total_seconds()
     tf_secs = _TF_SECONDS.get(timeframe, 3600)
     limit = max(RESOLUTION_HORIZON + 10, int(elapsed_secs / tf_secs) + RESOLUTION_HORIZON + 10)
 
@@ -212,7 +212,7 @@ async def resolve_pending_outcomes() -> dict:
     from db.models import TradeOutcome, OutcomeResult
     from sqlalchemy import select
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     cutoff = now - datetime.timedelta(hours=MIN_AGE_HOURS)
 
     async with AsyncSessionLocal() as session:

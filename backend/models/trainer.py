@@ -209,7 +209,7 @@ class ModelTrainer:
             logger.info("[trainer] No active strategy symbols found — skipping training")
             return {
                 "status": "skipped",
-                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "models_trained": 0,
                 "message": "No active strategies in DB",
             }
@@ -222,7 +222,7 @@ class ModelTrainer:
         trained = sum(1 for r in results if r.get("status") == "trained")
         return {
             "status": "complete",
-            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "models_trained": trained,
             "symbols": results,
         }
