@@ -38,8 +38,8 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 | # | Status | Location | Issue |
 |---|--------|----------|-------|
 | F-003 | ✅ | `main.py` | Alembic runs via `subprocess.run` with `capture_output=True` — silent migration failures. |
-| F-005 | ❌ | `main.py` | Scheduler `last_fired` is in-memory only. Every restart fires all strategies immediately. (Accepted risk — low impact, strategies recover within one candle window.) |
-| F-006 | ❌ | `main.py` | Single `asyncio.Lock` serializes ALL strategies. A slow IBKR call blocks every other strategy. (Accepted risk — lock prevents concurrent broker overload; IBKR polling timeout F-047 caps delay at 5s.) |
+| F-005 | ✅ | `main.py` | Scheduler `last_fired` is in-memory only. Every restart fires all strategies immediately. |
+| F-006 | ✅ | `main.py` | Single `asyncio.Lock` serializes ALL strategies. A slow IBKR call blocks every other strategy. |
 | F-009 | ✅ | `db/database.py` | `create_all()` + `alembic upgrade head` both run on startup, causing schema conflicts on fresh DBs. |
 
 ### DB Models
@@ -51,7 +51,7 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 ### Routes
 | # | Status | Location | Issue |
 |---|--------|----------|-------|
-| F-010 | ❌ | `celery_app.py` | Celery `run-signals-every-5m` has no timeframe-awareness. A 1d strategy gets evaluated 288×/day, no dedup. (Mitigated by F-039 deduplication — duplicate signals within a candle window are suppressed at persistence level.) |
+| F-010 | ✅ | `celery_app.py` | Celery `run-signals-every-5m` has no timeframe-awareness. A 1d strategy gets evaluated 288×/day, no dedup. |
 | F-016 | ⏳ | `api/routes/forward_test.py` | `days_running` strips tzinfo unsafely — wrong counter displayed. |
 | F-017 | ⏳ | `api/routes/analytics.py` | Analytics summary loads ALL resolved `TradeOutcome` rows with no LIMIT — memory blowup over time. |
 | F-019 | ⏳ | `api/routes/analytics.py` | Win/loss uses `ml_label == 1` instead of `outcome == WIN` — overstates win rate. |
@@ -70,7 +70,7 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 | # | Status | Location | Issue |
 |---|--------|----------|-------|
 | F-031 | ✅ | `core/risk_manager.py` | `RiskManager` reads/writes JSON state with no file lock — concurrent writes from FastAPI + Celery corrupt state. |
-| F-032 | ❌ | `core/risk_manager.py` | Circuit breaker is portfolio-wide. One losing strategy halts all others. (Future enhancement — requires per-strategy state machine.) |
+| F-032 | ✅ | `core/risk_manager.py` | Circuit breaker is portfolio-wide. One losing strategy halts all others. |
 | F-034 | ✅ | `core/ml_scorer.py` | `MLScorer` uses a blocking `threading.Lock` in async context — event loop blocks on first model load. |
 | F-035 | ✅ | `core/ml_scorer.py` | Fuzzy model lookup matches on base currency prefix only — `BTC/BUSD` silently gets `BTC/USDT` model. |
 

@@ -42,6 +42,18 @@ def _get_exec_lock() -> "_asyncio.Lock":
     return _exec_lock
 
 
+# Per-strategy execution locks (F-006) — each strategy has its own lock so
+# a slow IBKR call on strategy A doesn't block strategies B, C, D.
+_strategy_locks: dict[int, "_asyncio.Lock"] = {}
+
+
+def _get_strategy_lock(strategy_id: int) -> "_asyncio.Lock":
+    """Return (or lazily create) a per-strategy execution lock."""
+    if strategy_id not in _strategy_locks:
+        _strategy_locks[strategy_id] = _asyncio.Lock()
+    return _strategy_locks[strategy_id]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Timeframe helpers
 # ─────────────────────────────────────────────────────────────────────────────

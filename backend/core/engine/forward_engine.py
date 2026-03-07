@@ -355,7 +355,10 @@ class ForwardEngine:
 
         # ── Update consecutive-loss counter ───────────────────────────────
         if trade.pnl is not None:
-            self.risk_manager.record_outcome(won=trade.pnl > 0)
+            self.risk_manager.record_outcome(
+                won=trade.pnl > 0,
+                strategy_name=getattr(trade, "strategy_name", None),  # F-032
+            )
 
         logger.info(
             f"[ForwardEngine] Position closed: {trade.symbol} — reason: {reason} "

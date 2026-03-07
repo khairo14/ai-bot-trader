@@ -1,8 +1,16 @@
 """Tasks: automated signal runner via Celery."""
 from celery_app import celery_app
 import logging
+import math
+import time as _time
 
 logger = logging.getLogger(__name__)
+
+# F-010: track the last candle-close epoch we successfully processed per strategy.
+# Prevents running the full engine (data fetch + ML) when the candle hasn't
+# changed since the last Celery tick.  In-memory is fine for a single worker;
+# the DB deduplication (F-039) is the safety net for multi-worker deployments.
+_last_candle_fired: dict[int, float] = {}  # strategy_id → last_close epoch
 
 # Signal types that are worth tracking for ML feedback
 _TRACKABLE_SIGNALS = {"BUY", "SELL", "SHORT", "COVER"}
@@ -131,6 +139,23 @@ def run_signals(self):
                         logger.warning(
                             f"[signal_runner] Strategy id={strat.id} name='{strat.name}' "
                             "missing 'strategy_type' or 'symbol' in parameters — skipping."
+                        )
+                        continue
+
+                    # F-010: skip if the candle for this timeframe hasn't closed
+                    # since we last ran this strategy (avoids 288 runs/day for 1d strategies).
+                    _tf_secs_map = {
+                        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+                        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200,
+                        "1d": 86400, "1w": 604800,
+                    }
+                    _interval = _tf_secs_map.get(timeframe, 3600)
+                    _now_ts = _time.time()
+                    _last_close_ts = math.floor(_now_ts / _interval) * _interval
+                    if _last_candle_fired.get(strat.id, 0) >= _last_close_ts:
+                        logger.debug(
+                            f"[signal_runner] {strat.name} ({timeframe}) — "
+                            f"candle unchanged since last run, skipping"
                         )
                         continue
 
@@ -373,6 +398,9 @@ def run_signals(self):
                             f"@ {sig.entry_price} (conf={sig.confidence:.2f}) "
                             f"acted_on={db_signal.acted_on}"
                         )
+                        # F-010: record that we processed this candle so the next
+                        # Celery tick skips it (candle hasn't changed).
+                        _last_candle_fired[strat.id] = _last_close_ts
                         total_run += 1
 
                     except Exception as e:

@@ -41,14 +41,25 @@ async def _forward_test_scheduler():
     import time
     from api.routes.forward_test import (
         timeframe_to_seconds, _run_one_strategy, is_market_open,
-        _get_exec_lock, _exec_state,
+        _get_strategy_lock, _exec_state,
     )
     from db.database import AsyncSessionLocal
     from db.models import Strategy as StrategyModel
     from sqlalchemy import select
     from datetime import datetime, timezone as _tz
+    import redis.asyncio as _aioredis
 
-    last_fired: dict = {}   # strategy_id → UTC epoch of last candle close we fired on
+    # F-005: persist last_fired to Redis so a restart doesn't re-fire every strategy
+    _redis = _aioredis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        raw = await _redis.hgetall("scheduler:last_fired")
+        last_fired: dict[int, float] = {int(k): float(v) for k, v in raw.items()}
+        if last_fired:
+            logger.info(f"[Scheduler] Loaded last_fired for {len(last_fired)} strategies from Redis.")
+    except Exception as _re:
+        logger.warning(f"[Scheduler] Could not load last_fired from Redis: {_re}")
+        last_fired = {}
+
     CLOSE_BUFFER = 30       # seconds after candle close before we fire
 
     logger.info("[Scheduler] Wall-clock-aligned, market-hours-aware scheduler started.")
@@ -94,11 +105,13 @@ async def _forward_test_scheduler():
                     continue  # last_fired intentionally NOT updated
 
                 # ── Fire! ──────────────────────────────────
-                lock = _get_exec_lock()
+                # F-006: use per-strategy lock so a slow IBKR call on one
+                # strategy doesn't block all others in this tick.
+                lock = _get_strategy_lock(strat.id)
                 if lock.locked():
                     logger.debug(
                         f"[Scheduler] {strat.name} ({tf}) — "
-                        f"skipping, another run already in progress"
+                        f"still running from previous tick, skipping"
                     )
                     continue
 
@@ -110,34 +123,56 @@ async def _forward_test_scheduler():
                     f"[Scheduler] {strat.name} ({tf}) — "
                     f"candle closed at {close_dt}, running now"
                 )
-                async with lock:
-                    _exec_state.update({
-                        "active": True,
-                        "strategy": strat.name,
-                        "trigger": "scheduler",
-                        "started_at": datetime.now(timezone.utc),
-                    })
-                    try:
-                        from api.websocket import manager as _ws_mgr
-                        await _ws_mgr.broadcast("run_started", {
-                            "trigger": "scheduler",
-                            "strategies": 1,
-                            "strategy": strat.name,
-                        })
-                        await _run_one_strategy(strat)
-                        await _ws_mgr.broadcast("run_finished", {
-                            "trigger": "scheduler",
-                            "strategies": 1,
-                            "strategy": strat.name,
-                        })
-                    finally:
-                        _exec_state.update({
-                            "active": False,
-                            "strategy": None,
-                            "trigger": None,
-                            "started_at": None,
-                        })
+
+                # Mark fired BEFORE spawning task so the next loop iteration
+                # doesn't double-fire the same strategy.
                 last_fired[strat.id] = last_close
+                # F-005: persist to Redis so restarts resume correctly
+                try:
+                    await _redis.hset("scheduler:last_fired", str(strat.id), last_close)
+                except Exception as _re:
+                    logger.debug(f"[Scheduler] Redis save failed for {strat.name}: {_re}")
+
+                # Capture loop vars for the task closure
+                _strat = strat
+                _lock = lock
+                _close_dt = close_dt
+
+                async def _run_task(s=_strat, lk=_lock, cdt=_close_dt):
+                    async with lk:
+                        _exec_state.update({
+                            "active": True,
+                            "strategy": s.name,
+                            "trigger": "scheduler",
+                            "started_at": datetime.now(timezone.utc),
+                        })
+                        try:
+                            from api.websocket import manager as _ws_mgr
+                            await _ws_mgr.broadcast("run_started", {
+                                "trigger": "scheduler",
+                                "strategies": 1,
+                                "strategy": s.name,
+                            })
+                            await _run_one_strategy(s)
+                            await _ws_mgr.broadcast("run_finished", {
+                                "trigger": "scheduler",
+                                "strategies": 1,
+                                "strategy": s.name,
+                            })
+                        except Exception as _task_exc:
+                            logger.error(
+                                f"[Scheduler] {s.name} task failed: {_task_exc}",
+                                exc_info=True,
+                            )
+                        finally:
+                            _exec_state.update({
+                                "active": False,
+                                "strategy": None,
+                                "trigger": None,
+                                "started_at": None,
+                            })
+
+                asyncio.create_task(_run_task())
 
         except Exception as exc:
             logger.error(f"[Scheduler] Tick error: {exc}", exc_info=True)

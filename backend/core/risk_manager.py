@@ -47,8 +47,11 @@ class RiskManager:
         # Runtime state — loaded from persistent JSON so restarts don't clear them
         self.daily_pnl: float = 0.0
         self.open_positions_count: int = 0
-        self.consecutive_losses: int = 0
-        self._circuit_breaker_active: bool = False
+        self.consecutive_losses: int = 0           # portfolio-wide
+        self._circuit_breaker_active: bool = False  # portfolio-wide
+        # F-032: per-strategy state — keyed by strategy_name
+        # {"my_strat": {"consecutive_losses": 2, "circuit_breaker_active": False, "circuit_breaker_date": "2026-03-07"}}
+        self._per_strategy: dict[str, dict] = {}
         self._load_state()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -62,16 +65,29 @@ class RiskManager:
                 return
             with open(_STATE_FILE, "r") as fh:
                 state = json.load(fh)
-            # Auto-reset circuit breaker at start of a new calendar day
+            today = str(date.today())
+            # Portfolio-wide state
             breaker_date = state.get("circuit_breaker_date")
-            if breaker_date == str(date.today()):
+            if breaker_date == today:
                 self._circuit_breaker_active = state.get("circuit_breaker_active", False)
             else:
                 self._circuit_breaker_active = False  # new day → reset
             self.consecutive_losses = state.get("consecutive_losses", 0)
+            # F-032: Per-strategy state — auto-reset CB if it was set on a previous day
+            raw_per = state.get("per_strategy", {})
+            for name, s in raw_per.items():
+                cb_active = s.get("circuit_breaker_active", False)
+                if cb_active and s.get("circuit_breaker_date") != today:
+                    cb_active = False  # new day → reset
+                self._per_strategy[name] = {
+                    "consecutive_losses": s.get("consecutive_losses", 0),
+                    "circuit_breaker_active": cb_active,
+                    "circuit_breaker_date": s.get("circuit_breaker_date"),
+                }
             logger.info(
                 f"[RiskManager] State loaded — circuit_breaker={self._circuit_breaker_active} "
-                f"consecutive_losses={self.consecutive_losses}"
+                f"consecutive_losses={self.consecutive_losses} "
+                f"per_strategy_count={len(self._per_strategy)}"
             )
         except Exception as exc:
             logger.warning(f"[RiskManager] Could not load risk state: {exc}")
@@ -89,6 +105,7 @@ class RiskManager:
                     "circuit_breaker_active": self._circuit_breaker_active,
                     "circuit_breaker_date": str(date.today()),
                     "consecutive_losses": self.consecutive_losses,
+                    "per_strategy": self._per_strategy,  # F-032
                 }
             )
             # Write to a sibling temp file, then atomically rename
@@ -112,7 +129,22 @@ class RiskManager:
         Validate a signal before execution.
         Returns RiskValidation with approved=True/False and calculated position size.
         """
-        # ── Level 4: Circuit breaker ─────────────────────
+        # ── F-032: Per-strategy circuit breaker (checked before portfolio-wide) ──
+        strategy_name = getattr(signal, "strategy_name", None)
+        if strategy_name:
+            s_state = self._per_strategy.get(strategy_name, {})
+            if s_state.get("circuit_breaker_active", False):
+                return RiskValidation(
+                    approved=False,
+                    position_size=0, position_value=0, risk_amount=0, stop_distance=0,
+                    reason=(
+                        f"Per-strategy circuit breaker active for '{strategy_name}'. "
+                        f"Consecutive losses: {s_state.get('consecutive_losses', 0)}. "
+                        f"Reset required."
+                    ),
+                )
+
+        # ── Level 4: Portfolio-wide circuit breaker ───────
         if self._circuit_breaker_active:
             return RiskValidation(
                 approved=False,
@@ -218,32 +250,71 @@ class RiskManager:
         )
 
     def reset_circuit_breaker(self):
-        """Manually reset the daily circuit breaker."""
+        """Manually reset the portfolio-wide daily circuit breaker."""
         self._circuit_breaker_active = False
         self._save_state()
-        logger.info("[RiskManager] Circuit breaker reset manually.")
+        logger.info("[RiskManager] Portfolio circuit breaker reset manually.")
+
+    def reset_strategy_circuit_breaker(self, strategy_name: str) -> None:
+        """Manually reset the per-strategy circuit breaker (F-032)."""
+        s = self._per_strategy.get(strategy_name)
+        if s:
+            s["circuit_breaker_active"] = False
+            s["consecutive_losses"] = 0
+            self._save_state()
+        logger.info(f"[RiskManager] Circuit breaker reset for strategy '{strategy_name}'.")
 
     def is_circuit_breaker_active(self) -> bool:
         return self._circuit_breaker_active
 
-    def record_outcome(self, won: bool) -> None:
+    def record_outcome(self, won: bool, strategy_name: str | None = None) -> None:
         """
         Call after each trade resolves.
-        Increments consecutive_losses on a loss, resets on a win.
-        State is persisted immediately.
+        Updates both portfolio-wide and per-strategy (F-032) consecutive-loss counters.
+        Trips per-strategy circuit breaker when that strategy hits max_consecutive_losses.
         """
+        # ── Portfolio-wide counter ────────────────────────
         if won:
             if self.consecutive_losses > 0:
                 logger.info(
-                    f"[RiskManager] Win recorded — resetting consecutive_losses "
+                    f"[RiskManager] Win — resetting portfolio consecutive_losses "
                     f"(was {self.consecutive_losses})"
                 )
             self.consecutive_losses = 0
         else:
             self.consecutive_losses += 1
             logger.warning(
-                f"[RiskManager] Loss recorded — consecutive_losses={self.consecutive_losses}"
+                f"[RiskManager] Loss — portfolio consecutive_losses={self.consecutive_losses}"
             )
+
+        # F-032: Per-strategy counter + circuit breaker ───
+        if strategy_name:
+            s = self._per_strategy.setdefault(
+                strategy_name,
+                {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
+            )
+            if won:
+                if s["consecutive_losses"] > 0:
+                    logger.info(
+                        f"[RiskManager] Win on '{strategy_name}' — resetting its "
+                        f"consecutive_losses (was {s['consecutive_losses']})"
+                    )
+                s["consecutive_losses"] = 0
+                s["circuit_breaker_active"] = False
+            else:
+                s["consecutive_losses"] += 1
+                logger.warning(
+                    f"[RiskManager] Loss on '{strategy_name}' — "
+                    f"consecutive_losses={s['consecutive_losses']}"
+                )
+                if s["consecutive_losses"] >= self.max_consecutive_losses:
+                    s["circuit_breaker_active"] = True
+                    s["circuit_breaker_date"] = str(date.today())
+                    logger.warning(
+                        f"[RiskManager] 🔴 PER-STRATEGY CIRCUIT BREAKER: '{strategy_name}' "
+                        f"halted after {s['consecutive_losses']} consecutive losses."
+                    )
+
         self._save_state()
 
     def reset_consecutive_losses(self) -> None:
