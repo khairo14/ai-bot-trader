@@ -60,8 +60,13 @@ def _symbol_to_yf(symbol: str) -> str:
     ETH/BTC   →  ETH-BTC
     AAPL      →  AAPL        (stocks pass through)
     """
+    # Base token aliases: exchange ticker → yfinance ticker
+    _BASE_ALIASES: dict[str, str] = {
+        "POL": "MATIC",   # Polygon rebranded POL → still listed as MATIC on yfinance
+    }
     if "/" in symbol:
         base, quote = symbol.split("/", 1)
+        base = _BASE_ALIASES.get(base.upper(), base)
         # Normalise stablecoins USDT/USDC → USD for yfinance
         quote_yf = "USD" if quote in ("USDT", "USDC", "BUSD") else quote
         return f"{base}-{quote_yf}"
