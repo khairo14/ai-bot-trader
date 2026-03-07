@@ -46,10 +46,18 @@ async def get_open_positions(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/history")
-async def get_trade_history(db: AsyncSession = Depends(get_db)):
-    """Get all completed trades."""
+async def get_trade_history(
+    limit: int = 200,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get completed trades, newest first. Defaults to last 200; use offset for pagination."""
     result = await db.execute(
-        select(Trade).where(Trade.status == OrderStatus.FILLED)
+        select(Trade)
+        .where(Trade.status == OrderStatus.FILLED)
+        .order_by(desc(Trade.closed_at))
+        .limit(min(limit, 1000))   # hard cap at 1000 rows per call
+        .offset(offset)
     )
     trades = result.scalars().all()
     return {"trades": [_trade_dict(t) for t in trades]}

@@ -111,6 +111,12 @@ async def run_backtest(request: BacktestRequest, db: AsyncSession = Depends(get_
     """
     _validate_broker_symbol(request.broker, request.symbol)
 
+    try:
+        start_dt = datetime.fromisoformat(request.start_date)
+        end_dt   = datetime.fromisoformat(request.end_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid date format: {exc}. Use ISO format e.g. '2024-01-01'.")
+
     from core.engine.backtest_engine import BacktestEngine
 
     engine = BacktestEngine()
@@ -118,8 +124,8 @@ async def run_backtest(request: BacktestRequest, db: AsyncSession = Depends(get_
         strategy_name=request.strategy_name,
         symbol=request.symbol,
         timeframe=request.timeframe,
-        start_date=datetime.fromisoformat(request.start_date),
-        end_date=datetime.fromisoformat(request.end_date),
+        start_date=start_dt,
+        end_date=end_dt,
         initial_capital=request.initial_capital,
         commission_pct=request.commission_pct,
         slippage_pct=request.slippage_pct,

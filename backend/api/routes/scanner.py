@@ -55,9 +55,9 @@ BROKER_WATCHLISTS: dict[str, list[str]] = {
 
 # Strategies available per broker — options strategies require IBKR only
 BROKER_STRATEGIES: dict[str, list[str]] = {
-    "binance": ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb"],
-    "alpaca":  ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb"],
-    "ibkr":    ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb",
+    "binance": ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb", "volatility_squeeze"],
+    "alpaca":  ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb", "volatility_squeeze"],
+    "ibkr":    ["hybrid_macd_rsi", "momentum_breakout", "mean_reversion_bb", "volatility_squeeze",
                  "iron_condor", "covered_call", "bull_call_spread"],
 }
 

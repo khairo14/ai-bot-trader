@@ -142,6 +142,11 @@ export default function Dashboard() {
     if (mlResult.status === 'fulfilled') setMlStatus(mlResult.value.data)
     if (weightsResult.status === 'fulfilled') setPortfolioWeights(weightsResult.value.data)
 
+    // Unblock the loading skeleton immediately after core data arrives.
+    // The regime badge fetches separately below and updates when ready.
+    setLoading(false)
+    setRefreshing(false)
+
     // Derive regime from the most recent non-HOLD signal so the badge reflects
     // what the bot is actually trading, not a hardcoded BTC/USDT default.
     const latestSig = sigResult.status === 'fulfilled'
@@ -158,8 +163,6 @@ export default function Dashboard() {
     } catch {
       setRegime(null)
     }
-    setLoading(false)
-    setRefreshing(false)
   }
 
   const handleApprove = async (id: number) => {

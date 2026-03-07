@@ -14,6 +14,8 @@ from core.regime_classifier import regime_classifier, ALL_REGIMES
 
 router = APIRouter()
 
+_VALID_BROKERS = {"binance", "alpaca", "ibkr"}
+
 
 async def _fetch_ohlcv(symbol: str, timeframe: str, broker_name: str) -> pd.DataFrame:
     """Fetch recent OHLCV data using the same broker clients as signal generation."""
@@ -36,19 +38,9 @@ async def get_regime(
 ):
     """
     Classify the current market regime for the given symbol and timeframe.
-
-    Returns
-    -------
-    {
-      "regime":    "trending_up" | "trending_down" | "ranging" | "high_volatility" | "low_volatility",
-      "symbol":    "BTC/USDT",
-      "timeframe": "1h",
-      "broker":    "binance",
-      "features":  { "adx": 32.1, "atr_norm": 1.24, "bb_width": 3.45, "ema_slope": 0.21 },
-      "score_adjustment": { "long_delta": -1, "short_delta": 1 },
-      "atr_multipliers":  { "sl": 2.0, "tp": 4.0 }
-    }
     """
+    if broker not in _VALID_BROKERS:
+        raise HTTPException(status_code=422, detail=f"Unknown broker '{broker}'. Valid values: {sorted(_VALID_BROKERS)}")
     data = await _fetch_ohlcv(symbol, timeframe, broker)
 
     result = regime_classifier.classify(data)

@@ -256,7 +256,7 @@ export default function MarketScanner() {
                 onChange={e => set('watchlist', e.target.value)}
                 className="w-full appearance-none bg-dark-700 border border-dark-500 text-white text-sm rounded-lg px-3 py-2 pr-8 focus:outline-none focus:border-brand-500"
               >
-                {validWatchlistKeys.filter(k => k in watchlists).map(k => (
+                {validWatchlistKeys.map(k => (
                   <option key={k} value={k}>{WATCHLIST_LABELS[k] ?? k}</option>
                 ))}
                 <option value="custom">Custom symbols</option>

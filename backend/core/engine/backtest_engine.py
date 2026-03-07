@@ -67,6 +67,33 @@ class BacktestEngine:
         if len(df) < 50:
             return {"error": f"Insufficient data: {len(df)} candles"}
 
+        # CPU-heavy candle-replay loop — offload to a thread so we don't block
+        # the async event loop for the duration of the backtest.
+        import asyncio as _asyncio
+        return await _asyncio.to_thread(
+            self._run_sync,
+            df, symbol, timeframe, start_date, end_date,
+            strategy_name, initial_capital, commission_pct,
+            slippage_pct, risk_per_trade_pct, parameters,
+        )
+
+    def _run_sync(
+        self,
+        df,
+        symbol: str,
+        timeframe: str,
+        start_date,
+        end_date,
+        strategy_name: str,
+        initial_capital: float,
+        commission_pct: float,
+        slippage_pct: float,
+        risk_per_trade_pct: float,
+        parameters,
+    ) -> dict:
+        """Synchronous candle-replay loop and metrics calculation.
+        Runs in a thread pool to avoid blocking the event loop."""
+
         # Warm-up period (first 50 candles for indicator calculation)
         warmup = 50
         trades = []

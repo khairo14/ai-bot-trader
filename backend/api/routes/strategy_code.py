@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import Strategy as StrategyModel
 from core.strategies.base import BaseStrategy
+from core.auth import require_admin
 
 router = APIRouter()
 
@@ -174,7 +175,7 @@ class SaveCodeRequest(BaseModel):
 
 
 @router.put("/{strategy_key}")
-async def update_source(strategy_key: str, body: SaveCodeRequest):
+async def update_source(strategy_key: str, body: SaveCodeRequest, _admin=Depends(require_admin)):
     """Overwrite the strategy file with new source and hot-reload."""
     py_file = _file_for(strategy_key)
     if py_file is None:
@@ -192,7 +193,7 @@ async def update_source(strategy_key: str, body: SaveCodeRequest):
 
 
 @router.post("/upload")
-async def upload_strategy(file: UploadFile = File(...)):
+async def upload_strategy(file: UploadFile = File(...), _admin=Depends(require_admin)):
     """
     Upload a new .py strategy file.
     The file is validated, written to core/strategies/, and registered live.
@@ -200,10 +201,15 @@ async def upload_strategy(file: UploadFile = File(...)):
     if not file.filename or not file.filename.endswith(".py"):
         raise HTTPException(status_code=400, detail="Only .py files are accepted.")
 
+    # Prevent path traversal — only allow a plain filename, no directory separators
+    safe_name = Path(file.filename).name
+    if not safe_name or safe_name != file.filename or '/' in safe_name or '\\' in safe_name:
+        raise HTTPException(status_code=400, detail="Invalid filename. Use a simple filename without directory separators.")
+
     source = (await file.read()).decode("utf-8")
 
     try:
-        cls_name, cls = _validate_and_load(source, file.filename)
+        cls_name, cls = _validate_and_load(source, safe_name)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -212,7 +218,7 @@ async def upload_strategy(file: UploadFile = File(...)):
     if strategy_key in _BUILTIN_NAMES:
         raise HTTPException(status_code=400, detail=f"'{strategy_key}' is a built-in strategy and cannot be overwritten via upload. Use the editor instead.")
 
-    dest = STRATEGY_DIR / file.filename
+    dest = STRATEGY_DIR / safe_name
     dest.write_text(source, encoding="utf-8")
     _hot_reload(strategy_key, cls)
 
@@ -226,7 +232,7 @@ async def upload_strategy(file: UploadFile = File(...)):
 
 
 @router.delete("/{strategy_key}")
-async def delete_strategy_file(strategy_key: str, db: AsyncSession = Depends(get_db)):
+async def delete_strategy_file(strategy_key: str, db: AsyncSession = Depends(get_db), _admin=Depends(require_admin)):
     """
     Remove a strategy file and unregister it.
     Blocked if any DB strategy row references this strategy name.
