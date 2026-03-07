@@ -26,7 +26,8 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7   # 7 days
 
 # tokenUrl must match the login endpoint path — used by Swagger UI "Authorize"
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+# auto_error=False lets missing/absent Bearer headers fall through to cookie auth
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
 
 # ── Password helpers ─────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ def create_access_token(subject: str, expires_delta: Optional[timedelta] = None)
 
 # ── FastAPI dependency ───────────────────────────────────────────────────────
 
-async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)):
+async def get_current_user(request: Request, token: Optional[str] = Depends(oauth2_scheme)):
     """
     Resolve a Bearer token (Authorization header) or httpOnly cookie to a User row.
     Cookie name: 'access_token' (F-056). Header takes precedence for API clients.

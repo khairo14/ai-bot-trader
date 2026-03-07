@@ -78,7 +78,7 @@ async def dismiss_expired_signals(
     - Un-acted-on signals older than `older_than_hours` (default 24h)
     Signals are hidden from Recent Signals but kept in DB for ML auditing.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=older_than_hours)
     result = await db.execute(
         update(Signal)
         .where(
