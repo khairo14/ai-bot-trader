@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
     internal_api_secret: str = ""
 
+    # Cookie security — set to True only when serving over HTTPS (e.g. a VPS with TLS).
+    # Must be False for local Docker/HTTP setups; Secure cookies are silently dropped
+    # by browsers on plain HTTP connections, which breaks the login flow.
+    cookie_secure: bool = False
+
     # OpenAI (optional — not used by core trading engine; reserved for future LLM features)
     openai_api_key: str = ""
 

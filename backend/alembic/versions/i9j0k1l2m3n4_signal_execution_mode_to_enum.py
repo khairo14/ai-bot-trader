@@ -17,20 +17,33 @@ _VALID = ("suggestion", "semi-auto", "full-auto")
 
 
 def upgrade() -> None:
-    # 1. Create the enum type (may already exist from strategies table — IF NOT EXISTS guard)
+    # The 'executionmode' PostgreSQL type was created by the initial migration with
+    # UPPERCASE names: ('SUGGESTION', 'SEMI_AUTO', 'FULL_AUTO').
+    # The signals.execution_mode column was a String(20) and stored lowercase .value
+    # strings (e.g. 'suggestion', 'semi-auto', 'full-auto') written directly by
+    # application code.  We must map them to the uppercase DB names before casting.
+    #
+    # Mapping:
+    #   'suggestion'  → 'SUGGESTION'
+    #   'semi-auto'   → 'SEMI_AUTO'   (Python value uses dash; DB name uses underscore)
+    #   'full-auto'   → 'FULL_AUTO'
+    #   already uppercase values pass through unchanged
+    #   anything else → NULL (safe default for nullable column)
+
     op.execute(
-        "DO $$ BEGIN "
-        "  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'executionmode') THEN "
-        "    CREATE TYPE executionmode AS ENUM ('suggestion', 'semi-auto', 'full-auto'); "
-        "  END IF; "
-        "END $$;"
+        "UPDATE signals SET execution_mode = "
+        "  CASE "
+        "    WHEN execution_mode = 'suggestion'  THEN 'SUGGESTION' "
+        "    WHEN execution_mode = 'semi-auto'   THEN 'SEMI_AUTO'  "
+        "    WHEN execution_mode = 'full-auto'   THEN 'FULL_AUTO'  "
+        "    WHEN execution_mode = 'SUGGESTION'  THEN 'SUGGESTION' "
+        "    WHEN execution_mode = 'SEMI_AUTO'   THEN 'SEMI_AUTO'  "
+        "    WHEN execution_mode = 'FULL_AUTO'   THEN 'FULL_AUTO'  "
+        "    ELSE NULL "
+        "  END"
     )
-    # 2. Normalise any out-of-range strings to NULL before casting
-    op.execute(
-        f"UPDATE signals SET execution_mode = NULL "
-        f"WHERE execution_mode NOT IN {_VALID!r}"
-    )
-    # 3. Cast the column to the enum type
+
+    # Cast the column from String to the existing executionmode enum type.
     op.execute(
         "ALTER TABLE signals "
         "ALTER COLUMN execution_mode TYPE executionmode "

@@ -140,11 +140,12 @@ async def login(payload: LoginRequest, request: Request, response: Response):
     logger.info(f"[Auth] Login: {user.username}")
     audit("user.login", actor=user.username, ip=client_ip)
     # Set httpOnly, Secure, SameSite=Strict cookie (F-056)
+    from config import settings as _settings
     response.set_cookie(
         key=_JWT_COOKIE,
         value=token,
         httponly=True,
-        secure=True,
+        secure=_settings.cookie_secure,
         samesite="strict",
         max_age=7 * 24 * 3600,
         path="/",
