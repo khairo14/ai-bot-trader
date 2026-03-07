@@ -101,7 +101,7 @@ function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
 
         {/* Nav */}
         <nav className="flex-1 px-2 py-4 space-y-1">
-          {navItems.map(({ to, label, icon: Icon, end }) => (
+          {NAV_ITEMS.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}

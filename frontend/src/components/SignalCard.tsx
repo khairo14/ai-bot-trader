@@ -34,7 +34,7 @@ interface Signal {
   strategy_name: string
   asset_class?: string
   broker: string
-  reasons: string
+  reasons: string[]
   created_at: string
   // Options fields (undefined for equity signals)
   iv_rank?: number
@@ -104,9 +104,7 @@ export default function SignalCard({ signal }: Props) {
     ? Math.abs((signal.take_profit - signal.entry_price) / (signal.entry_price - signal.stop_loss))
     : null
 
-  const reasons: string[] = (() => {
-    try { return JSON.parse(signal.reasons || '[]') } catch { return signal.reasons ? [signal.reasons] : [] }
-  })()
+  const reasons: string[] = Array.isArray(signal.reasons) ? signal.reasons : []
 
   // Staleness: warn if signal is older than 5 minutes (price levels are no longer reliable)
   const ageMs = Date.now() - new Date(signal.created_at).getTime()
