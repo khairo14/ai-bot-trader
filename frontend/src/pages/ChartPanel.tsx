@@ -258,6 +258,9 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
   const livePollRef       = useRef<ReturnType<typeof setInterval> | null>(null)
   const isFetchingRef     = useRef(false)   // guard: don't live-update during full fetch
   const wsLiveRef         = useRef(false)   // true while WS is connected — disables REST poll
+  // Tracks current symbol/timeframe/broker so stale live-poll responses (from
+  // a previous symbol that resolved after a parameter change) are discarded.
+  const paramsKeyRef      = useRef(`${broker}/${symbol}/${timeframe}`)
 
   // MA overlay refs
   const maSeriesRefs   = useRef<Map<string, ISeriesApi<'Line'>>>(new Map())
@@ -384,6 +387,8 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     const { signal } = ctrl
     isFetchingRef.current = true
     setLoading(true)
+    // Update paramsKey so in-flight live polls from the previous symbol abort
+    paramsKeyRef.current = `${broker}/${symbol}/${timeframe}`
     // Clear all series immediately so the chart goes blank while the new
     // symbol loads — prevents the WS from appending new-symbol candles onto
     // old-symbol data (which creates a visible gap)
@@ -569,6 +574,8 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
     // series.update() concurrently will crash lightweight-charts.
     if (wsLiveRef.current) return
     if (!candleRef.current || lastCandleTimeRef.current === null || isFetchingRef.current) return
+    // Capture key before the async gap — used to discard stale responses
+    const capturedKey = paramsKeyRef.current
     // Request from last known candle onwards (no backward buffer so we never try
     // to update a non-last bar, which lightweight-charts forbids and throws on).
     const since = lastCandleTimeRef.current * 1000
@@ -577,6 +584,8 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: Ch
       const res = await axios.get('/api/charts/candles', {
         params: { symbol, timeframe, broker, since, until },
       })
+      // Discard if params changed or a full fetch started while we were waiting
+      if (isFetchingRef.current || paramsKeyRef.current !== capturedKey) return
       const fresh: Candle[] = (res.data.candles as Candle[]).sort((a, b) => a.time - b.time)
       let didUpdate = false
       for (const c of fresh) {

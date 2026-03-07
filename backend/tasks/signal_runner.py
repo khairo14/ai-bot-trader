@@ -194,7 +194,7 @@ def run_signals(self):
                         _candle_start = datetime.fromtimestamp(
                             int(datetime.now(_tz.utc).timestamp() // _candle_secs) * _candle_secs,
                             tz=_tz.utc,
-                        )
+                        ).replace(tzinfo=None)  # tz-naive to match TIMESTAMP WITHOUT TIME ZONE
                         _dup_q = await session.execute(
                             select(SignalModel.id).where(
                                 and_(

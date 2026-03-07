@@ -224,12 +224,15 @@ class _IBKRManager:
         await self._ib.qualifyContractsAsync(contract)
         # Forex trades 24/5 — RTH filter must be off; stocks use RTH only
         use_rth = contract.secType != "CASH"
+        # MIDPOINT is only valid for Forex (CASH secType).
+        # Stocks, ETFs, and options require "TRADES".
+        what_to_show = "MIDPOINT" if contract.secType == "CASH" else "TRADES"
         bars = await self._ib.reqHistoricalDataAsync(
             contract,
             endDateTime="",
             durationStr=duration,
             barSizeSetting=bar_size,
-            whatToShow="MIDPOINT",
+            whatToShow=what_to_show,
             useRTH=use_rth,
         )
         return bars
@@ -469,10 +472,13 @@ class IBKRClient(AbstractBroker):
             "1m": "1 min",
             "5m": "5 mins",
             "15m": "15 mins",
+            "30m": "30 mins",
             "1h": "1 hour",
             "1 hour": "1 hour",
             "4h": "4 hours",
             "1d": "1 day",
+            "3d": "3 days",
+            "1w": "1 week",
         }
         bar_size = bar_size_map.get(timeframe, "1 hour")
         # Convert bar_size to minutes per bar so we can compute the correct duration.
@@ -483,10 +489,26 @@ class IBKRClient(AbstractBroker):
         _bar_minutes = {
             "1 min": 1, "5 mins": 5, "15 mins": 15, "30 mins": 30,
             "1 hour": 60, "4 hours": 240, "1 day": 390,
+            "3 days": 1170, "1 week": 1950,
         }
         mins_per_bar = _bar_minutes.get(bar_size, 60)
         trading_days_needed = (limit * mins_per_bar + 390) / 390
         calendar_days = int(trading_days_needed * 7 / 5) + 5  # +5 day buffer
+        # Cap to IBKR's hard historical-data limits per bar size.
+        # Requesting more triggers pacing delays (up to 10 min wait) or flat rejection.
+        # Source: TWS API documentation — reqHistoricalData max durations.
+        _max_calendar_days = {
+            "1 min":   7,    # 1 W max
+            "5 mins":  30,   # 1 M max
+            "15 mins": 60,   # 2 M max
+            "30 mins": 180,  # 6 M max
+            "1 hour":  365,  # 1 Y max
+            "4 hours": 365,  # 1 Y max
+            "1 day":   3650, # 10 Y — effectively unlimited
+            "3 days":  3650,
+            "1 week":  3650,
+        }
+        calendar_days = min(calendar_days, _max_calendar_days.get(bar_size, 365))
         duration = f"{max(1, calendar_days)} D"
 
         loop = asyncio.get_event_loop()

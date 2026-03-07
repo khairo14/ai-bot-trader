@@ -98,7 +98,7 @@ class ForwardEngine:
         plus the unrealized PnL of open trades that have a pnl value (F-033)."""
         from datetime import timezone as _tz
         today_start = datetime.now(_tz.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=None
         )
         # Realised P&L from closed trades today
         q_realised = await db_session.execute(

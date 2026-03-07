@@ -14,6 +14,27 @@ from db.models import Trade, OrderStatus
 router = APIRouter()
 
 
+def _trade_dict(t: Trade) -> dict:
+    return {
+        "id": t.id,
+        "symbol": t.symbol,
+        "side": t.side,
+        "quantity": t.quantity,
+        "entry_price": t.entry_price,
+        "exit_price": t.exit_price,
+        "stop_loss": t.stop_loss,
+        "take_profit": t.take_profit,
+        "pnl": t.pnl,
+        "pnl_pct": t.pnl_pct,
+        "broker": t.broker.value if hasattr(t.broker, "value") else t.broker,
+        "strategy_name": t.strategy_name,
+        "is_paper": t.is_paper,
+        "status": t.status.value if hasattr(t.status, "value") else t.status,
+        "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+        "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+    }
+
+
 @router.get("/open")
 async def get_open_positions(db: AsyncSession = Depends(get_db)):
     """Get all currently open (paper or live) positions."""
@@ -21,7 +42,7 @@ async def get_open_positions(db: AsyncSession = Depends(get_db)):
         select(Trade).where(Trade.status == OrderStatus.OPEN)
     )
     trades = result.scalars().all()
-    return {"positions": trades}
+    return {"positions": [_trade_dict(t) for t in trades]}
 
 
 @router.get("/history")
@@ -31,7 +52,7 @@ async def get_trade_history(db: AsyncSession = Depends(get_db)):
         select(Trade).where(Trade.status == OrderStatus.FILLED)
     )
     trades = result.scalars().all()
-    return {"trades": trades}
+    return {"trades": [_trade_dict(t) for t in trades]}
 
 
 @router.get("/history/export")

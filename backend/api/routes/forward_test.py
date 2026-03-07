@@ -790,9 +790,11 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
     )
     open_trades = q.scalars().all()
 
+    closed_count = 0
     for t in open_trades:
         try:
             await engine.close_position(t, reason="emergency_stop")
+            closed_count += 1
         except Exception as _e:
             logger.warning(f"[ForwardTest] Emergency stop: failed to close {t.symbol} id={t.id}: {_e}")
 
@@ -811,12 +813,12 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     from api.websocket import manager
-    await manager.broadcast("emergency_stop", {"closed_trades": len(open_trades)})
+    await manager.broadcast("emergency_stop", {"closed_trades": closed_count})
 
     return {
         "status": "emergency_stop_executed",
-        "closed_trades": len(open_trades),
-        "message": f"Closed {len(open_trades)} open paper trade(s) and deactivated all paper strategies.",
+        "closed_trades": closed_count,
+        "message": f"Closed {closed_count} of {len(open_trades)} open paper trade(s) and deactivated all paper strategies.",
     }
 
 

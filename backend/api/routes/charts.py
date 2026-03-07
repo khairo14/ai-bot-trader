@@ -169,35 +169,56 @@ async def get_candles(
         all_rows: list[tuple[int, object]] = []
         current_since = since
 
+        # IBKR does not support a `since` parameter — it always returns the most
+        # recent N bars computed from a duration string.  Call it *once* with a
+        # limit derived from the requested date range, then filter by since/until.
+        is_ibkr = broker.lower() == "ibkr"
+
         try:
-            while current_since < until and len(all_rows) < MAX_CANDLES:
+            if is_ibkr:
+                ibkr_limit = max(CHUNK, int((until - since) / tf_ms) + 10)
                 df = await client.get_ohlcv(
                     symbol.upper(), timeframe=timeframe,
-                    limit=CHUNK, since=current_since,
+                    limit=ibkr_limit, since=since,
                 )
-                if df.empty:
-                    break
+                if not df.empty:
+                    for ts, row in df.iterrows():
+                        try:
+                            t_ms = int(ts.timestamp() * 1000)  # type: ignore[union-attr]
+                        except Exception:
+                            continue
+                        if t_ms < since or t_ms > until:
+                            continue
+                        all_rows.append((t_ms, row))
+            else:
+                while current_since < until and len(all_rows) < MAX_CANDLES:
+                    df = await client.get_ohlcv(
+                        symbol.upper(), timeframe=timeframe,
+                        limit=CHUNK, since=current_since,
+                    )
+                    if df.empty:
+                        break
 
-                for ts, row in df.iterrows():
+                    for ts, row in df.iterrows():
+                        try:
+                            t_ms = int(ts.timestamp() * 1000)  # type: ignore[union-attr]
+                        except Exception:
+                            break
+                        if t_ms > until:
+                            break
+                        all_rows.append((t_ms, row))
+
+                    # Advance past last fetched candle
                     try:
-                        t_ms = int(ts.timestamp() * 1000)  # type: ignore[union-attr]
+                        last_ms = int(df.index[-1].timestamp() * 1000)  # type: ignore[union-attr]
                     except Exception:
                         break
-                    if t_ms > until:
-                        break
-                    all_rows.append((t_ms, row))
+                    if last_ms <= current_since:
+                        break  # no progress
+                    current_since = last_ms + tf_ms
 
-                # Advance past last fetched candle
-                try:
-                    last_ms = int(df.index[-1].timestamp() * 1000)  # type: ignore[union-attr]
-                except Exception:
-                    break
-                if last_ms <= current_since:
-                    break  # no progress
-                current_since = last_ms + tf_ms
-
-                if len(df) < CHUNK:
-                    break  # Binance returned less than a full chunk → no more data
+                    if len(df) < CHUNK:
+                        break  # Binance returned less than a full chunk → no more data
         finally:
             if hasattr(client, "close"):
                 try:

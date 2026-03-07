@@ -62,6 +62,8 @@ class AlpacaClient(AbstractBroker):
             "1Hour": TimeFrame.Hour,
             "4h":    TimeFrame(4, TimeFrameUnit.Hour),  # type: ignore[arg-type]
             "1d":    TimeFrame.Day,
+            "3d":    TimeFrame.Day,    # Alpaca has no native 3-day bar — use 1d
+            "1w":    TimeFrame.Week,
         }
         return mapping.get(tf, TimeFrame.Hour)
 
@@ -75,6 +77,7 @@ class AlpacaClient(AbstractBroker):
     _TF_MINUTES: dict[str, int] = {
         "1m": 1, "5m": 5, "15m": 15, "30m": 30,
         "1h": 60, "1Hour": 60, "4h": 240, "1d": 1440,
+        "3d": 1440, "1w": 1440,  # use daily minutes for start-date calculation
     }
 
     async def get_ohlcv(
