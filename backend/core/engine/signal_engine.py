@@ -9,16 +9,18 @@ from core.strategies.mean_reversion import MeanReversionBBStrategy
 from core.strategies.iron_condor import IronCondorStrategy
 from core.strategies.covered_call import CoveredCallStrategy
 from core.strategies.bull_call_spread import BullCallSpreadStrategy
+from core.strategies.volatility_squeeze import VolatilitySqueezeStrategy
 from brokers import get_broker
 
 
 STRATEGY_REGISTRY = {
-    "hybrid_macd_rsi":   HybridStrategy,
-    "momentum_breakout": MomentumBreakoutStrategy,
-    "mean_reversion_bb": MeanReversionBBStrategy,
-    "iron_condor":       IronCondorStrategy,
-    "covered_call":      CoveredCallStrategy,
-    "bull_call_spread":  BullCallSpreadStrategy,
+    "hybrid_macd_rsi":    HybridStrategy,
+    "momentum_breakout":  MomentumBreakoutStrategy,
+    "mean_reversion_bb":  MeanReversionBBStrategy,
+    "iron_condor":        IronCondorStrategy,
+    "covered_call":       CoveredCallStrategy,
+    "bull_call_spread":   BullCallSpreadStrategy,
+    "volatility_squeeze": VolatilitySqueezeStrategy,
 }
 
 # Asset class that each broker trades in for non-options strategies.

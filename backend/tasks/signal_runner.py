@@ -33,9 +33,10 @@ _HIGHER_TF: dict[str, list[str]] = {
 #   mean_reversion_bb  → 0.0  (counter-trend by design — bypass)
 MIN_CONFLUENCE = 0.5
 _STRATEGY_CONFLUENCE_DEFAULTS: dict[str, float] = {
-    "mean_reversion_bb": 0.0,   # counter-trend — higher TFs will always disagree
-    "hybrid_macd_rsi":   0.5,
-    "momentum_breakout": 0.5,
+    "mean_reversion_bb":  0.0,   # counter-trend — higher TFs will always disagree
+    "hybrid_macd_rsi":    0.5,
+    "momentum_breakout":  0.5,
+    "volatility_squeeze": 0.6,  # breakout after compression — multi-TF helps
 }
 
 
