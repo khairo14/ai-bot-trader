@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     ibkr_host: str = "host.docker.internal"
     ibkr_port: int = 7497
     ibkr_port_live: int = 7496
-    ibkr_client_id: int = 1
+    ibkr_client_id: int = 1          # FastAPI (web process)
+    ibkr_client_id_celery: int = 2   # Celery worker — must differ from ibkr_client_id
     ibkr_paper: bool = True
 
     # Paper trading
@@ -131,6 +132,14 @@ class Settings(BaseSettings):
             warnings.append("ALPACA_API_SECRET")
         if self.database_url in ("postgresql://trader:password@db:5432/ai_trader", ""):
             warnings.append("DATABASE_URL (still at default)")
+
+        # ── F-058: Reject CORS wildcard in production ───────────────────
+        if "*" in self.cors_origins and not self.debug:
+            raise ValueError(
+                "CORS_ORIGINS contains '*' but DEBUG=false. "
+                "Set CORS_ORIGINS to an explicit list of allowed origins for production."
+            )
+
         if warnings:
             logger.warning(
                 f"[Config] Missing or default secrets detected: {', '.join(warnings)}. "

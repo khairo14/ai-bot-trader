@@ -156,6 +156,38 @@ def run_signals(self):
                         except ValueError:
                             asset_cls = strat.asset_class
 
+                        # ── Deduplication: skip if identical signal already exists
+                        # within the current candle window (prevents duplicate orders
+                        # when Celery fires the same task multiple times per candle).
+                        from datetime import datetime, timezone as _tz
+                        from sqlalchemy import and_
+                        _tf_seconds = {
+                            "1m": 60, "5m": 300, "15m": 900, "1h": 3600,
+                            "4h": 14400, "1d": 86400, "1w": 604800,
+                        }
+                        _candle_secs = _tf_seconds.get(timeframe, 3600)
+                        _candle_start = datetime.fromtimestamp(
+                            int(datetime.now(_tz.utc).timestamp() // _candle_secs) * _candle_secs,
+                            tz=_tz.utc,
+                        )
+                        _dup_q = await session.execute(
+                            select(SignalModel.id).where(
+                                and_(
+                                    SignalModel.strategy_name == (sig.strategy_name or strategy_type),
+                                    SignalModel.symbol == sig.symbol,
+                                    SignalModel.signal == sig_type,
+                                    SignalModel.timeframe == timeframe,
+                                    SignalModel.created_at >= _candle_start,
+                                )
+                            ).limit(1)
+                        )
+                        if _dup_q.scalar_one_or_none() is not None:
+                            logger.debug(
+                                f"[signal_runner] Duplicate {sig.signal} {sig.symbol} "
+                                f"({timeframe}) for '{strat.name}' — skipped"
+                            )
+                            continue
+
                         db_signal = SignalModel(
                             symbol=sig.symbol,
                             signal=sig_type,

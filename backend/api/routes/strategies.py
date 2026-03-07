@@ -3,13 +3,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from db.database import get_db
 from db.models import Strategy, ExecutionMode, AssetClass, BrokerName
 from core.auth import get_current_user, require_admin, audit
 
 router = APIRouter()
+
+
+def _validate_enum_fields(broker: Optional[str], asset_class: Optional[str], execution_mode: Optional[str]) -> None:
+    """Raise HTTP 422 if any field value is not a valid enum member."""
+    if broker is not None:
+        try:
+            BrokerName(broker)
+        except ValueError:
+            valid = [e.value for e in BrokerName]
+            raise HTTPException(status_code=422, detail=f"Invalid broker '{broker}'. Valid: {valid}")
+    if asset_class is not None:
+        try:
+            AssetClass(asset_class)
+        except ValueError:
+            valid = [e.value for e in AssetClass]
+            raise HTTPException(status_code=422, detail=f"Invalid asset_class '{asset_class}'. Valid: {valid}")
+    if execution_mode is not None:
+        try:
+            ExecutionMode(execution_mode)
+        except ValueError:
+            valid = [e.value for e in ExecutionMode]
+            raise HTTPException(status_code=422, detail=f"Invalid execution_mode '{execution_mode}'. Valid: {valid}")
 
 
 class StrategyCreate(BaseModel):
@@ -43,6 +65,7 @@ async def list_strategies(db: AsyncSession = Depends(get_db)):
 @router.post("/")
 async def create_strategy(payload: StrategyCreate, db: AsyncSession = Depends(get_db), _: object = Depends(require_admin)):
     """Create a new strategy configuration."""
+    _validate_enum_fields(payload.broker, payload.asset_class, payload.execution_mode)
     strategy = Strategy(
         name=payload.name,
         description=payload.description,
@@ -149,6 +172,8 @@ async def update_strategy(
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
+    _validate_enum_fields(payload.broker, payload.asset_class, payload.execution_mode)
+
     if payload.name is not None:
         strategy.name = payload.name  # type: ignore[assignment]
     if payload.description is not None:
@@ -165,7 +190,7 @@ async def update_strategy(
         strategy.is_paper = payload.is_paper  # type: ignore[assignment]
     if payload.parameters is not None:
         strategy.parameters = payload.parameters  # type: ignore[assignment]
-    strategy.updated_at = datetime.utcnow()  # type: ignore[assignment]
+    strategy.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
 
     await db.commit()
     await db.refresh(strategy)

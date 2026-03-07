@@ -148,7 +148,7 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     logger.info("Starting AI Bot Trader backend...")
 
-    # Run pending Alembic migrations automatically on startup (I-02)
+    # Run pending Alembic migrations automatically on startup
     try:
         import subprocess, sys
         result = subprocess.run(
@@ -156,9 +156,13 @@ async def lifespan(app: FastAPI):
             capture_output=True, text=True
         )
         if result.returncode != 0:
-            logger.warning(f"Alembic upgrade warning: {result.stderr.strip()}")
+            err = result.stderr.strip() or result.stdout.strip()
+            logger.error(f"Alembic migration FAILED (rc={result.returncode}): {err}")
+            raise RuntimeError(f"Alembic upgrade head failed: {err}")
         else:
             logger.info("Alembic: schema up to date.")
+    except RuntimeError:
+        raise
     except Exception as e:
         logger.warning(f"Alembic auto-upgrade skipped: {e}")
 

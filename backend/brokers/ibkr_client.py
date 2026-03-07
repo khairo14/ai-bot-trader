@@ -66,7 +66,8 @@ class _IBKRManager:
     _SETTLE_SECS   = 2.0    # wait after connect for Gateway to push account data
     _CONNECT_TIMEOUT = 10   # seconds for connectAsync
 
-    def __init__(self) -> None:
+    def __init__(self, client_id: int | None = None) -> None:
+        self._client_id: int = client_id if client_id is not None else settings.ibkr_client_id
         self._ib: Optional[IB] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -128,14 +129,14 @@ class _IBKRManager:
             await self._ib.connectAsync(
                 host=settings.ibkr_host,
                 port=settings.ibkr_port,
-                clientId=settings.ibkr_client_id,
+                clientId=self._client_id,
                 timeout=self._CONNECT_TIMEOUT,
             )
             # Gateway pushes account data asynchronously — wait for it
             await asyncio.sleep(self._SETTLE_SECS)
             logger.info(
                 f"[IBKR] Persistent connection established "
-                f"(clientId={settings.ibkr_client_id}, port={settings.ibkr_port})"
+                f"(clientId={self._client_id}, port={settings.ibkr_port})"
             )
             return True
         except Exception as exc:
@@ -248,22 +249,27 @@ class _IBKRManager:
         contract = _ibkr_contract(symbol)
         await self._ib.qualifyContractsAsync(contract)
         ticker = self._ib.reqMktData(contract)
-        await asyncio.sleep(1)
-        # ib_insync sets all ticker fields to math.nan (NOT None/0) until the
-        # Gateway pushes the value.  Python's `or` short-circuits at nan (truthy)
-        # so the old  `ticker.last or ticker.close or …`  always returned nan.
-        price = 0.0
-        for _attr in ("last", "bid", "close"):
-            _v = getattr(ticker, _attr, None)
-            if _v is not None:
-                try:
-                    _fv = float(_v)
-                    if not math.isnan(_fv) and _fv > 0:
-                        price = _fv
-                        break
-                except (TypeError, ValueError):
-                    pass
+        # Poll until we get a valid price or hit the timeout (5 s).
+        # ib_insync initialises all ticker fields to math.nan, NOT None/0.
+        _deadline = asyncio.get_event_loop().time() + 5.0
+        while asyncio.get_event_loop().time() < _deadline:
+            price = 0.0
+            for _attr in ("last", "bid", "close"):
+                _v = getattr(ticker, _attr, None)
+                if _v is not None:
+                    try:
+                        _fv = float(_v)
+                        if not math.isnan(_fv) and _fv > 0:
+                            price = _fv
+                            break
+                    except (TypeError, ValueError):
+                        pass
+            if price > 0:
+                break
+            await asyncio.sleep(0.25)
         self._ib.cancelMktData(contract)
+        if price == 0.0:
+            raise ValueError(f"[IBKR] No valid price received for '{symbol}' within 5 s")
         return price
 
     def fetch_price(self, symbol: str) -> float:
@@ -355,7 +361,9 @@ class _IBKRManager:
                 pass
 
 
-_manager = _IBKRManager()
+_manager = _IBKRManager(client_id=settings.ibkr_client_id)
+# Celery workers use a separate clientId to avoid kicking the FastAPI connection
+_celery_manager = _IBKRManager(client_id=settings.ibkr_client_id_celery)
 
 
 def ibkr_balance_sync() -> Balance:

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Callable
@@ -66,12 +66,12 @@ class AlpacaClient(AbstractBroker):
         return mapping.get(tf, TimeFrame.Hour)
 
     async def get_price(self, symbol: str) -> float:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         req = StockLatestTradeRequest(symbol_or_symbols=symbol)
         resp = await loop.run_in_executor(None, lambda: self.data.get_stock_latest_trade(req))
         return float(resp[symbol].price)
 
-    # Minutes per timeframe string — used to compute start date from limit
+    # Minutes per timeframe string � used to compute start date from limit
     _TF_MINUTES: dict[str, int] = {
         "1m": 1, "5m": 5, "15m": 15, "30m": 30,
         "1h": 60, "1Hour": 60, "4h": 240, "1d": 1440,
@@ -84,12 +84,12 @@ class AlpacaClient(AbstractBroker):
         limit: int = 500,
         since: Optional[int] = None,
     ) -> pd.DataFrame:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         # Alpaca requires an explicit start date; derive it from limit when not given.
         # Stock markets trade only ~390 min/day (Mon-Fri 09:30-16:00 ET). The old
         # formula (timedelta minutes = minutes * limit) assumed 24/7 operation, so
         # for 1h+limit=200 it only went back 8 calendar days (~39 trading hours=39
-        # bars) — below the strategy's 50-bar minimum, causing "Insufficient data".
+        # bars) � below the strategy's 50-bar minimum, causing "Insufficient data".
         # Fix: convert trading minutes needed into calendar days with a safety buffer.
         if since:
             start = datetime.fromtimestamp(since / 1000, tz=timezone.utc)
@@ -128,7 +128,7 @@ class AlpacaClient(AbstractBroker):
         return df
 
     async def get_orderbook(self, symbol: str) -> dict:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
         resp = await loop.run_in_executor(None, lambda: self.data.get_stock_latest_quote(req))
         q = resp[symbol]
@@ -138,16 +138,16 @@ class AlpacaClient(AbstractBroker):
         }
 
     async def get_balance(self) -> Balance:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         account: Any = await loop.run_in_executor(None, self.trading.get_account)
         return Balance(
             total=float(account.portfolio_value),
-            available=float(account.buying_power),
+            available=float(account.cash),  # use cash, not buying_power (which includes margin)
             currency="USD",
         )
 
     async def get_positions(self) -> List[Position]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         raw: Any = await loop.run_in_executor(None, self.trading.get_all_positions)
         return [
             Position(
@@ -173,7 +173,7 @@ class AlpacaClient(AbstractBroker):
         take_profit_price: Optional[float] = None,
         **kwargs,
     ) -> OrderResult:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         logger.info(f"[Alpaca] {order_type.upper()} {side.upper()} {quantity} {symbol}")
         order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
         tif = TimeInForce.GTC
@@ -214,7 +214,7 @@ class AlpacaClient(AbstractBroker):
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, lambda: self.trading.cancel_order_by_id(order_id))
             return True
@@ -223,7 +223,7 @@ class AlpacaClient(AbstractBroker):
             return False
 
     async def get_order_status(self, order_id: str, symbol: str) -> OrderResult:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         raw_result: Any = await loop.run_in_executor(None, lambda: self.trading.get_order_by_id(order_id))
         return OrderResult(
             order_id=str(raw_result.id),
@@ -236,9 +236,12 @@ class AlpacaClient(AbstractBroker):
         )
 
     async def stream_prices(self, symbols: List[str], callback: Callable) -> None:
+        # Use credentials matching the current mode (paper vs live)
+        api_key = settings.alpaca_api_key if self._paper else (settings.alpaca_api_key_live or settings.alpaca_api_key)
+        api_secret = settings.alpaca_api_secret if self._paper else (settings.alpaca_api_secret_live or settings.alpaca_api_secret)
         stream = StockDataStream(
-            api_key=settings.alpaca_api_key,
-            secret_key=settings.alpaca_api_secret,
+            api_key=api_key,
+            secret_key=api_secret,
             feed=DataFeed(settings.alpaca_data_feed),
         )
 

@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, update, or_
+from sqlalchemy import select, desc, update, or_, and_
 from typing import Optional
 from datetime import datetime, timedelta
 
 from db.database import get_db
 from db.models import Signal, Strategy, ExecutionMode, SignalType
+from core.auth import get_current_user
 
 router = APIRouter()
 
@@ -44,14 +45,20 @@ async def list_signals(
     broker: Optional[str] = None,
     limit: int = Query(default=50, le=500),
     db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
 ):
-    """Get recent signals, optionally filtered by symbol and broker. Dismissed signals are hidden."""
+    """Get recent signals. Admins see all; regular users see system signals + their own (F-059)."""
     query = (
         select(Signal)
         .where(Signal.dismissed == False)  # noqa: E712
         .order_by(desc(Signal.created_at))
         .limit(limit)
     )
+    if not current_user.is_admin:
+        # Non-admins see: signals they created OR system-generated signals (user_id=NULL)
+        query = query.where(
+            or_(Signal.user_id == current_user.id, Signal.user_id.is_(None))
+        )
     if symbol:
         query = query.where(Signal.symbol == symbol.upper())
     if broker:

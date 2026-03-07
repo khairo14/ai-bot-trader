@@ -28,13 +28,12 @@ class Base(DeclarativeBase):
 
 
 async def init_db():
-    """Create all tables on startup, and apply safe column additions for existing tables."""
+    """Apply safe additive column migrations only — schema is managed by Alembic."""
     from db import models  # noqa: F401 — ensure models are registered
     from sqlalchemy import text
+    # NOTE: create_all() is intentionally removed — use `alembic upgrade head` for schema.
+    # Only idempotent ADD COLUMN IF NOT EXISTS statements are allowed here.
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # Safe column additions — ADD COLUMN IF NOT EXISTS is idempotent on PostgreSQL.
-        # Add new columns here whenever the Trade (or other) model grows new fields.
         safe_alters = [
             "ALTER TABLE trades ADD COLUMN IF NOT EXISTS notes VARCHAR(500)",
             "ALTER TABLE signals ADD COLUMN IF NOT EXISTS dismissed BOOLEAN DEFAULT FALSE",
@@ -44,7 +43,7 @@ async def init_db():
                 await conn.execute(text(stmt))
             except Exception as e:
                 logger.warning(f"[DB] Column migration skipped ({stmt}): {e}")
-    logger.info("Database tables created / verified.")
+    logger.info("Database schema verified (Alembic-managed).")
 
 
 async def get_db():

@@ -39,7 +39,7 @@ class ForwardEngine:
     def __init__(self):
         self.risk_manager = RiskManager()
         self._paper_positions: dict = {}     # symbol → Trade (open positions, any mode)
-        self._paper_balance: float = PAPER_INITIAL_CAPITAL  # fallback if broker unreachable
+        self._paper_balance: dict[str, float] = {}   # broker_name → paper balance (F-028)
         self._emergency_stop_active: bool = False
         self._initialized: bool = False
 
@@ -63,20 +63,29 @@ class ForwardEngine:
         open_trades = open_q.scalars().all()
         self._paper_positions = {t.symbol: t for t in open_trades}
 
-        # Re-compute paper balance from realised P&L
-        pnl_q = await db_session.execute(
-            select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
-                Trade.is_paper == True,
-                Trade.status == OrderStatus.FILLED,
-            )
+        # Re-compute paper balance per broker from realised P&L (F-028)
+        from sqlalchemy import distinct
+        broker_q = await db_session.execute(
+            select(distinct(Trade.broker)).where(Trade.is_paper == True)
         )
-        realised_pnl: float = pnl_q.scalar_one()
-        self._paper_balance = PAPER_INITIAL_CAPITAL + realised_pnl
+        brokers = [row[0] for row in broker_q.all()]
+        self._paper_balance = {}
+        for broker_val in brokers:
+            pnl_q = await db_session.execute(
+                select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
+                    Trade.is_paper == True,
+                    Trade.status == OrderStatus.FILLED,
+                    Trade.broker == broker_val,
+                )
+            )
+            realised_pnl: float = pnl_q.scalar_one()
+            key = broker_val.value if hasattr(broker_val, 'value') else str(broker_val)
+            self._paper_balance[key] = PAPER_INITIAL_CAPITAL + realised_pnl
 
         self._initialized = True
         logger.info(
             f"[ForwardEngine] Hydrated: {len(self._paper_positions)} open paper positions, "
-            f"paper balance=${self._paper_balance:,.2f}"
+            f"per-broker paper balances: { {k: f'${v:,.2f}' for k, v in self._paper_balance.items()} }"
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -85,17 +94,30 @@ class ForwardEngine:
 
     @staticmethod
     async def _daily_pnl(db_session) -> float:
-        """Return the sum of realised P&L for trades closed today (UTC)."""
-        today_start = datetime.utcnow().replace(
+        """Return the sum of realised P&L for trades closed today (UTC)
+        plus the unrealized PnL of open trades that have a pnl value (F-033)."""
+        from datetime import timezone as _tz
+        today_start = datetime.now(_tz.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        q = await db_session.execute(
+        # Realised P&L from closed trades today
+        q_realised = await db_session.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
                 Trade.status == OrderStatus.FILLED,
                 Trade.closed_at >= today_start,
             )
         )
-        return q.scalar_one()
+        realised: float = q_realised.scalar_one()
+        # Unrealized component: open trades where pnl has been updated (non-null).
+        # Captures mid-day losses that haven't been closed yet.
+        q_open = await db_session.execute(
+            select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
+                Trade.status == OrderStatus.OPEN,
+                Trade.pnl.isnot(None),
+            )
+        )
+        unrealized: float = q_open.scalar_one()
+        return realised + unrealized
 
     # ──────────────────────────────────────────────────────────────────────────
     # Core signal processing
@@ -132,7 +154,8 @@ class ForwardEngine:
             balance = bal.available
         except Exception as _bal_err:
             logger.warning(f"[ForwardEngine] Could not fetch balance from {signal.broker}: {_bal_err} — using fallback")
-            balance = self._paper_balance  # fallback: last known in-memory value
+            broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
+            balance = self._paper_balance.get(broker_key, PAPER_INITIAL_CAPITAL)
         try:
             positions = await broker.get_positions()
             open_count = len(positions)

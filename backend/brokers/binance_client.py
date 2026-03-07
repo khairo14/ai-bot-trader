@@ -172,7 +172,7 @@ class BinanceClient(AbstractBroker):
                         symbol=symbol,
                         side="long",
                         quantity=free,
-                        entry_price=0.0,  # spot has no tracked entry
+                        entry_price=price,  # spot has no tracked entry; use current price → PnL = 0
                         current_price=price,
                         unrealized_pnl=0.0,
                         asset_class="crypto",
@@ -262,8 +262,14 @@ class BinanceClient(AbstractBroker):
                     stream_data = data.get("data", data)
                     symbol_raw = stream_data.get("s", "")
                     price = float(stream_data.get("p", 0))
-                    # Convert BTCUSDT → BTC/USDT
-                    symbol = symbol_raw[:-4] + "/" + symbol_raw[-4:] if symbol_raw.endswith("USDT") else symbol_raw
+                    # Convert e.g. BTCUSDT → BTC/USDT, ETHBTC → ETH/BTC, BTCBUSD → BTC/BUSD
+                    # Strategy: try each known quote suffix (longest first) to avoid partial matches.
+                    _QUOTE_SUFFIXES = ["USDT", "BUSD", "USDC", "BTC", "ETH", "BNB", "EUR", "GBP"]
+                    symbol = symbol_raw  # fallback: raw stream symbol
+                    for _quote in _QUOTE_SUFFIXES:
+                        if symbol_raw.endswith(_quote) and len(symbol_raw) > len(_quote):
+                            symbol = symbol_raw[:-len(_quote)] + "/" + _quote
+                            break
                     if price > 0:
                         await callback(symbol, price) if asyncio.iscoroutinefunction(callback) else callback(symbol, price)
                 except Exception as e:

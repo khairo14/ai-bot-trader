@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from loguru import logger
@@ -58,12 +58,15 @@ def create_access_token(subject: str, expires_delta: Optional[timedelta] = None)
 
 # ── FastAPI dependency ───────────────────────────────────────────────────────
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
+async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)):
     """
-    Resolve a Bearer token to a User row.
+    Resolve a Bearer token (Authorization header) or httpOnly cookie to a User row.
+    Cookie name: 'access_token' (F-056). Header takes precedence for API clients.
     Raises HTTP 401 if the token is missing, invalid, or expired.
-    Inject via:  user: User = Depends(get_current_user)
     """
+    # Prefer Authorization header (API / Swagger); fall back to httpOnly cookie
+    cookie_token: Optional[str] = request.cookies.get("access_token")
+    resolved_token = token if token else cookie_token
     from db.database import AsyncSessionLocal
     from db.models import User
     from sqlalchemy import select
@@ -75,7 +78,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     )
 
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        if not resolved_token:
+            raise credentials_exc
+        payload = jwt.decode(resolved_token, settings.secret_key, algorithms=[ALGORITHM])
         username: Optional[str] = payload.get("sub")
         if not username:
             raise credentials_exc

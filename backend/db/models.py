@@ -86,7 +86,7 @@ class Signal(Base):
     regime: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     asset_class: Mapped[AssetClass] = mapped_column(SAEnum(AssetClass), nullable=False)
     broker: Mapped[BrokerName] = mapped_column(SAEnum(BrokerName), nullable=False)
-    execution_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # suggestion | semi-auto | full-auto
+    execution_mode: Mapped[Optional[ExecutionMode]] = mapped_column(SAEnum(ExecutionMode), nullable=True)  # suggestion | semi-auto | full-auto
     reasons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # list of reason strings
     acted_on: Mapped[bool] = mapped_column(Boolean, default=False)
     dismissed: Mapped[bool] = mapped_column(Boolean, default=False)  # hidden from Recent Signals UI
@@ -97,6 +97,7 @@ class Signal(Base):
     theta:   Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     vega:    Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     options_meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True) # strikes, expiry, legs
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # owner (F-059)
 
     trade: Mapped[Optional[Trade]] = relationship("Trade", back_populates="signal", uselist=False)
     outcome: Mapped[Optional[TradeOutcome]] = relationship("TradeOutcome", back_populates="signal", uselist=False)
@@ -164,6 +165,7 @@ class Trade(Base):
     opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # owner (F-059)
 
     signal: Mapped[Optional[Signal]] = relationship("Signal", back_populates="trade")
 

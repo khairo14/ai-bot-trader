@@ -154,10 +154,17 @@ class RegimeClassifier:
         # Normalised ATR: ATR as fraction of price
         atr_norm = float(atr_out.value) / current_price if current_price > 0 else 0.0
 
-        # EMA slope: how much the fast EMA has moved over the last N candles
-        # We derive it from the close prices as a proxy (fast EMA ≈ recent closes)
-        slope_window = data["close"].iloc[-self.EMA_SLOPE_PERIODS - 1:-1]
-        ema_slope = float(slope_window.iloc[-1] - slope_window.iloc[0]) / float(abs(slope_window.iloc[0]) or 1)
+        # EMA slope: compute from a proper EMA series, not raw closes.
+        # Raw closes are noisy; the Pandas EMA smooths out intraday wicks.
+        _ema_period = 9
+        _ema_series = data["close"].ewm(span=_ema_period, adjust=False).mean()
+        if len(_ema_series) >= self.EMA_SLOPE_PERIODS + 1:
+            _slope_now   = float(_ema_series.iloc[-1])
+            _slope_past  = float(_ema_series.iloc[-self.EMA_SLOPE_PERIODS - 1])
+        else:
+            _slope_now  = float(data["close"].iloc[-1])
+            _slope_past = float(data["close"].iloc[0])
+        ema_slope = (_slope_now - _slope_past) / abs(_slope_past) if _slope_past != 0 else 0.0
 
         # BB width: (upper - lower) / middle
         upper  = bb_out.metadata.get("upper",  current_price * 1.02)

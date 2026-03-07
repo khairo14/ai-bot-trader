@@ -7,7 +7,7 @@ Auth API
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select, func
 from loguru import logger
@@ -24,6 +24,8 @@ import collections, time as _time
 _LOGIN_WINDOW = 300       # 5-minute sliding window
 _LOGIN_MAX_ATTEMPTS = 10  # max failed attempts per IP in that window
 _login_attempts: dict[str, list[float]] = collections.defaultdict(list)
+
+_JWT_COOKIE = "access_token"  # httpOnly cookie name (F-056)
 
 
 # ── Request / response schemas ───────────────────────────────────────────────
@@ -100,8 +102,8 @@ async def register(payload: RegisterRequest):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest, request: Request):
-    """Authenticate with username + password, returns a 7-day JWT."""
+async def login(payload: LoginRequest, request: Request, response: Response):
+    """Authenticate with username + password; sets an httpOnly cookie (F-056)."""
     client_ip = request.client.host if request.client else "unknown"
 
     # Rate-limit check — sliding window per source IP
@@ -134,12 +136,28 @@ async def login(payload: LoginRequest, request: Request):
     token = create_access_token(subject=user.username)
     logger.info(f"[Auth] Login: {user.username}")
     audit("user.login", actor=user.username, ip=client_ip)
+    # Set httpOnly, Secure, SameSite=Strict cookie (F-056)
+    response.set_cookie(
+        key=_JWT_COOKIE,
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=7 * 24 * 3600,
+        path="/",
+    )
     return TokenResponse(
         access_token=token,
         token_type="bearer",
         username=user.username,
         is_admin=user.is_admin,
     )
+
+
+@router.post("/logout", status_code=204)
+async def logout(response: Response) -> None:
+    """Clear the JWT cookie."""
+    response.delete_cookie(key=_JWT_COOKIE, path="/")
 
 
 @router.get("/me", response_model=UserResponse)

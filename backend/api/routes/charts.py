@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
+import time
+from collections import defaultdict
 from typing import Optional
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Request
 from sqlalchemy import select, desc
 from loguru import logger
 
@@ -8,6 +10,24 @@ from db.database import AsyncSessionLocal
 from db.models import Signal, Trade, OrderStatus
 
 router = APIRouter()
+
+# ── Simple per-user rate limiter for the charts candles endpoint ─────────────
+# Max 10 requests per minute per user (identified by JWT sub claim).
+_RATE_LIMIT_WINDOW = 60   # seconds
+_RATE_LIMIT_MAX    = 10   # requests per window
+_rate_hits: dict[str, list[float]] = defaultdict(list)
+
+def _check_chart_rate_limit(request: Request) -> None:
+    """Raise HTTP 429 if the calling user exceeds the chart rate limit."""
+    user_id = getattr(getattr(request.state, "user", None), "id", None)
+    key = f"chart:{user_id or request.client.host if request.client else 'anon'}"
+    now = time.monotonic()
+    hits = _rate_hits[key]
+    # Expire old hits outside the window
+    _rate_hits[key] = [t for t in hits if now - t < _RATE_LIMIT_WINDOW]
+    if len(_rate_hits[key]) >= _RATE_LIMIT_MAX:
+        raise HTTPException(status_code=429, detail="Chart rate limit exceeded — max 10 requests/min")
+    _rate_hits[key].append(now)
 
 # Popular Alpaca/IBKR stocks — fallback when broker can't enumerate assets
 _ALPACA_DEFAULTS = [
@@ -113,6 +133,7 @@ _TF_MS: dict[str, int] = {
 
 @router.get("/candles")
 async def get_candles(
+    request: Request,
     symbol: str = Query(..., description="e.g. BTC/USDT or AAPL"),
     timeframe: str = Query(default="1h", description="1m 5m 15m 1h 4h 1d 3d 1w"),
     broker: str = Query(default="binance", description="binance | alpaca | ibkr"),
@@ -121,9 +142,10 @@ async def get_candles(
 ):
     """
     Return OHLCV candles for lightweight-charts.
-    Paginates Binance’s 1000-candle-per-call limit automatically so any date
+    Paginates Binance's 1000-candle-per-call limit automatically so any date
     range works correctly regardless of timeframe.
     """
+    _check_chart_rate_limit(request)
     CHUNK = 1000          # Binance max per request
     MAX_CANDLES = 5000    # safety cap (~5 paginated calls)
 
