@@ -210,7 +210,7 @@ class ForwardEngine:
             asset_class=signal.asset_class,
             is_paper=is_paper,
             strategy_name=signal.strategy_name,
-            opened_at=datetime.now(timezone.utc),
+            opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
 
         # ── Broker API order (paper OR live) ────────────────────────────────────
@@ -349,7 +349,7 @@ class ForwardEngine:
             trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
 
         trade.status = OrderStatus.FILLED
-        trade.closed_at = datetime.now(timezone.utc)
+        trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         # Remove from in-memory cache
         self._paper_positions.pop(trade.symbol, None)
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Optional
+
+# All DateTime columns are TIMESTAMP WITHOUT TIME ZONE — use tz-naive UTC datetimes
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 from sqlalchemy import (
     String, Float, Integer, Boolean,
     DateTime, Text, Enum as SAEnum, ForeignKey, JSON
@@ -90,7 +94,7 @@ class Signal(Base):
     reasons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # list of reason strings
     acted_on: Mapped[bool] = mapped_column(Boolean, default=False)
     dismissed: Mapped[bool] = mapped_column(Boolean, default=False)  # hidden from Recent Signals UI
-    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow)
     # ── Options-specific fields (NULL for equity / crypto signals) ───────────
     iv_rank: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # 0–100
     delta:   Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -131,7 +135,7 @@ class TradeOutcome(Base):
     candles_held: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ml_label: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)   # 1=win, 0=loss (for retraining)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow, index=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     signal: Mapped[Optional[Signal]] = relationship("Signal", back_populates="outcome")
@@ -164,7 +168,7 @@ class Trade(Base):
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # rejection reason, halt info, etc.
     opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow)
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # owner (F-059)
 
     signal: Mapped[Optional[Signal]] = relationship("Signal", back_populates="trade")
@@ -185,8 +189,8 @@ class Strategy(Base):
     parameters: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)   # strategy-specific config
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 # ─────────────────────────────────────────────────────────
@@ -216,7 +220,7 @@ class BacktestResult(Base):
     rr_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     trades_detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)   # full list of trades
     parameters: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow)
 
 
 # ─────────────────────────────────────────────────────────
@@ -233,7 +237,7 @@ class Notification(Base):
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     email_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     extra: Mapped[Optional[dict]] = mapped_column("metadata", JSON, nullable=True)   # symbol, broker, trade_id, etc.
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
 
 # ─────────────────────────────────────────────────────────
@@ -248,4 +252,4 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(200), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow)

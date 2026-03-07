@@ -190,7 +190,7 @@ async def update_strategy(
         strategy.is_paper = payload.is_paper  # type: ignore[assignment]
     if payload.parameters is not None:
         strategy.parameters = payload.parameters  # type: ignore[assignment]
-    strategy.updated_at = datetime.now(timezone.utc)  # type: ignore[assignment]
+    strategy.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)  # type: ignore[assignment]
 
     await db.commit()
     await db.refresh(strategy)
