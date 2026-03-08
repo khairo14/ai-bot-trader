@@ -106,6 +106,10 @@ class BinanceClient(AbstractBroker):
         df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df.set_index("timestamp", inplace=True)
+        # Drop the last (still-forming) candle — ccxt always includes the current
+        # incomplete bar as the final row, which can generate false signals.
+        if len(df) > 1:
+            df = df.iloc[:-1]
         return df
 
     async def get_orderbook(self, symbol: str) -> dict:
@@ -212,14 +216,44 @@ class BinanceClient(AbstractBroker):
         else:
             result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
 
+        order_id = str(result["id"])
+        fill_price: Optional[float] = float(result.get("average") or result.get("price") or 0.0) or None
+
+        # ── Poll for fill confirmation if not immediately filled ─────────────
+        if not fill_price or str(result.get("status")) != "closed":
+            _FILL_TIMEOUT = 10.0
+            _POLL_INTERVAL = 0.5
+            _elapsed = 0.0
+            while _elapsed < _FILL_TIMEOUT:
+                await asyncio.sleep(_POLL_INTERVAL)
+                _elapsed += _POLL_INTERVAL
+                try:
+                    _status = await self.exchange.fetch_order(order_id, symbol)
+                    _st = str(_status.get("status", ""))
+                    if _st == "closed":
+                        fill_price = float(_status.get("average") or _status.get("price") or 0.0) or None
+                        logger.info(f"[Binance] Order {order_id} filled @ {fill_price}")
+                        break
+                    elif _st in ("canceled", "expired", "rejected"):
+                        raise RuntimeError(
+                            f"Binance order {order_id} ended with status '{_st}' — not filled"
+                        )
+                except RuntimeError:
+                    raise
+                except Exception as _pe:
+                    logger.debug(f"[Binance] Poll {order_id}: {_pe}")
+            else:
+                logger.warning(f"[Binance] Order {order_id} not confirmed filled within {_FILL_TIMEOUT}s")
+
         return OrderResult(
-            order_id=str(result["id"]),
+            order_id=order_id,
             symbol=symbol,
             side=side,
             quantity=quantity,
             price=float(result.get("price") or result.get("average") or 0.0),
-            status=str(result.get("status") or "open"),
+            status="filled" if fill_price else str(result.get("status") or "open"),
             raw=dict(result),  # type: ignore[arg-type]
+            fill_price=fill_price,
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

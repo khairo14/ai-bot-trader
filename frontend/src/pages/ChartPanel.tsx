@@ -373,10 +373,19 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     })
     subChart.current = sc
 
+    // MACD price format — uses enough decimal places for forex (tiny values like 0.00012)
+    const macdPriceFmt = { type: 'custom' as const, formatter: (v: number) => {
+      const abs = Math.abs(v)
+      if (abs === 0) return '0.00'
+      if (abs < 0.0001) return v.toFixed(6)
+      if (abs < 0.01)   return v.toFixed(5)
+      if (abs < 1)      return v.toFixed(4)
+      return v.toFixed(2)
+    }}
     rsiRef.current = sc.addSeries(LineSeries, { color: '#38bdf8', lineWidth: 2, priceLineVisible: false })
-    macdLineRef.current = sc.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 1, priceLineVisible: false, visible: false })
-    macdSignRef.current = sc.addSeries(LineSeries, { color: '#ec4899', lineWidth: 1, priceLineVisible: false, visible: false })
-    macdHistRef.current = sc.addSeries(HistogramSeries, { priceLineVisible: false, visible: false })
+    macdLineRef.current = sc.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 1, priceLineVisible: false, lastValueVisible: true, priceFormat: macdPriceFmt, visible: false })
+    macdSignRef.current = sc.addSeries(LineSeries, { color: '#ec4899', lineWidth: 1, priceLineVisible: false, lastValueVisible: true, priceFormat: macdPriceFmt, visible: false })
+    macdHistRef.current = sc.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: true, priceFormat: macdPriceFmt, visible: false })
 
     // Sync scroll/zoom between panels
     mc.timeScale().subscribeVisibleLogicalRangeChange(range => {

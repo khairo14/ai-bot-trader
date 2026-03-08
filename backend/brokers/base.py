@@ -12,9 +12,10 @@ class OrderResult:
     symbol: str
     side: str
     quantity: float
-    price: float
+    price: float          # submitted/limit price
     status: str
     raw: dict
+    fill_price: Optional[float] = None   # actual fill price once confirmed
 
 
 @dataclass

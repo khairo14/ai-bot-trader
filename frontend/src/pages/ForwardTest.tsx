@@ -678,8 +678,10 @@ export default function ForwardTest() {
                       </td>
                       <td className="px-3 py-2">
                         <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                          t.status === 'open' ? 'bg-blue-500/15 text-blue-400' :
-                          t.status === 'filled' ? 'bg-green-500/15 text-green-400' :
+                          t.status === 'open'     ? 'bg-blue-500/15 text-blue-400' :
+                          t.status === 'filled'   ? 'bg-green-500/15 text-green-400' :
+                          t.status === 'pending'  ? 'bg-yellow-500/15 text-yellow-400' :
+                          t.status === 'rejected' ? 'bg-red-500/15 text-red-400' :
                           'bg-gray-700 text-gray-400'
                         }`}>
                           {t.status}

@@ -206,14 +206,46 @@ class AlpacaClient(AbstractBroker):
                 time_in_force=TimeInForce.DAY,
             )
         raw_result: Any = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+        order_id = str(raw_result.id)
+        fill_price: Optional[float] = None
+
+        # ── Poll for fill confirmation (up to 10 s for market orders) ──────────
+        # Market orders on Alpaca fill almost instantly during session hours.
+        # We poll get_order_by_id until status is 'filled' or timeout.
+        _FILL_TIMEOUT = 10.0   # seconds
+        _POLL_INTERVAL = 0.5
+        _elapsed = 0.0
+        while _elapsed < _FILL_TIMEOUT:
+            await asyncio.sleep(_POLL_INTERVAL)
+            _elapsed += _POLL_INTERVAL
+            try:
+                _status_raw: Any = await loop.run_in_executor(
+                    None, lambda: self.trading.get_order_by_id(order_id)
+                )
+                if str(_status_raw.status) == "filled":
+                    fill_price = float(_status_raw.filled_avg_price) if _status_raw.filled_avg_price else None
+                    logger.info(f"[Alpaca] Order {order_id} filled @ {fill_price}")
+                    break
+                elif str(_status_raw.status) in ("canceled", "expired", "rejected"):
+                    raise RuntimeError(
+                        f"Alpaca order {order_id} ended with status '{_status_raw.status}' — not filled"
+                    )
+            except RuntimeError:
+                raise
+            except Exception as _pe:
+                logger.debug(f"[Alpaca] Poll {order_id}: {_pe}")
+        else:
+            logger.warning(f"[Alpaca] Order {order_id} not confirmed filled within {_FILL_TIMEOUT}s — treating as pending")
+
         return OrderResult(
-            order_id=str(raw_result.id),
+            order_id=order_id,
             symbol=symbol,
             side=side,
             quantity=quantity,
             price=float(raw_result.limit_price) if raw_result.limit_price else 0.0,
-            status=str(raw_result.status),
+            status="filled" if fill_price is not None else str(raw_result.status),
             raw=raw_result.model_dump(),
+            fill_price=fill_price,
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

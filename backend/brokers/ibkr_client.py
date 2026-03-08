@@ -6,7 +6,7 @@ import pandas as pd
 from typing import List, Optional, Callable
 from loguru import logger
 
-from ib_insync import IB, Stock, Forex as IBForex, Option, Contract, MarketOrder, LimitOrder, StopLimitOrder, Trade as IBTrade
+from ib_insync import IB, Stock, Forex as IBForex, Option, Contract, MarketOrder, LimitOrder, StopLimitOrder, StopOrder, Trade as IBTrade
 
 from config import settings
 from brokers.base import AbstractBroker, OrderResult, Position, Balance
@@ -181,6 +181,72 @@ class _IBKRManager:
 
     def is_connected(self) -> bool:
         return bool(self._ib and self._ib.isConnected())
+
+    async def _place_bracket_async(
+        self,
+        contract,
+        action: str,
+        quantity: float,
+        take_profit_price: Optional[float],
+        stop_loss_price: Optional[float],
+    ) -> "IBTrade":
+        """Place a market entry bracketed by TP limit and/or SL stop orders."""
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        ib = self._ib
+        reverse = "SELL" if action == "BUY" else "BUY"
+        has_tp = take_profit_price is not None
+        has_sl = stop_loss_price is not None
+
+        parent = MarketOrder(
+            action, quantity,
+            orderId=ib.client.getReqId(),
+            transmit=not (has_tp or has_sl),
+        )
+        orders = [parent]
+
+        if has_tp:
+            tp = LimitOrder(
+                reverse, quantity, take_profit_price,
+                orderId=ib.client.getReqId(),
+                parentId=parent.orderId,
+                tif="GTC",
+                transmit=not has_sl,
+            )
+            orders.append(tp)
+
+        if has_sl:
+            sl = StopOrder(
+                reverse, quantity, stop_loss_price,
+                orderId=ib.client.getReqId(),
+                parentId=parent.orderId,
+                tif="GTC",
+                transmit=True,
+            )
+            orders.append(sl)
+
+        parent_trade: Optional[IBTrade] = None
+        for o in orders:
+            t = ib.placeOrder(contract, o)
+            if o.orderId == parent.orderId:
+                parent_trade = t
+        await asyncio.sleep(0.5)
+        assert parent_trade is not None
+        return parent_trade
+
+    def place_bracket_sync(
+        self,
+        contract,
+        action: str,
+        quantity: float,
+        take_profit_price: Optional[float],
+        stop_loss_price: Optional[float],
+    ) -> "IBTrade":
+        """Synchronous wrapper for _place_bracket_async for use with run_in_executor."""
+        return self._submit(
+            self._place_bracket_async(contract, action, quantity, take_profit_price, stop_loss_price)
+        )
 
     def ensure_connected_sync(self) -> bool:
         """
@@ -536,6 +602,11 @@ class IBKRClient(AbstractBroker):
         if df.empty:
             return _EMPTY_OHLCV
         df.set_index("timestamp", inplace=True)
+        # Drop the last (still-forming) candle so strategies only see confirmed closes.
+        # IBKR includes the current incomplete bar as the final row; signals based on
+        # a partial candle can reverse before the bar closes, causing false entries.
+        if len(df) > 1:
+            df = df.iloc[:-1]
         return df
 
     async def get_orderbook(self, symbol: str) -> dict:
@@ -625,22 +696,64 @@ class IBKRClient(AbstractBroker):
         action = "BUY" if side.lower() == "buy" else "SELL"
         if order_type == "limit" and price:
             order = LimitOrder(action, quantity, price)
+            trade: IBTrade = self.ib.placeOrder(contract, order)
         elif order_type in ("stop_limit", "stop") and stop_price and price:
             order = StopLimitOrder(action, quantity, price, stop_price)
+            trade = self.ib.placeOrder(contract, order)
+        elif (stop_price or take_profit_price):
+            # Market order with SL/TP — send as a bracket order so IBKR
+            # actually enforces the stop and take-profit on their side.
+            trade = await _place_loop.run_in_executor(
+                None,
+                _manager.place_bracket_sync,
+                contract, action, quantity, take_profit_price, stop_price,
+            )
         else:
             order = MarketOrder(action, quantity)
-
-        trade: IBTrade = self.ib.placeOrder(contract, order)
+            trade = self.ib.placeOrder(contract, order)
         await asyncio.sleep(0.5)
 
+        # ── Poll for fill confirmation (up to 15 s for IBKR paper) ────────────
+        # IBKR paper fills are near-instant for forex market orders but may
+        # take a few seconds for the TWS status to propagate.
+        order_id = str(trade.order.orderId)
+        fill_price: Optional[float] = None
+        _FILL_TIMEOUT = 15.0
+        _POLL_INTERVAL = 0.5
+        _elapsed = 0.0
+        while _elapsed < _FILL_TIMEOUT:
+            await asyncio.sleep(_POLL_INTERVAL)
+            _elapsed += _POLL_INTERVAL
+            try:
+                _st = trade.orderStatus.status
+                _filled_price = trade.orderStatus.avgFillPrice
+                if _st in ("Filled", "PreSubmitted") and _filled_price:
+                    fill_price = float(_filled_price)
+                    logger.info(f"[IBKR] Order {order_id} filled @ {fill_price}")
+                    break
+                elif _st == "Filled" and not _filled_price:
+                    # Filled but price not yet pushed — use last trade price
+                    fill_price = float(trade.orderStatus.lastFillPrice or 0) or None
+                    logger.info(f"[IBKR] Order {order_id} filled (lastFillPrice={fill_price})")
+                    break
+                elif _st in ("Cancelled", "Inactive"):
+                    raise RuntimeError(f"IBKR order {order_id} ended with status '{_st}' — not filled")
+            except RuntimeError:
+                raise
+            except Exception as _pe:
+                logger.debug(f"[IBKR] Poll {order_id}: {_pe}")
+        else:
+            logger.warning(f"[IBKR] Order {order_id} not confirmed filled within {_FILL_TIMEOUT}s — treating as pending")
+
         return OrderResult(
-            order_id=str(trade.order.orderId),
+            order_id=order_id,
             symbol=symbol,
             side=side,
             quantity=quantity,
-            price=float(price or 0),
-            status=trade.orderStatus.status,
+            price=float(fill_price or 0),
+            status="filled" if fill_price is not None else trade.orderStatus.status,
             raw={"order_id": trade.order.orderId, "status": trade.orderStatus.status},
+            fill_price=fill_price,
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

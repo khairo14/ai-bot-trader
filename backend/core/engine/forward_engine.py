@@ -230,6 +230,51 @@ class ForwardEngine:
         # ── Full-auto execution ───────────────────────────
         logger.info(f"[ForwardEngine] 🤖 FULL-AUTO executing: {signal.signal} {signal.symbol} x {validation.position_size}")
 
+        # ── Close any existing opposing position before opening a new one ────────
+        # Prevents holding simultaneous long + short on the same symbol.
+        # e.g. open BUY + new SHORT signal → close the BUY first, then open SHORT.
+        _long_sides = {"buy", "cover"}
+        _new_is_long = signal.signal.upper() in ("BUY", "COVER")
+        if db_session is not None:
+            _existing_q = await db_session.execute(
+                select(Trade).where(
+                    Trade.symbol == signal.symbol,
+                    Trade.broker == signal.broker,
+                    Trade.is_paper == is_paper,
+                    Trade.status == OrderStatus.OPEN,
+                )
+            )
+            _existing_trades = _existing_q.scalars().all()
+            for _existing in _existing_trades:
+                _existing_is_long = _existing.side in _long_sides
+                if _new_is_long != _existing_is_long:
+                    logger.info(
+                        f"[ForwardEngine] Reversing position: closing {_existing.side.upper()} "
+                        f"{_existing.symbol} (id={_existing.id}) before opening {signal.signal}"
+                    )
+                    try:
+                        await self.close_position(_existing, reason="signal_reversal")
+                        await db_session.commit()
+                    except Exception as _rev_err:
+                        logger.error(
+                            f"[ForwardEngine] Failed to close opposing position for "
+                            f"{_existing.symbol} id={_existing.id}: {_rev_err}"
+                        )
+        elif signal.symbol in self._paper_positions:
+            _existing = self._paper_positions[signal.symbol]
+            _existing_is_long = _existing.side in _long_sides
+            if _new_is_long != _existing_is_long:
+                logger.info(
+                    f"[ForwardEngine] Reversing position (in-memory): closing {_existing.side.upper()} "
+                    f"{_existing.symbol} before opening {signal.signal}"
+                )
+                try:
+                    await self.close_position(_existing, reason="signal_reversal")
+                except Exception as _rev_err:
+                    logger.error(
+                        f"[ForwardEngine] Failed to close opposing position for {_existing.symbol}: {_rev_err}"
+                    )
+
         trade = Trade(
             symbol=signal.symbol,
             side=signal.signal.lower(),
@@ -291,10 +336,25 @@ class ForwardEngine:
                 take_profit_price=signal.take_profit,
                 **option_kwargs,
             )
+            # Use broker-confirmed fill price if available, fall back to signal price
+            confirmed_entry = result.fill_price or result.price or signal.entry_price
+            if result.fill_price:
+                logger.info(
+                    f"[ForwardEngine] ✅ {mode_tag} ORDER FILLED: {result.order_id} | "
+                    f"{signal.signal} {signal.symbol} @ {confirmed_entry} (confirmed) qty={effective_size}"
+                )
+            else:
+                # Broker accepted but fill not confirmed within poll timeout
+                # — mark as PENDING so it doesn't appear as a ghost open position
+                logger.warning(
+                    f"[ForwardEngine] ⏳ {mode_tag} ORDER PENDING (no fill confirmation): "
+                    f"{result.order_id} | {signal.symbol} — marking PENDING, will stay out of positions"
+                )
             trade.broker_order_id = result.order_id
-            trade.status = OrderStatus.OPEN
-            self._paper_positions[signal.symbol] = trade  # track in-memory too
-            logger.info(f"[ForwardEngine] ✅ {mode_tag} ORDER PLACED: {result.order_id} | {signal.signal} {signal.symbol} @ {signal.entry_price} qty={effective_size}")
+            trade.entry_price = round(confirmed_entry, 8)
+            trade.status = OrderStatus.OPEN if result.fill_price else OrderStatus.PENDING
+            if result.fill_price:
+                self._paper_positions[signal.symbol] = trade  # only track confirmed fills
         except Exception as order_err:
             # Broker rejected or is unreachable — record FAILED trade for audit
             trade.status = OrderStatus.REJECTED
@@ -359,12 +419,25 @@ class ForwardEngine:
         # ── Send closing market order (paper and live both call broker API) ─────
         side = "sell" if trade.side == "buy" else "buy"
         try:
-            await broker.place_order(
+            close_result = await broker.place_order(
                 symbol=trade.symbol,
                 side=side,
                 quantity=trade.quantity,
                 order_type="market",
             )
+            # Use broker-confirmed fill price for PnL accuracy
+            if close_result.fill_price:
+                exit_price = close_result.fill_price
+                logger.info(f"[ForwardEngine] Close order filled @ {exit_price} (confirmed)")
+            elif exit_price:
+                logger.warning(
+                    f"[ForwardEngine] Close order {close_result.order_id} not confirmed filled — "
+                    f"using price snapshot ({exit_price}) for PnL"
+                )
+            else:
+                raise RuntimeError("Close order unconfirmed and no price snapshot available")
+        except RuntimeError:
+            raise
         except Exception as _close_err:
             logger.error(
                 f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
