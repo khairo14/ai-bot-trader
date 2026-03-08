@@ -1,4 +1,6 @@
 ﻿import { useState } from 'react'
+import { useSearchParams, Link } from 'react-router-dom'
+import { ArrowLeft } from 'lucide-react'
 import { ChartPanel } from './ChartPanel'
 import MarketClock from '../components/MarketClock'
 
@@ -14,6 +16,48 @@ const PANEL_DEFAULTS = [
 
 export default function Chart() {
   const [layout, setLayout] = useState<Layout>(1)
+  const [searchParams] = useSearchParams()
+
+  // Direct-link mode: navigated from an Open Position "View Chart" button
+  const paramBroker    = searchParams.get('broker')    ?? undefined
+  const paramSymbol    = searchParams.get('symbol')    ?? undefined
+  const paramTimeframe = searchParams.get('timeframe') ?? undefined
+  const paramStrategy  = searchParams.get('strategy')  ?? undefined
+  const isLinked       = !!(paramBroker || paramSymbol)
+
+  if (isLinked) {
+    return (
+      <div className="flex flex-col h-full bg-dark-900">
+        {/* Single-panel header with back link */}
+        <div className="flex items-center gap-3 px-4 py-2 bg-dark-800 border-b border-dark-700 shrink-0">
+          <Link
+            to="/chart"
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors"
+          >
+            <ArrowLeft size={13} /> Back to Charts
+          </Link>
+          <span className="text-gray-700">|</span>
+          <span className="text-xs text-gray-300 font-medium">
+            {paramSymbol ?? '—'}
+            {paramBroker && <span className="text-gray-500 ml-1.5">· {paramBroker}</span>}
+            {paramTimeframe && <span className="text-gray-500 ml-1.5">· {paramTimeframe}</span>}
+            {paramStrategy && <span className="text-gray-500 ml-1.5">· {paramStrategy}</span>}
+          </span>
+          <div className="ml-auto">
+            <MarketClock />
+          </div>
+        </div>
+        <div className="flex-1 min-h-0 p-0.5 bg-dark-900">
+          <ChartPanel
+            defaultBroker={paramBroker}
+            defaultSymbol={paramSymbol}
+            defaultTimeframe={paramTimeframe}
+            strategy={paramStrategy}
+          />
+        </div>
+      </div>
+    )
+  }
 
   const gridStyle = {
     gridTemplateColumns: layout === 1 ? '1fr' : '1fr 1fr',

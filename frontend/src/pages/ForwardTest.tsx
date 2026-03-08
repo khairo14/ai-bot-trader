@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Play, StopCircle, Activity, RefreshCw, Zap, Download, Clock, Loader2, X, TrendingUp } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Play, StopCircle, Activity, RefreshCw, Zap, Download, Clock, Loader2, X, TrendingUp, BarChart2 } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import toast from 'react-hot-toast'
 import { SkeletonLine } from '../components/Skeleton'
@@ -529,15 +530,24 @@ export default function ForwardTest() {
                       {pos.opened_at ? new Date(pos.opened_at).toLocaleTimeString() : '—'}
                     </td>
                     <td className="px-3 py-2">
-                      <button
-                        onClick={() => closePosition(pos.id)}
-                        disabled={closingId === pos.id}
-                        title="Force close this position at market price"
-                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        {closingId === pos.id ? <Loader2 size={11} className="animate-spin" /> : <X size={11} />}
-                        {closingId === pos.id ? 'Closing…' : 'Force Close'}
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <Link
+                          to={`/chart?broker=${encodeURIComponent(pos.broker)}&symbol=${encodeURIComponent(pos.symbol)}${pos.strategy_name ? `&strategy=${encodeURIComponent(pos.strategy_name)}` : ''}`}
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-brand-500/10 text-brand-400 hover:bg-brand-500/20 text-xs font-medium transition-all"
+                          title="View chart for this position"
+                        >
+                          <BarChart2 size={11} /> Chart
+                        </Link>
+                        <button
+                          onClick={() => closePosition(pos.id)}
+                          disabled={closingId === pos.id}
+                          title="Force close this position at market price"
+                          className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {closingId === pos.id ? <Loader2 size={11} className="animate-spin" /> : <X size={11} />}
+                          {closingId === pos.id ? 'Closing…' : 'Force Close'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

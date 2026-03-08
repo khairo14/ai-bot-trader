@@ -195,6 +195,33 @@ const TF_POLL_SECS: Record<string, number> = {
   '1m': 10, '5m': 20, '15m': 30, '1h': 60, '4h': 120, '1d': 300, '3d': 1800, '1w': 3600,
 }
 
+// ─── Strategy → indicator mapping ─────────────────────────────────────────────
+// Maps strategy_type or strategy name keywords to default indicator states.
+// Keyword matching is case-insensitive; direct strategy_type takes priority.
+const STRATEGY_IND_MAP: Record<string, { showEMA: boolean; showBB: boolean; subPanel: 'RSI' | 'MACD' }> = {
+  hybrid_macd_rsi:    { showEMA: true,  showBB: false, subPanel: 'MACD' },
+  volatility_squeeze: { showEMA: false, showBB: true,  subPanel: 'MACD' },
+  momentum:           { showEMA: true,  showBB: false, subPanel: 'RSI'  },
+  mean_reversion:     { showEMA: false, showBB: true,  subPanel: 'RSI'  },
+  covered_call:       { showEMA: true,  showBB: false, subPanel: 'RSI'  },
+  bull_call_spread:   { showEMA: true,  showBB: false, subPanel: 'MACD' },
+  iron_condor:        { showEMA: false, showBB: true,  subPanel: 'RSI'  },
+}
+function strategyIndicators(strategy?: string): { showEMA: boolean; showBB: boolean; subPanel: 'RSI' | 'MACD' } {
+  if (!strategy) return { showEMA: true, showBB: false, subPanel: 'RSI' }
+  const key = strategy.toLowerCase().replace(/\s+/g, '_')
+  // Direct match on strategy_type
+  if (STRATEGY_IND_MAP[key]) return STRATEGY_IND_MAP[key]
+  // Keyword fallback on human-readable names (e.g. "BTC Trend Follower")
+  if (key.includes('macd'))                          return { showEMA: true,  showBB: false, subPanel: 'MACD' }
+  if (key.includes('squeeze') || key.includes('bb')) return { showEMA: false, showBB: true,  subPanel: 'MACD' }
+  if (key.includes('reversi') || key.includes('mean')) return { showEMA: false, showBB: true, subPanel: 'RSI' }
+  if (key.includes('swing'))                         return { showEMA: false, showBB: true,  subPanel: 'RSI'  }
+  if (key.includes('trend') || key.includes('ema'))  return { showEMA: true,  showBB: false, subPanel: 'RSI'  }
+  if (key.includes('momentum'))                      return { showEMA: true,  showBB: false, subPanel: 'RSI'  }
+  return { showEMA: true, showBB: false, subPanel: 'RSI' }
+}
+
 // ─── Props ─────────────────────────────────────────────────────────────────────
 interface ChartPanelProps {
   /** When true, toolbar is condensed — used in 4-panel grid */
@@ -203,24 +230,29 @@ interface ChartPanelProps {
   defaultSymbol?: string
   /** Initial broker override */
   defaultBroker?: string
+  /** Initial timeframe override (e.g. '4h') */
+  defaultTimeframe?: string
+  /** Strategy name or strategy_type — auto-enables matching indicators */
+  strategy?: string
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────────
-export function ChartPanel({ compact = false, defaultSymbol, defaultBroker }: ChartPanelProps) {
+export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defaultTimeframe, strategy }: ChartPanelProps) {
   const initBroker = defaultBroker ?? 'binance'
   const initSymbol = defaultSymbol ?? BROKER_DEFAULT[initBroker]
+  const initInds   = strategyIndicators(strategy)
 
   const [broker, setBroker]           = useState(initBroker)
   const [symbol, setSymbol]           = useState(initSymbol)
-  const [timeframe, setTimeframe]     = useState('1h')
+  const [timeframe, setTimeframe]     = useState(defaultTimeframe ?? '1h')
   const [rangePreset, setRangePreset] = useState<Preset>('1M')
   const [customFrom, setCustomFrom]   = useState(() => toDateInput(Date.now() - 30*24*3600*1000))
   const [customTo, setCustomTo]       = useState(() => toDateInput(Date.now()))
   const [loading, setLoading]         = useState(false)
-  const [showEMA, setShowEMA]         = useState(true)
-  const [showBB, setShowBB]           = useState(false)
+  const [showEMA, setShowEMA]         = useState(initInds.showEMA)
+  const [showBB, setShowBB]           = useState(initInds.showBB)
   const [showVolume, setShowVolume]   = useState(true)
-  const [subPanel, setSubPanel]       = useState<'RSI' | 'MACD'>('RSI')
+  const [subPanel, setSubPanel]       = useState<'RSI' | 'MACD'>(initInds.subPanel)
   const [lastUpdated, setLastUpdated] = useState<string | null>(null)
   const [signalCount, setSignalCount] = useState(0)
   const [tradeCount, setTradeCount]   = useState(0)
