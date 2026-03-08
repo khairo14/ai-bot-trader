@@ -515,6 +515,13 @@ class IBKRClient(AbstractBroker):
         bars = await loop.run_in_executor(
             None, _manager.fetch_ohlcv, symbol, bar_size, duration
         )
+        _EMPTY_OHLCV = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        if not bars:
+            logger.warning(
+                f"[IBKR] No bars returned for {symbol} ({bar_size}, {duration}). "
+                f"Check market data subscriptions for this exchange."
+            )
+            return _EMPTY_OHLCV
         df = pd.DataFrame([
             {
                 "timestamp": b.date,
@@ -526,8 +533,9 @@ class IBKRClient(AbstractBroker):
             }
             for b in bars
         ])
-        if not df.empty:
-            df.set_index("timestamp", inplace=True)
+        if df.empty:
+            return _EMPTY_OHLCV
+        df.set_index("timestamp", inplace=True)
         return df
 
     async def get_orderbook(self, symbol: str) -> dict:

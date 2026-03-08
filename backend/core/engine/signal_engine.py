@@ -76,6 +76,12 @@ class SignalEngine:
             finally:
                 await broker.close()
 
+        if data is None or data.empty:
+            raise ValueError(
+                f"No market data returned for {symbol} via {broker_name} ({timeframe}). "
+                f"Check market data subscriptions for this exchange."
+            )
+
         strategy = self.get_strategy(strategy_name)
         signal = strategy.generate_signal(data, symbol=symbol, timeframe=timeframe)
 
