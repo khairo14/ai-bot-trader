@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers, X, Loader2 } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
@@ -76,6 +76,22 @@ interface MLStatus {
   models: { symbol: string; trained_date: string | null }[]
 }
 
+interface OpenPosition {
+  id: number
+  symbol: string
+  side: string
+  quantity: number
+  entry_price: number | null
+  stop_loss: number | null
+  take_profit: number | null
+  pnl: number | null
+  pnl_pct: number | null
+  broker: string
+  strategy_name: string | null
+  is_paper: boolean
+  opened_at: string | null
+}
+
 interface RegimeInfo {
   regime: string
   symbol: string
@@ -125,22 +141,26 @@ export default function Dashboard() {
   const [regime, setRegime] = useState<RegimeInfo | null>(null)
   const [portfolioWeights, setPortfolioWeights] = useState<WeightsData | null>(null)
   const [optimizing, setOptimizing] = useState(false)
+  const [openPositions, setOpenPositions] = useState<OpenPosition[]>([])
+  const [closingId, setClosingId] = useState<number | null>(null)
 
   const fetchAll = async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     // Fetch independently — a slow broker never blocks signals from loading
-    const [sigResult, portResult, pendingResult, mlResult, weightsResult] = await Promise.allSettled([
+    const [sigResult, portResult, pendingResult, mlResult, weightsResult, posResult] = await Promise.allSettled([
       axios.get('/api/signals/?limit=20'),
       axios.get('/api/portfolio/summary'),
       axios.get('/api/signals/pending'),
       axios.get('/api/ml/status'),
       axios.get('/api/portfolio-optimizer/weights'),
+      axios.get('/api/positions/open'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
     if (pendingResult.status === 'fulfilled') setPendingSignals(pendingResult.value.data.signals || [])
     if (mlResult.status === 'fulfilled') setMlStatus(mlResult.value.data)
     if (weightsResult.status === 'fulfilled') setPortfolioWeights(weightsResult.value.data)
+    if (posResult.status === 'fulfilled') setOpenPositions(posResult.value.data.positions || [])
 
     // Unblock the loading skeleton immediately after core data arrives.
     // The regime badge fetches separately below and updates when ready.
@@ -162,6 +182,19 @@ export default function Dashboard() {
       setRegime(regimeRes.data)
     } catch {
       setRegime(null)
+    }
+  }
+
+  const closePosition = async (id: number) => {
+    setClosingId(id)
+    try {
+      await axios.post('/api/positions/close', { trade_id: id, reason: 'manual_override' })
+      toast.success('Position closed at market price.')
+      fetchAll()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Close failed')
+    } finally {
+      setClosingId(null)
     }
   }
 
@@ -496,6 +529,90 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* Open Positions — all brokers, paper + live */}
+      <div className="bg-dark-800 border border-dark-600 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-dark-600 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <TrendingUp size={14} className="text-brand-400" />
+            <span className="text-sm font-semibold text-gray-300">Open Positions</span>
+            {openPositions.length > 0 && (
+              <span className="text-xs bg-brand-500/20 text-brand-400 px-1.5 py-0.5 rounded-full font-medium">
+                {openPositions.length}
+              </span>
+            )}
+          </div>
+          {openPositions.filter(p => !p.is_paper).length > 0 && (
+            <span className="text-xs text-red-400 bg-red-900/20 px-2 py-0.5 rounded border border-red-900/40">
+              {openPositions.filter(p => !p.is_paper).length} LIVE
+            </span>
+          )}
+        </div>
+        {openPositions.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <p className="text-gray-600 text-sm">No open positions across any broker</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 border-b border-dark-600">
+                  {['Symbol', 'Side', 'Qty', 'Entry', 'Stop Loss', 'Take Profit', 'Unrealized P&L', 'Broker', 'Strategy', 'Mode', 'Opened', ''].map(h => (
+                    <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {openPositions.map(pos => (
+                  <tr key={pos.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
+                    <td className="px-3 py-2 font-medium text-white">{pos.symbol}</td>
+                    <td className={`px-3 py-2 font-bold ${pos.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
+                      {pos.side.toUpperCase()}
+                    </td>
+                    <td className="px-3 py-2 text-gray-300">{pos.quantity.toFixed(4)}</td>
+                    <td className="px-3 py-2 text-gray-300">{pos.entry_price?.toFixed(2) ?? '—'}</td>
+                    <td className="px-3 py-2 text-red-400">{pos.stop_loss?.toFixed(2) ?? '—'}</td>
+                    <td className="px-3 py-2 text-green-400">{pos.take_profit?.toFixed(2) ?? '—'}</td>
+                    <td className={`px-3 py-2 font-medium ${
+                      (pos.pnl ?? 0) > 0 ? 'text-green-400' : (pos.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'
+                    }`}>
+                      {pos.pnl != null ? `${pos.pnl > 0 ? '+' : ''}${formatPnl(pos.pnl)}` : '—'}
+                      {pos.pnl_pct != null && (
+                        <span className="text-gray-500 ml-1">({pos.pnl_pct > 0 ? '+' : ''}{pos.pnl_pct.toFixed(2)}%)</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-gray-400 capitalize">{pos.broker}</td>
+                    <td className="px-3 py-2 text-gray-400 max-w-[90px] truncate">{pos.strategy_name ?? '—'}</td>
+                    <td className="px-3 py-2">
+                      <span className={`px-1.5 py-0.5 rounded text-xs ${
+                        pos.is_paper ? 'bg-yellow-900/20 text-yellow-400' : 'bg-red-900/20 text-red-300 font-bold'
+                      }`}>
+                        {pos.is_paper ? 'paper' : 'LIVE'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
+                      {pos.opened_at ? new Date(pos.opened_at).toLocaleTimeString() : '—'}
+                    </td>
+                    <td className="px-3 py-2">
+                      <button
+                        onClick={() => closePosition(pos.id)}
+                        disabled={closingId === pos.id}
+                        title="Force close this position at market price"
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {closingId === pos.id
+                          ? <><Loader2 size={11} className="animate-spin" /> Closing…</>
+                          : <><X size={11} /> Force Close</>
+                        }
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {/* Recent Signals */}
       <div>

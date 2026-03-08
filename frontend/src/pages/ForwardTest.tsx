@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Play, StopCircle, Activity, RefreshCw, Zap, Download, Clock, Loader2 } from 'lucide-react'
+import { Play, StopCircle, Activity, RefreshCw, Zap, Download, Clock, Loader2, X, TrendingUp } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import toast from 'react-hot-toast'
 import { SkeletonLine } from '../components/Skeleton'
@@ -90,6 +90,36 @@ interface PendingSignal {
   created_at: string | null
 }
 
+interface OpenPosition {
+  id: number
+  symbol: string
+  side: string
+  quantity: number
+  entry_price: number | null
+  stop_loss: number | null
+  take_profit: number | null
+  pnl: number | null
+  pnl_pct: number | null
+  broker: string
+  strategy_name: string | null
+  is_paper: boolean
+  opened_at: string | null
+}
+
+interface RecentSignal {
+  id: number
+  symbol: string
+  signal: string
+  entry_price: number | null
+  confidence: number | null
+  timeframe: string
+  strategy_name: string | null
+  execution_mode: string
+  reasons: string[]
+  acted_on: boolean
+  created_at: string | null
+}
+
 const fmtUSD = (n: number) =>
   n >= 0 ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `-$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
@@ -106,6 +136,10 @@ export default function ForwardTest() {
   const [stopLoading, setStopLoading] = useState(false)
   const [wsEvents, setWsEvents] = useState<WsMessage[]>([])
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [openPositions, setOpenPositions] = useState<OpenPosition[]>([])
+  const [recentSignals, setRecentSignals] = useState<RecentSignal[]>([])
+  const [closingId, setClosingId] = useState<number | null>(null)
+  const [feedTab, setFeedTab] = useState<'live' | 'signals'>('live')
 
   // After triggering a run, poll every 2 s for up to 60 s so the UI reflects
   // is_executing quickly without waiting for the 30-second background poll.
@@ -134,10 +168,12 @@ export default function ForwardTest() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [statusRes, tradesRes, pendingRes] = await Promise.allSettled([
+      const [statusRes, tradesRes, pendingRes, positionsRes, signalsRes] = await Promise.allSettled([
         axios.get(`${API}/api/forward-test/status`),
         axios.get(`${API}/api/forward-test/trades?limit=50`),
         axios.get(`${API}/api/forward-test/pending-signals`),
+        axios.get(`${API}/api/positions/open`),
+        axios.get(`${API}/api/signals?limit=25`),
       ])
       if (statusRes.status === 'fulfilled') setStatus(statusRes.value.data)
       else console.error('ForwardTest status error:', statusRes.reason)
@@ -145,6 +181,10 @@ export default function ForwardTest() {
       else console.error('ForwardTest trades error:', tradesRes.reason)
       if (pendingRes.status === 'fulfilled') setPendingSignals(pendingRes.value.data.pending_signals ?? [])
       else console.error('ForwardTest pending-signals error:', pendingRes.reason)
+      if (positionsRes.status === 'fulfilled') setOpenPositions(positionsRes.value.data.positions ?? [])
+      else console.error('ForwardTest positions error:', positionsRes.reason)
+      if (signalsRes.status === 'fulfilled') setRecentSignals(signalsRes.value.data.signals ?? [])
+      else console.error('ForwardTest signals error:', signalsRes.reason)
       setLastUpdated(new Date())
     } catch (e) {
       console.error('ForwardTest fetch error:', e)
@@ -236,6 +276,19 @@ export default function ForwardTest() {
       toast.error(e?.response?.data?.detail ?? 'Execution failed')
     } finally {
       setExecutingSignal(null)
+    }
+  }
+
+  const closePosition = async (id: number) => {
+    setClosingId(id)
+    try {
+      await axios.post(`${API}/api/positions/close`, { trade_id: id, reason: 'manual_override' })
+      toast.success('Position closed at market price.')
+      await fetchAll()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Close failed')
+    } finally {
+      setClosingId(null)
     }
   }
 
@@ -414,6 +467,85 @@ export default function ForwardTest() {
         ))}
       </div>
 
+      {/* Open Positions — live view with per-position force-close */}
+      <div className="bg-dark-800 border border-dark-600 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-dark-600 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <TrendingUp size={14} className="text-brand-400" />
+            <span className="text-sm font-medium text-white">Open Positions</span>
+            {openPositions.length > 0 && (
+              <span className="text-xs bg-brand-500/20 text-brand-400 px-1.5 py-0.5 rounded-full font-medium">
+                {openPositions.length}
+              </span>
+            )}
+          </div>
+          {openPositions.length > 1 && (
+            <button
+              onClick={emergencyStop}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs font-medium transition-all"
+            >
+              <X size={12} /> Close All
+            </button>
+          )}
+        </div>
+        {openPositions.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <p className="text-gray-600 text-sm">No open positions</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 border-b border-dark-600">
+                  {['Symbol', 'Side', 'Qty', 'Entry', 'Stop Loss', 'Take Profit', 'Unrealized P&L', 'Broker', 'Strategy', 'Mode', 'Opened', ''].map((h) => (
+                    <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {openPositions.map((pos) => (
+                  <tr key={pos.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
+                    <td className="px-3 py-2 font-medium text-white">{pos.symbol}</td>
+                    <td className={`px-3 py-2 font-bold ${pos.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
+                      {pos.side.toUpperCase()}
+                    </td>
+                    <td className="px-3 py-2 text-gray-300">{pos.quantity.toFixed(4)}</td>
+                    <td className="px-3 py-2 text-gray-300">{pos.entry_price?.toFixed(2) ?? '—'}</td>
+                    <td className="px-3 py-2 text-red-400">{pos.stop_loss?.toFixed(2) ?? '—'}</td>
+                    <td className="px-3 py-2 text-green-400">{pos.take_profit?.toFixed(2) ?? '—'}</td>
+                    <td className={`px-3 py-2 font-medium ${(pos.pnl ?? 0) > 0 ? 'text-green-400' : (pos.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'}`}>
+                      {pos.pnl != null ? `${pos.pnl > 0 ? '+' : ''}${fmtUSD(pos.pnl)}` : '—'}
+                      {pos.pnl_pct != null && <span className="text-gray-500 ml-1">({fmtPct(pos.pnl_pct)})</span>}
+                    </td>
+                    <td className="px-3 py-2 text-gray-400 capitalize">{pos.broker}</td>
+                    <td className="px-3 py-2 text-gray-400 max-w-[90px] truncate">{pos.strategy_name ?? '—'}</td>
+                    <td className="px-3 py-2">
+                      <span className={`px-1.5 py-0.5 rounded text-xs ${pos.is_paper ? 'bg-yellow-900/20 text-yellow-400' : 'bg-red-900/20 text-red-300 font-bold'}`}>
+                        {pos.is_paper ? 'paper' : 'LIVE'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
+                      {pos.opened_at ? new Date(pos.opened_at).toLocaleTimeString() : '—'}
+                    </td>
+                    <td className="px-3 py-2">
+                      <button
+                        onClick={() => closePosition(pos.id)}
+                        disabled={closingId === pos.id}
+                        title="Force close this position at market price"
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {closingId === pos.id ? <Loader2 size={11} className="animate-spin" /> : <X size={11} />}
+                        {closingId === pos.id ? 'Closing…' : 'Force Close'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Pending Signals — suggestion / semi-auto modes */}
       {pendingSignals.length > 0 && (
         <div className="bg-dark-800 border border-yellow-900/40 rounded-xl overflow-hidden">
@@ -554,47 +686,100 @@ export default function ForwardTest() {
           )}
         </div>
 
-        {/* Live Feed (WebSocket Events) */}
+        {/* Activity Feed — Live WS Events + Persistent Signal Log */}
         <div className="bg-dark-800 border border-dark-600 rounded-xl overflow-hidden">
           <div className="px-4 py-3 border-b border-dark-600 flex items-center gap-2">
             <Zap size={13} className="text-yellow-400" />
-            <span className="text-sm font-medium text-white">Live Feed</span>
-            <span className="ml-auto text-xs text-gray-600">WebSocket</span>
+            <span className="text-sm font-medium text-white">Activity</span>
+            <div className="ml-auto flex text-xs rounded-lg overflow-hidden border border-dark-500">
+              <button
+                onClick={() => setFeedTab('live')}
+                className={`px-2.5 py-1 transition-colors ${feedTab === 'live' ? 'bg-dark-600 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+              >Live</button>
+              <button
+                onClick={() => setFeedTab('signals')}
+                className={`px-2.5 py-1 transition-colors ${feedTab === 'signals' ? 'bg-dark-600 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+              >Signals{recentSignals.length > 0 && <span className="ml-1 text-brand-400">{recentSignals.length}</span>}</button>
+            </div>
           </div>
-          <div className="p-3 space-y-2 max-h-64 overflow-y-auto">
-            {wsEvents.length === 0 ? (
-              <p className="text-xs text-gray-600 text-center py-4">Waiting for events…</p>
-            ) : (
-              wsEvents.map((evt, i) => (
-                <div key={i} className="text-xs bg-dark-700 rounded-lg p-2">
-                  <div className="flex items-center gap-1.5 mb-0.5">
-                    <span className={`font-medium ${
-                      evt.type === 'signal' ? 'text-brand-400' :
-                      evt.type === 'trade' ? 'text-green-400' :
-                      evt.type === 'run_started' ? 'text-yellow-400' :
-                      evt.type === 'run_finished' ? 'text-blue-400' :
-                      'text-red-400'
-                    }`}>{evt.type.toUpperCase().replace('_', ' ')}</span>
+          {feedTab === 'live' ? (
+            <div className="p-3 space-y-2 max-h-[300px] overflow-y-auto">
+              {wsEvents.length === 0 ? (
+                <p className="text-xs text-gray-600 text-center py-4">Waiting for events…</p>
+              ) : (
+                wsEvents.map((evt, i) => (
+                  <div key={i} className="text-xs bg-dark-700 rounded-lg p-2">
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className={`font-medium ${
+                        evt.type === 'signal' ? 'text-brand-400' :
+                        evt.type === 'trade' ? 'text-green-400' :
+                        evt.type === 'run_started' ? 'text-yellow-400' :
+                        evt.type === 'run_finished' ? 'text-blue-400' :
+                        'text-red-400'
+                      }`}>{evt.type.toUpperCase().replace('_', ' ')}</span>
+                      {evt.type === 'signal' && (
+                        <span className="text-white">{String(evt.data.symbol)} → {String(evt.data.signal)}</span>
+                      )}
+                      {evt.type === 'trade' && (
+                        <span className="text-white">{String(evt.data.symbol)} {String(evt.data.side).toUpperCase()}</span>
+                      )}
+                      {(evt.type === 'run_started' || evt.type === 'run_finished') && (
+                        <span className="text-gray-400">{String(evt.data.trigger)} · {String(evt.data.strategies)} strateg{Number(evt.data.strategies) === 1 ? 'y' : 'ies'}</span>
+                      )}
+                    </div>
                     {evt.type === 'signal' && (
-                      <span className="text-white">{String(evt.data.symbol)} → {String(evt.data.signal)}</span>
+                      <p className="text-gray-500">@ {Number(evt.data.entry_price).toFixed(2)} conf={Number(evt.data.confidence).toFixed(2)}</p>
                     )}
                     {evt.type === 'trade' && (
-                      <span className="text-white">{String(evt.data.symbol)} {String(evt.data.side).toUpperCase()}</span>
-                    )}
-                    {(evt.type === 'run_started' || evt.type === 'run_finished') && (
-                      <span className="text-gray-400">{String(evt.data.trigger)} · {String(evt.data.strategies)} strateg{Number(evt.data.strategies) === 1 ? 'y' : 'ies'}</span>
+                      <p className="text-gray-500">qty={Number(evt.data.quantity).toFixed(4)} @ {Number(evt.data.entry_price).toFixed(2)}</p>
                     )}
                   </div>
-                  {evt.type === 'signal' && (
-                    <p className="text-gray-500">@ {Number(evt.data.entry_price).toFixed(2)} conf={Number(evt.data.confidence).toFixed(2)}</p>
-                  )}
-                  {evt.type === 'trade' && (
-                    <p className="text-gray-500">qty={Number(evt.data.quantity).toFixed(4)} @ {Number(evt.data.entry_price).toFixed(2)}</p>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
+                ))
+              )}
+            </div>
+          ) : (
+            <div className="p-3 space-y-2 max-h-[300px] overflow-y-auto">
+              {recentSignals.length === 0 ? (
+                <p className="text-xs text-gray-600 text-center py-4">No signals yet</p>
+              ) : (
+                recentSignals.map((sig) => (
+                  <div key={sig.id} className="text-xs bg-dark-700 rounded-lg p-2 space-y-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className={`font-bold ${sig.signal === 'BUY' || sig.signal === 'COVER' ? 'text-green-400' : 'text-red-400'}`}>
+                        {sig.signal}
+                      </span>
+                      <span className="text-white font-medium">{sig.symbol}</span>
+                      {sig.confidence != null && (
+                        <span className="text-gray-500">{(sig.confidence * 100).toFixed(0)}%</span>
+                      )}
+                      <span className="text-gray-600">·</span>
+                      <span className="text-gray-500">{sig.timeframe}</span>
+                      <span className={`ml-auto px-1.5 py-0.5 rounded text-xs ${
+                        sig.acted_on
+                          ? 'bg-green-900/30 text-green-400'
+                          : sig.execution_mode === 'suggestion'
+                            ? 'bg-gray-700 text-gray-500'
+                            : 'bg-yellow-900/20 text-yellow-400'
+                      }`}>
+                        {sig.acted_on ? 'traded' : sig.execution_mode}
+                      </span>
+                    </div>
+                    <p className="text-gray-600">
+                      {sig.strategy_name ?? 'unknown'}{sig.entry_price != null ? ` · @ ${sig.entry_price.toFixed(2)}` : ''}
+                    </p>
+                    {sig.reasons.length > 0 && (
+                      <p className="text-gray-500 leading-relaxed line-clamp-2">
+                        {sig.reasons.slice(0, 3).join(' · ')}
+                      </p>
+                    )}
+                    {sig.created_at && (
+                      <p className="text-gray-700">{new Date(sig.created_at).toLocaleTimeString()}</p>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
