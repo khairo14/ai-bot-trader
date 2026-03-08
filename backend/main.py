@@ -71,6 +71,11 @@ async def _forward_test_scheduler():
                 q = await session.execute(
                     select(StrategyModel).where(
                         StrategyModel.is_active == True,
+                        # F-070: only paper strategies — live strategies are
+                        # handled exclusively by the Celery run_signals task
+                        # (signal_runner.py).  Running both paths for the same
+                        # live strategy creates duplicate signals/trades.
+                        StrategyModel.is_paper == True,
                     )
                 )
                 strategies = q.scalars().all()

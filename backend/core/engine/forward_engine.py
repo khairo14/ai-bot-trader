@@ -53,11 +53,14 @@ class ForwardEngine:
         processing any signal so that positions and balance reflect reality
         across server restarts.
         """
-        # Load open paper trades into _paper_positions
+        # Load open and pending paper trades into _paper_positions.
+        # PENDING = order submitted but fill not yet confirmed (e.g. after a restart).
+        # Including PENDING here prevents the scheduler from opening a second order
+        # on the same symbol before the first one is confirmed or rejected (F-069).
         open_q = await db_session.execute(
             select(Trade).where(
                 Trade.is_paper == True,
-                Trade.status == OrderStatus.OPEN,
+                Trade.status.in_([OrderStatus.OPEN, OrderStatus.PENDING]),
             )
         )
         open_trades = open_q.scalars().all()
@@ -417,7 +420,11 @@ class ForwardEngine:
             )
 
         # ── Send closing market order (paper and live both call broker API) ─────
-        side = "sell" if trade.side == "buy" else "buy"
+        # F-071: COVER positions are buy-to-cover (long), so they close the same
+        # way as BUY positions — by selling.  Using a simple "not buy" check was
+        # wrong for "cover" (resolved to "buy" instead of "sell").
+        _long_sides = {"buy", "cover"}
+        side = "sell" if trade.side in _long_sides else "buy"
         try:
             close_result = await broker.place_order(
                 symbol=trade.symbol,
@@ -447,7 +454,9 @@ class ForwardEngine:
 
         # ── Compute realised PnL ──────────────────────────────────────────
         if exit_price and trade.entry_price:
-            side_mult = 1.0 if trade.side == "buy" else -1.0
+            # F-071: COVER trades are long (bought to cover a short), so they
+            # profit when price rises — same sign as BUY.
+            side_mult = 1.0 if trade.side in _long_sides else -1.0
             raw_pnl = (exit_price - trade.entry_price) * trade.quantity * side_mult
             trade.exit_price = round(exit_price, 8)
             trade.pnl = round(raw_pnl, 4)

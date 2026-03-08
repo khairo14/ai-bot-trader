@@ -31,7 +31,7 @@ async def _safe_balance(broker_name: str) -> dict:
             from brokers.ibkr_client import ibkr_balance_sync
             import concurrent.futures
             _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             balance = await asyncio.wait_for(
                 loop.run_in_executor(_pool, ibkr_balance_sync), timeout=10.0
             )

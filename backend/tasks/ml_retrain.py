@@ -34,7 +34,7 @@ def retrain_all(self):
                 # httpx.post is synchronous here (inside asyncio.run context already),
                 # but runs in a thread executor to avoid blocking the event loop.
                 import asyncio as _aio
-                loop = _aio.get_event_loop()
+                loop = _aio.get_running_loop()
                 resp = await loop.run_in_executor(
                     None,
                     lambda: httpx.post(

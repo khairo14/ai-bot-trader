@@ -231,7 +231,10 @@ class _IBKRManager:
             t = ib.placeOrder(contract, o)
             if o.orderId == parent.orderId:
                 parent_trade = t
-        await asyncio.sleep(0.5)
+        # F-073: 1.0 s settle ensures the Gateway assigns a server-side orderId to
+        # the parent before child orders reference it via parentId — 0.5 s was
+        # occasionally too short under Gateway load or paper-account processing delays.
+        await asyncio.sleep(1.0)
         assert parent_trade is not None
         return parent_trade
 
@@ -320,8 +323,9 @@ class _IBKRManager:
         ticker = self._ib.reqMktData(contract)
         # Poll until we get a valid price or hit the timeout (5 s).
         # ib_insync initialises all ticker fields to math.nan, NOT None/0.
-        _deadline = asyncio.get_event_loop().time() + 5.0
-        while asyncio.get_event_loop().time() < _deadline:
+        _loop = asyncio.get_running_loop()
+        _deadline = _loop.time() + 5.0
+        while _loop.time() < _deadline:
             price = 0.0
             for _attr in ("last", "bid", "close"):
                 _v = getattr(ticker, _attr, None)
@@ -485,7 +489,7 @@ class IBKRClient(AbstractBroker):
         socket state is checked — no exception swallowing.
         """
         _manager._start()
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             connected = await loop.run_in_executor(None, _manager.ensure_connected_sync)
         except Exception as exc:
@@ -517,7 +521,7 @@ class IBKRClient(AbstractBroker):
         Fetch current market price via the singleton IB connection.
         Runs the ib_insync async call on the manager's dedicated event loop.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _manager.fetch_price, symbol)
 
     async def get_ohlcv(
@@ -577,7 +581,7 @@ class IBKRClient(AbstractBroker):
         calendar_days = min(calendar_days, _max_calendar_days.get(bar_size, 365))
         duration = f"{max(1, calendar_days)} D"
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         bars = await loop.run_in_executor(
             None, _manager.fetch_ohlcv, symbol, bar_size, duration
         )
@@ -610,7 +614,7 @@ class IBKRClient(AbstractBroker):
         return df
 
     async def get_orderbook(self, symbol: str) -> dict:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _manager.fetch_orderbook, symbol)
 
     # ── Options Chain ────────────────────────────────────
@@ -620,7 +624,7 @@ class IBKRClient(AbstractBroker):
         Fetch the full options chain for an underlying symbol.
         Returns strikes, expirations, IVs, and Greeks via IBKR.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _manager.fetch_options_chain, symbol)
 
     # ── Account ──────────────────────────────────────────
@@ -689,7 +693,7 @@ class IBKRClient(AbstractBroker):
             contract = Option(symbol, option_expiry, option_strike, option_right, "SMART")
         else:
             contract = _ibkr_contract(symbol)
-        _place_loop = asyncio.get_event_loop()
+        _place_loop = asyncio.get_running_loop()
         await _place_loop.run_in_executor(None, _manager.qualify_contract_sync, contract)
 
         # Build order
@@ -793,7 +797,7 @@ class IBKRClient(AbstractBroker):
         """Stream real-time prices via IBKR market data subscription."""
         self._ensure_connected()
         contracts = [Stock(s, "SMART", "USD") for s in symbols]
-        _stream_loop = asyncio.get_event_loop()
+        _stream_loop = asyncio.get_running_loop()
         for _c in contracts:
             await _stream_loop.run_in_executor(None, _manager.qualify_contract_sync, _c)
 

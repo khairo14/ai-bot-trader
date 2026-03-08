@@ -256,7 +256,7 @@ async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int)
     """
     from brokers.ibkr_client import get_ibkr_manager, _ibkr_contract
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     mgr = get_ibkr_manager()
     sym = symbol.upper()
     contract = _ibkr_contract(sym)
