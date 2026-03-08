@@ -24,10 +24,16 @@ def _check_chart_rate_limit(request: Request) -> None:
     now = time.monotonic()
     hits = _rate_hits[key]
     # Expire old hits outside the window
-    _rate_hits[key] = [t for t in hits if now - t < _RATE_LIMIT_WINDOW]
-    if len(_rate_hits[key]) >= _RATE_LIMIT_MAX:
+    fresh = [t for t in hits if now - t < _RATE_LIMIT_WINDOW]
+    if fresh:
+        _rate_hits[key] = fresh
+    else:
+        # No recent hits — remove the key entirely to prevent unbounded growth
+        _rate_hits.pop(key, None)
+        fresh = []
+    if len(fresh) >= _RATE_LIMIT_MAX:
         raise HTTPException(status_code=429, detail="Chart rate limit exceeded — max 10 requests/min")
-    _rate_hits[key].append(now)
+    _rate_hits[key] = fresh + [now]
 
 # Popular Alpaca/IBKR stocks — fallback when broker can't enumerate assets
 _ALPACA_DEFAULTS = [

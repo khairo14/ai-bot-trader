@@ -5,7 +5,7 @@ from typing import Optional
 from datetime import datetime, timedelta, timezone
 
 from db.database import get_db
-from db.models import Signal, Strategy, ExecutionMode, SignalType
+from db.models import Signal, Strategy, ExecutionMode, SignalType, BrokerName
 from core.auth import get_current_user
 
 router = APIRouter()
@@ -15,7 +15,7 @@ def _signal_dict(s: Signal) -> dict:
     return {
         "id": s.id,
         "symbol": s.symbol,
-        "signal": s.signal,
+        "signal": s.signal.value if hasattr(s.signal, "value") else s.signal,
         "entry_price": s.entry_price,
         "stop_loss": s.stop_loss,
         "take_profit": s.take_profit,
@@ -23,9 +23,9 @@ def _signal_dict(s: Signal) -> dict:
         "timeframe": s.timeframe,
         "strategy_name": s.strategy_name,
         "regime": s.regime,
-        "asset_class": s.asset_class,
-        "broker": s.broker,
-        "execution_mode": s.execution_mode,
+        "asset_class": s.asset_class.value if hasattr(s.asset_class, "value") else s.asset_class,
+        "broker": s.broker.value if hasattr(s.broker, "value") else s.broker,
+        "execution_mode": s.execution_mode.value if hasattr(s.execution_mode, "value") else s.execution_mode,
         "reasons": s.reasons,
         "acted_on": s.acted_on,
         "dismissed": s.dismissed,
@@ -62,7 +62,10 @@ async def list_signals(
     if symbol:
         query = query.where(Signal.symbol == symbol.upper())
     if broker:
-        query = query.where(Signal.broker == broker.lower())
+        try:
+            query = query.where(Signal.broker == BrokerName(broker.lower()))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Unknown broker: {broker}")
     result = await db.execute(query)
     return {"signals": [_signal_dict(s) for s in result.scalars().all()]}
 

@@ -188,6 +188,19 @@ class RiskManager:
                         f"Reset required."
                     ),
                 )
+            # Also enforce consecutive-loss limit at the per-strategy level so that
+            # broker-specific _max_consec overrides are respected (record_outcome uses
+            # the global threshold which may differ from the broker-specific one).
+            if s_state.get("consecutive_losses", 0) >= _max_consec:
+                return RiskValidation(
+                    approved=False,
+                    position_size=0, position_value=0, risk_amount=0, stop_distance=0,
+                    reason=(
+                        f"Per-strategy consecutive loss limit reached for '{strategy_name}' "
+                        f"({s_state.get('consecutive_losses', 0)}/{_max_consec}). "
+                        f"Manual reset required."
+                    ),
+                )
 
         # ── Level 4: Portfolio-wide circuit breaker ───────────────────────────
         if self._circuit_breaker_active:

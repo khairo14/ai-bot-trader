@@ -407,7 +407,7 @@ async def list_paper_trades(
                 "status": t.status.value if hasattr(t.status, "value") else t.status,
                 "execution_mode": t.execution_mode.value if hasattr(t.execution_mode, "value") else t.execution_mode,
                 "broker": t.broker.value if hasattr(t.broker, "value") else t.broker,
-                "asset_class": t.asset_class,
+                "asset_class": t.asset_class.value if hasattr(t.asset_class, "value") else t.asset_class,
                 "strategy_name": t.strategy_name,
                 "broker_order_id": t.broker_order_id,
                 "opened_at": t.opened_at.isoformat() if t.opened_at else None,

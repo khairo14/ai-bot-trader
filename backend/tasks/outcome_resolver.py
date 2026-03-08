@@ -252,7 +252,11 @@ async def resolve_pending_outcomes() -> dict:
     by_group: dict[tuple, list] = defaultdict(list)
     for o in pending:
         sig = sig_rows.get(o.signal_id) if o.signal_id else None
-        broker_name = sig.broker.value if sig else "alpaca"  # fallback
+        if sig:
+            broker_name = sig.broker.value
+        else:
+            # Infer broker from symbol: crypto pairs contain '/' (e.g. BTC/USDT)
+            broker_name = "binance" if "/" in o.symbol else "alpaca"
         key = (o.symbol, o.timeframe, broker_name)
         by_group[key].append(o)
 
@@ -310,7 +314,7 @@ async def resolve_pending_outcomes() -> dict:
                     db_outcome.candles_held = result_dict["candles_held"]
                     db_outcome.ml_label = result_dict["ml_label"]
                     db_outcome.resolved = True
-                    db_outcome.resolved_at = now
+                    db_outcome.resolved_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
                     resolved_count += 1
                     logger.info(
