@@ -23,6 +23,7 @@ export default function Chart() {
   const paramSymbol    = searchParams.get('symbol')    ?? undefined
   const paramTimeframe = searchParams.get('timeframe') ?? undefined
   const paramStrategy  = searchParams.get('strategy')  ?? undefined
+  const paramIsPaper   = searchParams.get('is_paper')  // 'true' | 'false' | null
   const isLinked       = !!(paramBroker || paramSymbol)
 
   if (isLinked) {
@@ -42,6 +43,15 @@ export default function Chart() {
             {paramBroker && <span className="text-gray-500 ml-1.5">· {paramBroker}</span>}
             {paramTimeframe && <span className="text-gray-500 ml-1.5">· {paramTimeframe}</span>}
             {paramStrategy && <span className="text-gray-500 ml-1.5">· {paramStrategy}</span>}
+            {paramIsPaper !== null && (
+              <span className={`ml-2 px-1.5 py-0.5 rounded text-xs font-medium ${
+                paramIsPaper === 'true'
+                  ? 'bg-yellow-900/20 text-yellow-400'
+                  : 'bg-red-900/20 text-red-300'
+              }`}>
+                {paramIsPaper === 'true' ? 'paper' : 'LIVE'}
+              </span>
+            )}
           </span>
           <div className="ml-auto">
             <MarketClock />

@@ -306,6 +306,10 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
   const indPanelRef = useRef<HTMLDivElement>(null)
 
   // Series refs
+  const markersPluginRef = useRef<any>(null)   // lightweight-charts v5 marker plugin — reused via setMarkers()
+  const cachedMarkersRef = useRef<{ signals: SignalMarker[]; trades: TradeMarker[]; minTime: number; maxTime: number } | null>(null)
+  const showSignalsRef   = useRef(showSignals)   // ref-mirrors for stable applyMarkersImpl
+  const showTradesRef    = useRef(showTrades)
   const candleRef  = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volRef     = useRef<ISeriesApi<'Histogram'>   | null>(null)
   const ema20Ref   = useRef<ISeriesApi<'Line'>        | null>(null)
@@ -338,6 +342,8 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
       borderUpColor: THEME.up, borderDownColor: THEME.down,
       wickUpColor: THEME.up, wickDownColor: THEME.down,
     })
+    // Create the marker plugin once — subsequent updates use .setMarkers() not createSeriesMarkers()
+    markersPluginRef.current = createSeriesMarkers(candleRef.current, [])
     volRef.current = mc.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: 'volume' })
     mc.priceScale('volume').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, visible: false })
 
@@ -390,8 +396,84 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     if (mainRef.current) ro.observe(mainRef.current)
     if (subRef.current)  ro.observe(subRef.current)
 
-    return () => { ro.disconnect(); mc.remove(); sc.remove() }
+    return () => { ro.disconnect(); mc.remove(); sc.remove(); markersPluginRef.current = null; cachedMarkersRef.current = null }
   }, [])
+
+  // ─── Apply-markers (no re-fetch) ─────────────────────────────────────────
+  // Reads cached signal/trade data + toggle refs → rebuilds markers/price-lines
+  // client-side. Safe to call from fetchAndRender AND from toggle effects.
+  const applyMarkersImpl = useCallback(() => {
+    const data = cachedMarkersRef.current
+    if (!data || !candleRef.current) return
+    const { signals, trades, minTime, maxTime } = data
+
+    // Remove old TP/SL price lines before we re-add them
+    tradeLineRefs.current.forEach(l => { try { candleRef.current!.removePriceLine(l) } catch {} })
+    tradeLineRefs.current = []
+
+    const lwtMarkers = showSignalsRef.current
+      ? signals
+          .filter(m => m.time >= minTime && m.time <= maxTime)
+          .map(m => ({
+            time: m.time as any,
+            position: (m.signal === 'BUY' || m.signal === 'COVER' ? 'belowBar' : 'aboveBar') as any,
+            color: m.signal === 'BUY' || m.signal === 'COVER' ? '#86efac' : '#fca5a5',
+            shape: (m.signal === 'BUY' || m.signal === 'COVER' ? 'arrowUp' : 'arrowDown') as any,
+            text: `SIG ${m.signal}${m.confidence ? ` ${Math.round(m.confidence * 100)}%` : ''}`,
+            size: 1,
+          }))
+          .sort((a, b) => (a.time as number) - (b.time as number))
+      : []
+
+    const tradeMarkers: any[] = []
+    if (showTradesRef.current && candleRef.current) {
+      for (const t of trades) {
+        const isBuy      = t.side === 'buy' || t.side === 'cover'
+        const entryColor = t.is_paper ? '#60a5fa' : '#f59e0b'
+        const modeTag    = t.is_paper ? 'P' : 'L'
+
+        if (t.entry_time && t.entry_price && t.entry_time >= minTime && t.entry_time <= maxTime) {
+          const pnlTag = t.pnl_pct != null ? ` ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%` : ''
+          tradeMarkers.push({
+            time:     t.entry_time as any,
+            position: isBuy ? 'belowBar' : 'aboveBar',
+            color:    entryColor,
+            shape:    isBuy ? 'arrowUp' : 'arrowDown',
+            text:     `[${modeTag}] ${t.side.toUpperCase()}${pnlTag}`,
+            size:     2,
+          })
+        }
+
+        if (t.exit_time && t.exit_price && t.exit_time >= minTime && t.exit_time <= maxTime) {
+          const won = t.pnl != null ? t.pnl > 0 : null
+          const exitColor = won === null ? '#9ca3af' : won ? '#22c55e' : '#ef4444'
+          const pnlTag = t.pnl_pct != null ? ` ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%` : ''
+          tradeMarkers.push({
+            time:     t.exit_time as any,
+            position: isBuy ? 'aboveBar' : 'belowBar',
+            color:    exitColor,
+            shape:    'circle',
+            text:     `EXIT${pnlTag}`,
+            size:     1,
+          })
+        }
+
+        if (t.status === 'OPEN' || t.status === 'open') {
+          if (t.stop_loss) {
+            const l = candleRef.current!.createPriceLine({ price: t.stop_loss, color: '#ef4444', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL' })
+            tradeLineRefs.current.push(l)
+          }
+          if (t.take_profit) {
+            const l = candleRef.current!.createPriceLine({ price: t.take_profit, color: '#22c55e', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TP' })
+            tradeLineRefs.current.push(l)
+          }
+        }
+      }
+    }
+
+    const allMarkers = [...lwtMarkers, ...tradeMarkers].sort((a, b) => (a.time as number) - (b.time as number))
+    markersPluginRef.current?.setMarkers(allMarkers)
+  }, []) // reads only from refs — stable, no state deps
 
   // ─── Toggle overlays ──────────────────────────────────────────────────────
   useEffect(() => { ema20Ref.current?.applyOptions({ visible: showEMA }); ema50Ref.current?.applyOptions({ visible: showEMA }) }, [showEMA])
@@ -408,6 +490,11 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     macdSignRef.current?.applyOptions({ visible: !isRSI })
     macdHistRef.current?.applyOptions({ visible: !isRSI })
   }, [subPanel])
+  // Sync state → ref BEFORE re-applying markers (declaration order = execution order)
+  useEffect(() => { showSignalsRef.current = showSignals }, [showSignals])
+  useEffect(() => { showTradesRef.current  = showTrades  }, [showTrades])
+  // Re-apply markers from cache when a visibility toggle changes — never triggers a re-fetch
+  useEffect(() => { if (cachedMarkersRef.current) applyMarkersImpl() }, [showSignals, showTrades, applyMarkersImpl])
 
   // ─── Fetch & render ──────────────────────────────────────────────────────
   const fetchAndRender = useCallback(async () => {
@@ -489,85 +576,12 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
 
       const markers: SignalMarker[] = signalRes.data.markers
       setSignalCount(markers.length)
-      const minTime = candles[0].time, maxTime = candles[candles.length - 1].time
-      const lwtMarkers = showSignals
-        ? markers
-            .filter(m => m.time >= minTime && m.time <= maxTime)
-            .map(m => ({
-              time: m.time as any,
-              position: (m.signal === 'BUY' || m.signal === 'COVER' ? 'belowBar' : 'aboveBar') as any,
-              color: m.signal === 'BUY' || m.signal === 'COVER' ? '#86efac' : '#fca5a5',
-              shape: (m.signal === 'BUY' || m.signal === 'COVER' ? 'arrowUp' : 'arrowDown') as any,
-              text: `SIG ${m.signal}${m.confidence ? ` ${Math.round(m.confidence * 100)}%` : ''}`,
-              size: 1,
-            }))
-            .sort((a, b) => (a.time as number) - (b.time as number))
-        : []
-
-      // ── Trade markers & TP/SL price lines ─────────────────────────────────
-      // Remove price lines from previous render
-      tradeLineRefs.current.forEach(l => { try { candleRef.current!.removePriceLine(l) } catch {} })
-      tradeLineRefs.current = []
-
       const trades: TradeMarker[] = tradeRes.data.trades ?? []
       setTradeCount(trades.length)
-      const tradeMarkers: any[] = []
-
-      if (showTrades && candleRef.current) {
-        for (const t of trades) {
-          const isBuy     = t.side === 'buy' || t.side === 'cover'
-          const entryColor = t.is_paper ? '#60a5fa' : '#f59e0b'  // blue = paper, gold = live
-          const modeTag   = t.is_paper ? 'P' : 'L'
-
-          // Entry marker
-          if (t.entry_time && t.entry_price && t.entry_time >= minTime && t.entry_time <= maxTime) {
-            const pnlTag = t.pnl_pct != null
-              ? ` ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%`
-              : ''
-            tradeMarkers.push({
-              time:     t.entry_time as any,
-              position: isBuy ? 'belowBar' : 'aboveBar',
-              color:    entryColor,
-              shape:    isBuy ? 'arrowUp' : 'arrowDown',
-              text:     `[${modeTag}] ${t.side.toUpperCase()}${pnlTag}`,
-              size:     2,
-            })
-          }
-
-          // Exit marker (closed trades)
-          if (t.exit_time && t.exit_price && t.exit_time >= minTime && t.exit_time <= maxTime) {
-            const won = t.pnl != null ? t.pnl > 0 : null
-            const exitColor = won === null ? '#9ca3af' : won ? '#22c55e' : '#ef4444'
-            const pnlTag = t.pnl_pct != null
-              ? ` ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%`
-              : ''
-            tradeMarkers.push({
-              time:     t.exit_time as any,
-              position: isBuy ? 'aboveBar' : 'belowBar',
-              color:    exitColor,
-              shape:    'circle',
-              text:     `EXIT${pnlTag}`,
-              size:     1,
-            })
-          }
-
-          // TP/SL price lines (only for open positions — clutter if shown for closed)
-          if (t.status === 'OPEN' || t.status === 'open') {
-            if (t.stop_loss) {
-              const l = candleRef.current!.createPriceLine({ price: t.stop_loss, color: '#ef4444', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL' })
-              tradeLineRefs.current.push(l)
-            }
-            if (t.take_profit) {
-              const l = candleRef.current!.createPriceLine({ price: t.take_profit, color: '#22c55e', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TP' })
-              tradeLineRefs.current.push(l)
-            }
-          }
-        }
-      }
-
-      // Combine signal + trade markers, sort by time
-      const allMarkers = [...lwtMarkers, ...tradeMarkers].sort((a, b) => (a.time as number) - (b.time as number))
-      createSeriesMarkers(candleRef.current!, allMarkers)
+      const minTime = candles[0].time, maxTime = candles[candles.length - 1].time
+      // Cache raw data then apply markers client-side (toggles reuse this without re-fetching)
+      cachedMarkersRef.current = { signals: markers, trades, minTime, maxTime }
+      applyMarkersImpl()
 
       mainChart.current?.timeScale().fitContent()
       subChart.current?.timeScale().fitContent()
@@ -596,7 +610,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
         isFetchingRef.current = false
       }
     }
-  }, [symbol, timeframe, broker, rangePreset, customFrom, customTo, showTrades, showSignals])
+  }, [symbol, timeframe, broker, rangePreset, customFrom, customTo, applyMarkersImpl])
 
   useEffect(() => { fetchAndRender() }, [fetchAndRender])
 

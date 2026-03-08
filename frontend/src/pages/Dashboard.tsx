@@ -597,7 +597,7 @@ export default function Dashboard() {
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1.5">
                         <Link
-                          to={`/chart?broker=${encodeURIComponent(pos.broker)}&symbol=${encodeURIComponent(pos.symbol)}${pos.strategy_name ? `&strategy=${encodeURIComponent(pos.strategy_name)}` : ''}`}
+                          to={`/chart?broker=${encodeURIComponent(pos.broker)}&symbol=${encodeURIComponent(pos.symbol)}${pos.strategy_name ? `&strategy=${encodeURIComponent(pos.strategy_name)}` : ''}&is_paper=${pos.is_paper}`}
                           className="flex items-center gap-1 px-2 py-1 rounded-lg bg-brand-500/10 text-brand-400 hover:bg-brand-500/20 text-xs font-medium transition-all"
                           title="View chart for this position"
                         >
