@@ -258,6 +258,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
   const [tradeCount, setTradeCount]   = useState(0)
   const [candleCount, setCandleCount] = useState(0)
   const [showTrades, setShowTrades]   = useState(true)
+  const [showSignals, setShowSignals] = useState(true)
   const [maOverlays, setMaOverlays]   = useState<MAOverlay[]>([])
   const [showAddMA, setShowAddMA]     = useState(false)
   const [newMAPeriod, setNewMAPeriod] = useState(20)
@@ -489,17 +490,19 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
       const markers: SignalMarker[] = signalRes.data.markers
       setSignalCount(markers.length)
       const minTime = candles[0].time, maxTime = candles[candles.length - 1].time
-      const lwtMarkers = markers
-        .filter(m => m.time >= minTime && m.time <= maxTime)
-        .map(m => ({
-          time: m.time as any,
-          position: (m.signal === 'BUY' || m.signal === 'COVER' ? 'belowBar' : 'aboveBar') as any,
-          color: m.signal === 'BUY' || m.signal === 'COVER' ? '#22c55e' : '#ef4444',
-          shape: (m.signal === 'BUY' || m.signal === 'COVER' ? 'arrowUp' : 'arrowDown') as any,
-          text: `${m.signal}${m.confidence ? ` ${Math.round(m.confidence * 100)}%` : ''}`,
-          size: 1,
-        }))
-        .sort((a, b) => (a.time as number) - (b.time as number))
+      const lwtMarkers = showSignals
+        ? markers
+            .filter(m => m.time >= minTime && m.time <= maxTime)
+            .map(m => ({
+              time: m.time as any,
+              position: (m.signal === 'BUY' || m.signal === 'COVER' ? 'belowBar' : 'aboveBar') as any,
+              color: m.signal === 'BUY' || m.signal === 'COVER' ? '#86efac' : '#fca5a5',
+              shape: (m.signal === 'BUY' || m.signal === 'COVER' ? 'arrowUp' : 'arrowDown') as any,
+              text: `SIG ${m.signal}${m.confidence ? ` ${Math.round(m.confidence * 100)}%` : ''}`,
+              size: 1,
+            }))
+            .sort((a, b) => (a.time as number) - (b.time as number))
+        : []
 
       // ── Trade markers & TP/SL price lines ─────────────────────────────────
       // Remove price lines from previous render
@@ -593,7 +596,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
         isFetchingRef.current = false
       }
     }
-  }, [symbol, timeframe, broker, rangePreset, customFrom, customTo, showTrades])
+  }, [symbol, timeframe, broker, rangePreset, customFrom, customTo, showTrades, showSignals])
 
   useEffect(() => { fetchAndRender() }, [fetchAndRender])
 
@@ -912,6 +915,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
                     { label: 'EMA (20 / 50)', color: 'text-amber-400', accent: 'accent-amber-400', checked: showEMA, set: setShowEMA },
                     { label: 'Bollinger Bands', color: 'text-indigo-400', accent: 'accent-indigo-400', checked: showBB, set: setShowBB },
                     { label: 'Volume', color: 'text-gray-400', accent: '', checked: showVolume, set: setShowVolume },
+                    { label: 'Signal markers', color: 'text-green-400', accent: 'accent-green-400', checked: showSignals, set: setShowSignals },
                     { label: 'Trade markers', color: 'text-sky-400', accent: 'accent-sky-400', checked: showTrades, set: setShowTrades },
                   ].map(({ label, color, accent, checked, set }) => (
                     <label key={label} className="flex items-center gap-2 cursor-pointer select-none px-1 py-0.5 rounded hover:bg-dark-700">
@@ -1022,8 +1026,8 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
       {/* ─── Legend ───────────────────────────────────────────── */}
       {!compact && (
         <div className="flex flex-wrap items-center gap-3 px-3 py-1 bg-dark-800/60 border-b border-dark-700 text-xs text-gray-500 shrink-0">
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-500" /> BUY</span>
-          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-500" /> SELL</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-green-300" /> SIG BUY (no trade)</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-300" /> SIG SELL (no trade)</span>
           <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-sky-400" /> Trade entry (paper)</span>
           <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-yellow-400" /> Trade entry (live)</span>
           <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full border border-gray-400" /> Exit</span>
