@@ -52,7 +52,7 @@ function formatBalance(total: number, currency: string): string {
 }
 
 function formatPnl(pnl: number): string {
-  const sign = pnl >= 0 ? '+' : ''
+  const sign = pnl >= 0 ? '+' : '-'
   return sign + '$' + Math.abs(pnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
@@ -576,7 +576,7 @@ export default function Dashboard() {
                     <td className={`px-3 py-2 font-medium ${
                       (pos.pnl ?? 0) > 0 ? 'text-green-400' : (pos.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'
                     }`}>
-                      {pos.pnl != null ? `${pos.pnl > 0 ? '+' : ''}${formatPnl(pos.pnl)}` : '—'}
+                      {pos.pnl != null ? formatPnl(pos.pnl) : '—'}
                       {pos.pnl_pct != null && (
                         <span className="text-gray-500 ml-1">({pos.pnl_pct > 0 ? '+' : ''}{pos.pnl_pct.toFixed(2)}%)</span>
                       )}

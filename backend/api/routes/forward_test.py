@@ -404,9 +404,9 @@ async def list_paper_trades(
                 "take_profit": t.take_profit,
                 "pnl": t.pnl,
                 "pnl_pct": t.pnl_pct,
-                "status": t.status,
-                "execution_mode": t.execution_mode,
-                "broker": t.broker,
+                "status": t.status.value if hasattr(t.status, "value") else t.status,
+                "execution_mode": t.execution_mode.value if hasattr(t.execution_mode, "value") else t.execution_mode,
+                "broker": t.broker.value if hasattr(t.broker, "value") else t.broker,
                 "asset_class": t.asset_class,
                 "strategy_name": t.strategy_name,
                 "broker_order_id": t.broker_order_id,
@@ -691,6 +691,21 @@ async def _run_one_strategy(strat) -> None:
                 trade.signal_id = db_signal.id
                 db_signal.acted_on = True  # mark regardless of OPEN/REJECTED status
 
+            # Capture scalar values before commit — SQLAlchemy expires all attributes
+            # on commit; db_signal and trade become detached after the session closes.
+            _signal_acted_on = db_signal.acted_on
+            _trade_broadcast: dict | None = None
+            if trade is not None and trade.status == OrderStatus.OPEN:
+                _trade_broadcast = {
+                    "symbol": trade.symbol,
+                    "side": trade.side,
+                    "quantity": trade.quantity,
+                    "entry_price": trade.entry_price,
+                    "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
+                    "strategy_name": trade.strategy_name,
+                    "is_paper": strat.is_paper,
+                }
+
             await session.commit()
 
         # Broadcast via WebSocket
@@ -701,19 +716,11 @@ async def _run_one_strategy(strat) -> None:
             "confidence": sig.confidence,
             "strategy": sig.strategy_name,
             "timeframe": sig.timeframe,
-            "acted_on": db_signal.acted_on,
+            "acted_on": _signal_acted_on,
         })
 
-        if trade is not None and trade.status == OrderStatus.OPEN:
-            await manager.broadcast("trade", {
-                "symbol": trade.symbol,
-                "side": trade.side,
-                "quantity": trade.quantity,
-                "entry_price": trade.entry_price,
-                "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
-                "strategy_name": trade.strategy_name,
-                "is_paper": strat.is_paper,
-            })
+        if _trade_broadcast is not None:
+            await manager.broadcast("trade", _trade_broadcast)
 
         logger.info(
             f"[ForwardTest] ✓ {strat.name} | {symbol} → {sig.signal} "

@@ -482,9 +482,10 @@ export default function ForwardTest() {
           {openPositions.length > 1 && (
             <button
               onClick={emergencyStop}
+              title="Closes all paper positions only. Live positions must be closed individually."
               className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 text-xs font-medium transition-all"
             >
-              <X size={12} /> Close All
+              <X size={12} /> Close All Paper
             </button>
           )}
         </div>
