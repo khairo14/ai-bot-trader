@@ -64,6 +64,7 @@ interface PaperTrade {
   status: string
   execution_mode: string
   broker: string
+  is_paper: boolean
   strategy_name: string | null
   opened_at: string | null
   closed_at: string | null
@@ -127,9 +128,20 @@ const fmtUSD = (n: number) =>
 const fmtPct = (n: number | null) =>
   n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
 
+/** Adaptive decimal formatter — shows enough places for the instrument scale. */
+const fmtPrice = (v?: number | null): string => {
+  if (v == null) return '—'
+  const abs = Math.abs(v)
+  if (abs >= 1000) return v.toFixed(2)
+  if (abs >= 10)   return v.toFixed(3)
+  if (abs >= 0.1)  return v.toFixed(4)
+  return v.toFixed(5)
+}
+
 export default function ForwardTest() {
   const [status, setStatus] = useState<ForwardStatus | null>(null)
   const [trades, setTrades] = useState<PaperTrade[]>([])
+  const [tradeMode, setTradeMode] = useState<'paper' | 'live' | 'all'>('paper')
   const [pendingSignals, setPendingSignals] = useState<PendingSignal[]>([])
   const [executingSignal, setExecutingSignal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
@@ -167,11 +179,43 @@ export default function ForwardTest() {
     }, 90_000)
   }, [stopAggressivePoll])
 
-  const fetchAll = useCallback(async () => {
+  /** Fetch latest 1-minute close for each unique (symbol, broker) pair and
+   *  compute unrealized P&L for open positions that the DB has no P&L for. */
+  const enrichPositionsWithLivePnl = useCallback(async (positions: OpenPosition[]): Promise<OpenPosition[]> => {
+    if (positions.length === 0) return positions
+    const pairs = [...new Set(positions.map(p => `${p.symbol}|${p.broker}`))]
+    const now = Date.now()
+    const priceMap: Record<string, number> = {}
+    await Promise.allSettled(
+      pairs.map(async (key) => {
+        const [symbol, broker] = key.split('|')
+        try {
+          const res = await axios.get(`${API}/api/charts/candles`, {
+            params: { symbol, broker, timeframe: '1m', since: now - 10 * 60_000, until: now }
+          })
+          const candles: { close: number }[] = res.data.candles ?? []
+          if (candles.length > 0) priceMap[key] = candles[candles.length - 1].close
+        } catch { /* silently skip price enrichment */ }
+      })
+    )
+    return positions.map(p => {
+      if (p.pnl != null) return p   // already has a realised PnL — leave untouched
+      const currentPrice = priceMap[`${p.symbol}|${p.broker}`]
+      if (!currentPrice || !p.entry_price) return p
+      const isBuy = p.side === 'buy' || p.side === 'long'
+      const sign  = isBuy ? 1 : -1
+      const pnl     = sign * (currentPrice - p.entry_price) * p.quantity
+      const pnl_pct = sign * (currentPrice / p.entry_price - 1) * 100
+      return { ...p, pnl: parseFloat(pnl.toFixed(4)), pnl_pct: parseFloat(pnl_pct.toFixed(4)) }
+    })
+  }, [])
+
+  const fetchAll = useCallback(async (mode?: 'paper' | 'live' | 'all') => {
     try {
+      const effectiveMode = mode ?? tradeMode
       const [statusRes, tradesRes, pendingRes, positionsRes, signalsRes] = await Promise.allSettled([
         axios.get(`${API}/api/forward-test/status`),
-        axios.get(`${API}/api/forward-test/trades?limit=50`),
+        axios.get(`${API}/api/forward-test/trades?limit=50&mode=${effectiveMode}`),
         axios.get(`${API}/api/forward-test/pending-signals`),
         axios.get(`${API}/api/positions/open`),
         axios.get(`${API}/api/signals?limit=25`),
@@ -182,8 +226,10 @@ export default function ForwardTest() {
       else console.error('ForwardTest trades error:', tradesRes.reason)
       if (pendingRes.status === 'fulfilled') setPendingSignals(pendingRes.value.data.pending_signals ?? [])
       else console.error('ForwardTest pending-signals error:', pendingRes.reason)
-      if (positionsRes.status === 'fulfilled') setOpenPositions(positionsRes.value.data.positions ?? [])
-      else console.error('ForwardTest positions error:', positionsRes.reason)
+      if (positionsRes.status === 'fulfilled') {
+        const enriched = await enrichPositionsWithLivePnl(positionsRes.value.data.positions ?? [])
+        setOpenPositions(enriched)
+      } else console.error('ForwardTest positions error:', positionsRes.reason)
       if (signalsRes.status === 'fulfilled') setRecentSignals(signalsRes.value.data.signals ?? [])
       else console.error('ForwardTest signals error:', signalsRes.reason)
       setLastUpdated(new Date())
@@ -192,7 +238,7 @@ export default function ForwardTest() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [tradeMode, enrichPositionsWithLivePnl])
 
   // Real-time WebSocket updates
   useWebSocket(WS_URL, {
@@ -512,9 +558,9 @@ export default function ForwardTest() {
                       {pos.side.toUpperCase()}
                     </td>
                     <td className="px-3 py-2 text-gray-300">{pos.quantity.toFixed(4)}</td>
-                    <td className="px-3 py-2 text-gray-300">{pos.entry_price?.toFixed(2) ?? '—'}</td>
-                    <td className="px-3 py-2 text-red-400">{pos.stop_loss?.toFixed(2) ?? '—'}</td>
-                    <td className="px-3 py-2 text-green-400">{pos.take_profit?.toFixed(2) ?? '—'}</td>
+                    <td className="px-3 py-2 text-gray-300">{fmtPrice(pos.entry_price)}</td>
+                    <td className="px-3 py-2 text-red-400">{fmtPrice(pos.stop_loss)}</td>
+                    <td className="px-3 py-2 text-green-400">{fmtPrice(pos.take_profit)}</td>
                     <td className={`px-3 py-2 font-medium ${(pos.pnl ?? 0) > 0 ? 'text-green-400' : (pos.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'}`}>
                       {pos.pnl != null ? `${pos.pnl > 0 ? '+' : ''}${fmtUSD(pos.pnl)}` : '—'}
                       {pos.pnl_pct != null && <span className="text-gray-500 ml-1">({fmtPct(pos.pnl_pct)})</span>}
@@ -579,18 +625,18 @@ export default function ForwardTest() {
                 </div>
                 <div className="flex items-center gap-6 text-xs text-gray-400 shrink-0">
                   <div className="text-right">
-                    <p className="text-white font-medium">${sig.entry_price.toFixed(2)}</p>
+                    <p className="text-white font-medium">{fmtPrice(sig.entry_price)}</p>
                     <p className="text-gray-600">entry</p>
                   </div>
                   {sig.stop_loss && (
                     <div className="text-right">
-                      <p className="text-red-400">${sig.stop_loss.toFixed(2)}</p>
+                      <p className="text-red-400">{fmtPrice(sig.stop_loss)}</p>
                       <p className="text-gray-600">stop</p>
                     </div>
                   )}
                   {sig.take_profit && (
                     <div className="text-right">
-                      <p className="text-green-400">${sig.take_profit.toFixed(2)}</p>
+                      <p className="text-green-400">{fmtPrice(sig.take_profit)}</p>
                       <p className="text-gray-600">target</p>
                     </div>
                   )}
@@ -627,7 +673,21 @@ export default function ForwardTest() {
         {/* Paper Trades Table */}
         <div className="col-span-2 bg-dark-800 border border-dark-600 rounded-xl overflow-hidden">
           <div className="px-4 py-3 border-b border-dark-600 flex items-center justify-between">
-            <span className="text-sm font-medium text-white">Paper Trades</span>
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-white">Trades</span>
+              {/* Paper / Live / All filter tabs */}
+              <div className="flex text-xs rounded-lg overflow-hidden border border-dark-500">
+                {(['paper', 'live', 'all'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setTradeMode(m)}
+                    className={`px-2.5 py-1 capitalize transition-colors ${
+                      tradeMode === m ? 'bg-dark-600 text-white' : 'text-gray-500 hover:text-gray-300'
+                    }`}
+                  >{m}</button>
+                ))}
+              </div>
+            </div>
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500">{trades.length} trade{trades.length !== 1 ? 's' : ''}</span>
               <a
@@ -649,15 +709,17 @@ export default function ForwardTest() {
           {trades.length === 0 ? (
             <div className="p-12 text-center">
               <Activity size={36} className="text-gray-600 mx-auto mb-3 opacity-30" />
-              <p className="text-gray-500 text-sm">No paper trades yet.</p>
-              <p className="text-gray-600 text-xs mt-1">Enable a strategy in paper mode and click "Run Now".</p>
+              <p className="text-gray-500 text-sm">
+                {tradeMode === 'paper' ? 'No paper trades yet.' : tradeMode === 'live' ? 'No live trades recorded.' : 'No trades recorded.'}
+              </p>
+              {tradeMode === 'paper' && <p className="text-gray-600 text-xs mt-1">Enable a strategy in paper mode and click "Run Now".</p>}
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-gray-500 border-b border-dark-600">
-                    {['Symbol', 'Side', 'Qty', 'Entry', 'Exit', 'P&L', 'Status', 'Strategy', 'Opened'].map((h) => (
+                    {['Symbol', 'Side', 'Qty', 'Entry', 'Exit', 'P&L', 'Status', 'Mode', 'Strategy', 'Opened'].map((h) => (
                       <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
                     ))}
                   </tr>
@@ -670,8 +732,8 @@ export default function ForwardTest() {
                         {t.side.toUpperCase()}
                       </td>
                       <td className="px-3 py-2 text-gray-300">{t.quantity.toFixed(4)}</td>
-                      <td className="px-3 py-2 text-gray-300">{t.entry_price?.toFixed(2) ?? '—'}</td>
-                      <td className="px-3 py-2 text-gray-300">{t.exit_price?.toFixed(2) ?? '—'}</td>
+                      <td className="px-3 py-2 text-gray-300">{fmtPrice(t.entry_price)}</td>
+                      <td className="px-3 py-2 text-gray-300">{fmtPrice(t.exit_price)}</td>
                       <td className={`px-3 py-2 font-medium ${(t.pnl ?? 0) > 0 ? 'text-green-400' : (t.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'}`}>
                         {t.pnl != null ? fmtUSD(t.pnl) : '—'}
                         {t.pnl_pct != null && <span className="text-gray-500 ml-1">({fmtPct(t.pnl_pct)})</span>}
@@ -688,6 +750,11 @@ export default function ForwardTest() {
                         </span>
                       </td>
                       <td className="px-3 py-2 text-gray-400 max-w-[100px] truncate">{t.strategy_name ?? '—'}</td>
+                      <td className="px-3 py-2">
+                        <span className={`px-1.5 py-0.5 rounded text-xs ${t.is_paper ? 'bg-yellow-900/20 text-yellow-400' : 'bg-red-900/20 text-red-300 font-bold'}`}>
+                          {t.is_paper ? 'paper' : 'LIVE'}
+                        </span>
+                      </td>
                       <td className="px-3 py-2 text-gray-500">
                         {t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}
                       </td>

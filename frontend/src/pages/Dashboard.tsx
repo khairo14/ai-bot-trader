@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers, X, Loader2 } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers, X, Loader2, History } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
@@ -43,6 +43,34 @@ interface PortfolioSummary {
   today_pnl: number
   circuit_breaker_pct: number
   today_pnl_by_broker: Record<string, number>
+}
+
+interface Trade {
+  id: number
+  symbol: string
+  side: string
+  quantity: number
+  entry_price: number | null
+  exit_price: number | null
+  stop_loss: number | null
+  take_profit: number | null
+  pnl: number | null
+  pnl_pct: number | null
+  status: string
+  broker: string
+  strategy_name: string | null
+  asset_class: string
+  opened_at: string | null
+  closed_at: string | null
+}
+
+function fmtPrice(price: number | null): string {
+  if (price == null) return '—'
+  const abs = Math.abs(price)
+  if (abs >= 1000) return price.toFixed(2)
+  if (abs >= 10)   return price.toFixed(3)
+  if (abs >= 0.1)  return price.toFixed(4)
+  return price.toFixed(5)
 }
 
 function formatBalance(total: number, currency: string): string {
@@ -143,18 +171,20 @@ export default function Dashboard() {
   const [portfolioWeights, setPortfolioWeights] = useState<WeightsData | null>(null)
   const [optimizing, setOptimizing] = useState(false)
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([])
+  const [trades, setTrades] = useState<Trade[]>([])
   const [closingId, setClosingId] = useState<number | null>(null)
 
   const fetchAll = async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     // Fetch independently — a slow broker never blocks signals from loading
-    const [sigResult, portResult, pendingResult, mlResult, weightsResult, posResult] = await Promise.allSettled([
+    const [sigResult, portResult, pendingResult, mlResult, weightsResult, posResult, tradesResult] = await Promise.allSettled([
       axios.get('/api/signals/?limit=20'),
       axios.get('/api/portfolio/summary'),
       axios.get('/api/signals/pending'),
       axios.get('/api/ml/status'),
       axios.get('/api/portfolio-optimizer/weights'),
       axios.get('/api/positions/open'),
+      axios.get('/api/forward-test/trades?limit=20'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
@@ -162,6 +192,7 @@ export default function Dashboard() {
     if (mlResult.status === 'fulfilled') setMlStatus(mlResult.value.data)
     if (weightsResult.status === 'fulfilled') setPortfolioWeights(weightsResult.value.data)
     if (posResult.status === 'fulfilled') setOpenPositions(posResult.value.data.positions || [])
+    if (tradesResult.status === 'fulfilled') setTrades(tradesResult.value.data.trades || [])
 
     // Unblock the loading skeleton immediately after core data arrives.
     // The regime badge fetches separately below and updates when ready.
@@ -571,9 +602,9 @@ export default function Dashboard() {
                       {pos.side.toUpperCase()}
                     </td>
                     <td className="px-3 py-2 text-gray-300">{pos.quantity.toFixed(4)}</td>
-                    <td className="px-3 py-2 text-gray-300">{pos.entry_price?.toFixed(2) ?? '—'}</td>
-                    <td className="px-3 py-2 text-red-400">{pos.stop_loss?.toFixed(2) ?? '—'}</td>
-                    <td className="px-3 py-2 text-green-400">{pos.take_profit?.toFixed(2) ?? '—'}</td>
+                    <td className="px-3 py-2 text-gray-300">{fmtPrice(pos.entry_price)}</td>
+                    <td className="px-3 py-2 text-red-400">{fmtPrice(pos.stop_loss)}</td>
+                    <td className="px-3 py-2 text-green-400">{fmtPrice(pos.take_profit)}</td>
                     <td className={`px-3 py-2 font-medium ${
                       (pos.pnl ?? 0) > 0 ? 'text-green-400' : (pos.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'
                     }`}>
@@ -615,6 +646,73 @@ export default function Dashboard() {
                           }
                         </button>
                       </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Recent Trades */}
+      <div className="bg-dark-800 border border-dark-600 rounded-xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-dark-600 flex items-center gap-2">
+          <History size={14} className="text-gray-400" />
+          <span className="text-sm font-semibold text-gray-300">Recent Trades</span>
+          {trades.length > 0 && (
+            <span className="text-xs bg-dark-600 text-gray-400 px-1.5 py-0.5 rounded-full font-medium">
+              {trades.length}
+            </span>
+          )}
+          <Link to="/forward-test" className="ml-auto text-xs text-brand-400 hover:text-brand-300 transition-colors">View all →</Link>
+        </div>
+        {trades.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <p className="text-gray-600 text-sm">No trades yet</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 border-b border-dark-600">
+                  {['Symbol', 'Side', 'Entry', 'Exit', 'SL', 'TP', 'P&L', 'Status', 'Broker', 'Strategy', 'Opened'].map(h => (
+                    <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {trades.map(t => (
+                  <tr key={t.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
+                    <td className="px-3 py-2 font-medium text-white">{t.symbol}</td>
+                    <td className={`px-3 py-2 font-bold ${
+                      t.side === 'buy' || t.side === 'cover' ? 'text-green-400' : 'text-red-400'
+                    }`}>{t.side.toUpperCase()}</td>
+                    <td className="px-3 py-2 text-gray-300">{fmtPrice(t.entry_price)}</td>
+                    <td className="px-3 py-2 text-gray-300">{fmtPrice(t.exit_price)}</td>
+                    <td className="px-3 py-2 text-red-400">{fmtPrice(t.stop_loss)}</td>
+                    <td className="px-3 py-2 text-green-400">{fmtPrice(t.take_profit)}</td>
+                    <td className={`px-3 py-2 font-medium ${
+                      (t.pnl ?? 0) > 0 ? 'text-green-400' : (t.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'
+                    }`}>
+                      {t.pnl != null ? formatPnl(t.pnl) : '—'}
+                      {t.pnl_pct != null && (
+                        <span className="text-gray-500 ml-1">({t.pnl_pct > 0 ? '+' : ''}{t.pnl_pct.toFixed(2)}%)</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+                        t.status === 'open'     ? 'bg-blue-500/15 text-blue-400' :
+                        t.status === 'filled'   ? 'bg-green-500/15 text-green-400' :
+                        t.status === 'pending'  ? 'bg-yellow-500/15 text-yellow-400' :
+                        t.status === 'rejected' ? 'bg-red-500/15 text-red-400' :
+                        'bg-gray-700 text-gray-400'
+                      }`}>{t.status}</span>
+                    </td>
+                    <td className="px-3 py-2 text-gray-400 capitalize">{t.broker}</td>
+                    <td className="px-3 py-2 text-gray-400 max-w-[90px] truncate">{t.strategy_name ?? '—'}</td>
+                    <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
+                      {t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}
                     </td>
                   </tr>
                 ))}

@@ -337,10 +337,25 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     })
     mainChart.current = mc
 
+    // Dynamic price formatter — adapts decimal places to the instrument's price magnitude.
+    // Forex pairs like EUR/GBP (~0.87) need 4-5 dp; crypto like BTC (~50000) needs 2.
+    const mainPriceFmt = {
+      type: 'custom' as const,
+      formatter: (price: number) => {
+        const abs = Math.abs(price)
+        if (abs >= 1000) return price.toFixed(2)
+        if (abs >= 10)   return price.toFixed(3)
+        if (abs >= 0.1)  return price.toFixed(4)
+        if (abs >= 0.001) return price.toFixed(5)
+        return price.toFixed(6)
+      },
+      minMove: 0.00001,
+    }
     candleRef.current = mc.addSeries(CandlestickSeries, {
       upColor: THEME.up, downColor: THEME.down,
       borderUpColor: THEME.up, borderDownColor: THEME.down,
       wickUpColor: THEME.up, wickDownColor: THEME.down,
+      priceFormat: mainPriceFmt,
     })
     // Create the marker plugin once — subsequent updates use .setMarkers() not createSeriesMarkers()
     markersPluginRef.current = createSeriesMarkers(candleRef.current, [])
@@ -348,19 +363,19 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     mc.priceScale('volume').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, visible: false })
 
     ema20Ref.current = mc.addSeries(LineSeries, {
-      color: '#f59e0b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+      color: '#f59e0b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: mainPriceFmt,
     })
     ema50Ref.current = mc.addSeries(LineSeries, {
-      color: '#a78bfa', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+      color: '#a78bfa', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: mainPriceFmt,
     })
     bbUpperRef.current = mc.addSeries(LineSeries, {
-      color: '#6366f155', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, visible: false,
+      color: '#6366f155', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, visible: false, priceFormat: mainPriceFmt,
     })
     bbMidRef.current = mc.addSeries(LineSeries, {
-      color: '#6366f1aa', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, visible: false,
+      color: '#6366f1aa', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, visible: false, priceFormat: mainPriceFmt,
     })
     bbLowerRef.current = mc.addSeries(LineSeries, {
-      color: '#6366f155', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, visible: false,
+      color: '#6366f155', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, visible: false, priceFormat: mainPriceFmt,
     })
 
     const sc = createChart(subRef.current, {
@@ -382,6 +397,17 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
       if (abs < 1)      return v.toFixed(4)
       return v.toFixed(2)
     }}
+    // Apply same formatter globally to the sub-chart axis tick labels.
+    // Without this, the RSI series (added first, no custom priceFormat) controls
+    // the scale formatter, causing MACD values like -0.00030 to display as "-0.00".
+    sc.applyOptions({ localization: { priceFormatter: (v: number) => {
+      const abs = Math.abs(v)
+      if (abs === 0) return '0.00'
+      if (abs < 0.0001) return v.toFixed(6)
+      if (abs < 0.01)   return v.toFixed(5)
+      if (abs < 1)      return v.toFixed(4)
+      return v.toFixed(2)
+    }}})
     rsiRef.current = sc.addSeries(LineSeries, { color: '#38bdf8', lineWidth: 2, priceLineVisible: false })
     macdLineRef.current = sc.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 1, priceLineVisible: false, lastValueVisible: true, priceFormat: macdPriceFmt, visible: false })
     macdSignRef.current = sc.addSeries(LineSeries, { color: '#ec4899', lineWidth: 1, priceLineVisible: false, lastValueVisible: true, priceFormat: macdPriceFmt, visible: false })
@@ -441,10 +467,13 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
         const entryColor = t.is_paper ? '#60a5fa' : '#f59e0b'
         const modeTag    = t.is_paper ? 'P' : 'L'
 
-        if (t.entry_time && t.entry_price && t.entry_time >= minTime && t.entry_time <= maxTime) {
+        if (t.entry_time && t.entry_price && t.entry_time >= minTime) {
+          // Snap to the last candle when the trade was placed after the chart window
+          // ends (e.g. a live open trade during a weekend gap on IBKR forex).
+          const markerTime = Math.min(t.entry_time, maxTime)
           const pnlTag = t.pnl_pct != null ? ` ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%` : ''
           tradeMarkers.push({
-            time:     t.entry_time as any,
+            time:     markerTime as any,
             position: isBuy ? 'belowBar' : 'aboveBar',
             color:    entryColor,
             shape:    isBuy ? 'arrowUp' : 'arrowDown',

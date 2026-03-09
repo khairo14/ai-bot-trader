@@ -373,15 +373,24 @@ async def get_status(db: AsyncSession = Depends(get_db)):
 async def list_paper_trades(
     limit: int = 50,
     status: Optional[str] = None,
+    mode: str = "paper",
     db: AsyncSession = Depends(get_db),
 ):
-    """List paper trades, newest first."""
-    q = (
-        select(Trade)
-        .where(Trade.is_paper == True)
-        .order_by(desc(Trade.opened_at))
-        .limit(limit)
-    )
+    """List trades, newest first.
+
+    ``mode`` controls which trades are returned:
+    - ``paper`` (default) – paper trades only (``is_paper == True``)
+    - ``live``  – live/real trades only (``is_paper == False``)
+    - ``all``   – both paper and live
+    """
+    q = select(Trade).order_by(desc(Trade.opened_at)).limit(limit)
+
+    if mode == "paper":
+        q = q.where(Trade.is_paper == True)
+    elif mode == "live":
+        q = q.where(Trade.is_paper == False)
+    # mode == "all" → no is_paper filter
+
     if status:
         try:
             q = q.where(Trade.status == OrderStatus(status))
@@ -410,6 +419,7 @@ async def list_paper_trades(
                 "asset_class": t.asset_class.value if hasattr(t.asset_class, "value") else t.asset_class,
                 "strategy_name": t.strategy_name,
                 "broker_order_id": t.broker_order_id,
+                "is_paper": t.is_paper,
                 "opened_at": t.opened_at.isoformat() if t.opened_at else None,
                 "closed_at": t.closed_at.isoformat() if t.closed_at else None,
             }
