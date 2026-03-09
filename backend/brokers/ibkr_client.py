@@ -62,9 +62,11 @@ def _ibkr_contract(symbol: str):
 # _CACHE_TTL seconds, so browser refreshes never trigger a new connection.
 
 class _IBKRManager:
-    _CACHE_TTL     = 60.0   # return cached balance for up to 60 s
-    _SETTLE_SECS   = 2.0    # wait after connect for Gateway to push account data
-    _CONNECT_TIMEOUT = 10   # seconds for connectAsync
+    _CACHE_TTL        = 60.0   # return cached balance for up to 60 s
+    _SETTLE_SECS      = 5.0    # initial wait after connect for Gateway to push account data
+    _ACCT_POLL_SECS   = 0.5    # poll interval when waiting for accountValues to populate
+    _ACCT_TIMEOUT     = 20.0   # max seconds to wait for account data after connect
+    _CONNECT_TIMEOUT  = 10     # seconds for connectAsync
 
     def __init__(self, client_id: int | None = None) -> None:
         self._client_id: int = client_id if client_id is not None else settings.ibkr_client_id
@@ -111,6 +113,11 @@ class _IBKRManager:
                     logger.info("[IBKR] Connection lost — attempting auto-reconnect …")
                     reconnected = await self._ensure_connected()
                     if reconnected and self._ib:
+                        # Re-subscribe to account updates so accountValues() repopulates.
+                        try:
+                            self._ib.reqAccountUpdates(subscribe=True)
+                        except Exception:
+                            pass
                         # F-082: refresh in-memory position cache after reconnect so
                         # get_positions() (and risk-manager open_count) reflects reality.
                         try:
@@ -153,7 +160,14 @@ class _IBKRManager:
                 clientId=self._client_id,
                 timeout=self._CONNECT_TIMEOUT,
             )
-            # Gateway pushes account data asynchronously — wait for it
+            # Explicitly subscribe to account updates so accountValues() is populated.
+            # ib_insync does this for the primary account automatically, but paper
+            # accounts are slow to push NetLiquidation — subscribe explicitly to be safe.
+            try:
+                self._ib.reqAccountUpdates(subscribe=True)
+            except Exception:
+                pass
+            # Wait for Gateway to push the initial account snapshot.
             await asyncio.sleep(self._SETTLE_SECS)
             logger.info(
                 f"[IBKR] Persistent connection established "
@@ -170,13 +184,31 @@ class _IBKRManager:
         if not await self._ensure_connected():
             raise ConnectionError("IBKR Gateway is not reachable")
 
-        total = available = 0.0
         assert self._ib is not None
-        for v in self._ib.accountValues():
-            if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
-                total = float(v.value)
-            if v.tag == "AvailableFunds" and v.currency in ("USD", "BASE"):
-                available = float(v.value)
+        # Poll until account data is populated or timeout expires.
+        # Paper accounts push NetLiquidation/AvailableFunds asynchronously;
+        # accountValues() returns an empty list until the subscription fires.
+        _deadline = asyncio.get_event_loop().time() + self._ACCT_TIMEOUT
+        total = available = 0.0
+        while asyncio.get_event_loop().time() < _deadline:
+            total = available = 0.0
+            for v in self._ib.accountValues():
+                if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
+                    try:
+                        total = float(v.value)
+                    except (ValueError, TypeError):
+                        pass
+                if v.tag == "AvailableFunds" and v.currency in ("USD", "BASE"):
+                    try:
+                        available = float(v.value)
+                    except (ValueError, TypeError):
+                        pass
+            if total > 0:
+                break  # got real data
+            await asyncio.sleep(self._ACCT_POLL_SECS)
+
+        if total == 0:
+            logger.warning("[IBKR] accountValues() still empty after timeout — returning $0")
 
         balance = Balance(total=total, available=available, currency="USD")
         self._cached = balance
