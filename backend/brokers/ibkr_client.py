@@ -66,7 +66,9 @@ class _IBKRManager:
     _SETTLE_SECS      = 5.0    # initial wait after connect for Gateway to push account data
     _ACCT_POLL_SECS   = 0.5    # poll interval when waiting for accountValues to populate
     _ACCT_TIMEOUT     = 20.0   # max seconds to wait for account data after connect
-    _CONNECT_TIMEOUT  = 10     # seconds for connectAsync
+    _CONNECT_TIMEOUT  = 15     # seconds for connectAsync
+    _CONNECT_RETRIES  = 4      # attempts before giving up in a single _ensure_connected call
+    _CONNECT_RETRY_DELAY = 8.0  # seconds between connect retries
 
     def __init__(self, client_id: int | None = None) -> None:
         self._client_id: int = client_id if client_id is not None else settings.ibkr_client_id
@@ -74,6 +76,9 @@ class _IBKRManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        # Asyncio lock: prevents concurrent connectAsync() on the same IB instance
+        # (e.g. _reconnect_loop racing with _fetch_async on startup)
+        self._connect_lock: Optional[asyncio.Lock] = None
         self._cached: Optional[Balance] = None
         self._cache_ts: float = 0.0
         self._started = False
@@ -100,16 +105,20 @@ class _IBKRManager:
     def _run_loop(self) -> None:
         assert self._loop is not None
         asyncio.set_event_loop(self._loop)
+        # Create the asyncio lock on the background loop (must be created on the
+        # loop that will use it — asyncio.Lock() is not thread-safe across loops).
+        self._connect_lock = asyncio.Lock()
         self._loop.create_task(self._reconnect_loop())
         self._loop.run_forever()
 
     async def _reconnect_loop(self) -> None:
         """Background task: silently reconnect whenever the Gateway drops us."""
-        _RECONNECT_INTERVAL = 30  # seconds between checks
+        _RECONNECT_INTERVAL = 15  # seconds between checks (reduced from 30 for faster recovery)
+        # Brief initial delay so the loop doesn't race with the first _fetch_async call.
+        await asyncio.sleep(5)
         while True:
-            await asyncio.sleep(_RECONNECT_INTERVAL)
             try:
-                if self._ib is not None and not self._ib.isConnected():
+                if self._ib is None or not self._ib.isConnected():
                     logger.info("[IBKR] Connection lost — attempting auto-reconnect …")
                     reconnected = await self._ensure_connected()
                     if reconnected and self._ib:
@@ -135,6 +144,7 @@ class _IBKRManager:
                                 logger.debug(f"[IBKR] Re-subscribe failed for {_sym}: {_sub_err}")
             except Exception as exc:
                 logger.debug(f"[IBKR] Auto-reconnect attempt failed: {exc}")
+            await asyncio.sleep(_RECONNECT_INTERVAL)
 
     def _submit(self, coro, timeout: float = 30.0):
         """Run a coroutine on the background loop and block until done."""
@@ -145,38 +155,72 @@ class _IBKRManager:
     # ── connection helpers ────────────────────────────────────────────────────
 
     async def _ensure_connected(self) -> bool:
-        if self._ib is None:
-            self._ib = IB()
-            # Log cleanly when Gateway drops us
-            self._ib.disconnectedEvent += lambda: logger.warning(
-                "[IBKR] Gateway disconnected — will auto-reconnect within 30 s"
-            )
-        if self._ib.isConnected():
+        # Fast-path: already connected.
+        if self._ib is not None and self._ib.isConnected():
             return True
+
+        # Serialize concurrent connect attempts (e.g. _reconnect_loop racing
+        # with the first _fetch_async call on startup).
+        lock = self._connect_lock
+        if lock is not None:
+            await lock.acquire()
         try:
-            await self._ib.connectAsync(
-                host=settings.ibkr_host,
-                port=settings.ibkr_port,
-                clientId=self._client_id,
-                timeout=self._CONNECT_TIMEOUT,
+            # Double-check inside the lock.
+            if self._ib is not None and self._ib.isConnected():
+                return True
+
+            # Always tear down and recreate the IB instance.
+            # A disconnected or previously-failed IB object can be in a broken
+            # state where connectAsync() keeps failing — a fresh object fixes it.
+            if self._ib is not None:
+                try:
+                    self._ib.disconnect()
+                except Exception:
+                    pass
+            self._ib = IB()
+            self._ib.disconnectedEvent += lambda: logger.warning(
+                "[IBKR] Gateway disconnected — will auto-reconnect"
             )
-            # Explicitly subscribe to account updates so accountValues() is populated.
-            # ib_insync does this for the primary account automatically, but paper
-            # accounts are slow to push NetLiquidation — subscribe explicitly to be safe.
-            try:
-                self._ib.reqAccountUpdates(subscribe=True)
-            except Exception:
-                pass
-            # Wait for Gateway to push the initial account snapshot.
-            await asyncio.sleep(self._SETTLE_SECS)
-            logger.info(
-                f"[IBKR] Persistent connection established "
-                f"(clientId={self._client_id}, port={settings.ibkr_port})"
-            )
-            return True
-        except Exception as exc:
-            logger.warning(f"[IBKR] Connect failed: {exc}")
+
+            # Retry loop: Gateway may still be initialising when Docker starts.
+            for attempt in range(self._CONNECT_RETRIES):
+                try:
+                    await self._ib.connectAsync(
+                        host=settings.ibkr_host,
+                        port=settings.ibkr_port,
+                        clientId=self._client_id,
+                        timeout=self._CONNECT_TIMEOUT,
+                    )
+                    # Explicitly subscribe to account updates so accountValues() is
+                    # populated.  Paper accounts are slow to push NetLiquidation.
+                    try:
+                        self._ib.reqAccountUpdates(subscribe=True)
+                    except Exception:
+                        pass
+                    # Wait for Gateway to push the initial account snapshot.
+                    await asyncio.sleep(self._SETTLE_SECS)
+                    logger.info(
+                        f"[IBKR] Connected (clientId={self._client_id}, "
+                        f"port={settings.ibkr_port})"
+                    )
+                    return True
+                except Exception as exc:
+                    remaining = self._CONNECT_RETRIES - attempt - 1
+                    if remaining > 0:
+                        logger.warning(
+                            f"[IBKR] Connect attempt {attempt + 1}/{self._CONNECT_RETRIES} "
+                            f"failed: {exc} — retrying in {self._CONNECT_RETRY_DELAY:.0f}s "
+                            f"({remaining} left)"
+                        )
+                        await asyncio.sleep(self._CONNECT_RETRY_DELAY)
+                    else:
+                        logger.warning(
+                            f"[IBKR] All {self._CONNECT_RETRIES} connect attempts failed: {exc}"
+                        )
             return False
+        finally:
+            if lock is not None:
+                lock.release()
 
     # ── balance fetch ─────────────────────────────────────────────────────────
 
