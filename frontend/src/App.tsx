@@ -25,6 +25,12 @@ import Login from './pages/Login'
 import axios from 'axios'
 
 import { isAuthenticated, clearAuth, getUsername } from './lib/auth'
+import { useWebSocket } from './hooks/useWebSocket'
+
+const WS_URL = (() => {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${window.location.host}/ws`
+})()
 
 const NAV_ITEMS = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -43,6 +49,13 @@ const NAV_ITEMS = [
 // ─── Protected layout (sidebar + all app routes) ────────────────────────────
 function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
   const navigate = useNavigate()
+  const [wsMessage, setWsMessage] = useState<{ type: string; data: unknown } | null>(null)
+  useWebSocket(WS_URL, {
+    onMessage: (raw) => {
+      const msg = raw as { type?: string; data?: unknown }
+      if (msg?.type) setWsMessage({ type: msg.type, data: msg.data ?? null })
+    },
+  })
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem('nav-collapsed') === 'true' } catch { return false }
   })
@@ -123,7 +136,7 @@ function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
 
         {/* Notification Bell */}
         <div className="px-2 pb-2">
-          <NotificationBell collapsed={collapsed} />
+          <NotificationBell collapsed={collapsed} wsMessage={wsMessage} />
         </div>
 
         {/* User / Logout */}
