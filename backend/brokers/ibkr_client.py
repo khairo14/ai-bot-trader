@@ -686,6 +686,12 @@ class IBKRClient(AbstractBroker):
         **kwargs,
     ) -> OrderResult:
         self._ensure_connected()
+        # IBKR (IDEALPRO for forex, SMART for stocks) rejects fractional quantities with
+        # error 10318.  Floor to a whole number here — the risk manager works in float
+        # but the exchange requires integer lot sizes.
+        quantity = math.floor(quantity)
+        if quantity < 1:
+            raise ValueError(f"[IBKR] Computed quantity < 1 after flooring — insufficient balance or position sizing error.")
         logger.info(f"[IBKR] Placing {order_type.upper()} {side.upper()} {quantity} {symbol}")
 
         # Build and qualify contract on the background loop (avoids 'event loop already running')
