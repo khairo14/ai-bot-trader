@@ -616,6 +616,16 @@ async def _run_one_strategy(strat) -> None:
             # Hydrate engine state from DB before processing (balance, open positions)
             await forward_engine.initialize(session)
 
+            # ── Software SL/TP enforcement (safety net for broker bracket failures) ──
+            # IBKR paper accounts require active market data for bracket orders to fire.
+            # This runs first so ghost-position reconcile sees already-closed trades.
+            try:
+                _sl_closed = await forward_engine.monitor_sl_tp(session)
+                if _sl_closed:
+                    logger.info(f"[ForwardTest] SL/TP monitor closed {_sl_closed} position(s) for {strat.name}")
+            except Exception as _mon_err:
+                logger.debug(f"[ForwardTest] SL/TP monitor error (non-fatal): {_mon_err}")
+
             # ── Reconcile broker positions: close any DB OPEN trades that the
             # broker already closed via SL/TP bracket orders (ghost detection).
             try:

@@ -652,6 +652,92 @@ class ForwardEngine:
         logger.warning(f"[ForwardEngine] Emergency stop: {closed} positions closed.")
         return closed
 
+    async def monitor_sl_tp(self, db_session) -> int:
+        """
+        Software-side SL/TP enforcement — runs every scheduler tick as a
+        safety net independent of broker bracket orders.
+
+        Broker bracket orders (IBKR paper/live, Alpaca OTO/bracket, Binance OCO)
+        are *also* placed at entry, but they can silently fail to fire due to:
+          - IBKR paper account missing active market data subscription
+          - Network interruption between bracket placement and trigger
+          - Broker outage or maintenance
+
+        This method fetches the current price for every OPEN trade that has
+        SL or TP set and immediately closes positions that have breached their
+        level.  Uses the same `close_position()` path as manual close, so
+        PnL, notifications, and risk-manager counters all fire correctly.
+
+        Returns the number of positions closed.
+        """
+        from sqlalchemy import select as _sel
+
+        open_q = await db_session.execute(
+            _sel(Trade).where(
+                Trade.status == OrderStatus.OPEN,
+                # Only monitor trades that have at least one guard level
+                (Trade.stop_loss.isnot(None) | Trade.take_profit.isnot(None)),
+            )
+        )
+        open_trades: list = open_q.scalars().all()
+        if not open_trades:
+            return 0
+
+        _long_sides = {"buy", "cover"}
+        closed_count = 0
+
+        for trade in open_trades:
+            try:
+                broker = get_broker(
+                    trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+                )
+                await broker.connect()
+                current_price: float = await broker.get_price(trade.symbol)
+            except Exception as _pe:
+                logger.debug(f"[ForwardEngine] monitor_sl_tp: price fetch failed for {trade.symbol}: {_pe}")
+                continue
+
+            is_long = trade.side in _long_sides
+            reason: str | None = None
+
+            if trade.stop_loss is not None:
+                # For long: SL fires when price falls at or below SL
+                # For short: SL fires when price rises at or above SL
+                if is_long and current_price <= trade.stop_loss:
+                    reason = "stop_loss"
+                elif not is_long and current_price >= trade.stop_loss:
+                    reason = "stop_loss"
+
+            if reason is None and trade.take_profit is not None:
+                # For long: TP fires when price rises at or above TP
+                # For short: TP fires when price falls at or below TP
+                if is_long and current_price >= trade.take_profit:
+                    reason = "take_profit"
+                elif not is_long and current_price <= trade.take_profit:
+                    reason = "take_profit"
+
+            if reason is None:
+                continue
+
+            logger.info(
+                f"[ForwardEngine] SL/TP monitor triggered {reason} for "
+                f"{trade.symbol} id={trade.id} | "
+                f"current={current_price}  sl={trade.stop_loss}  tp={trade.take_profit}"
+            )
+            try:
+                await self.close_position(trade, reason=reason, db_session=db_session)
+                self._paper_positions.pop(trade.symbol, None)
+                closed_count += 1
+            except Exception as _ce:
+                logger.error(
+                    f"[ForwardEngine] monitor_sl_tp: failed to close {trade.symbol} id={trade.id}: {_ce}"
+                )
+
+        if closed_count:
+            logger.info(f"[ForwardEngine] SL/TP monitor closed {closed_count} position(s).")
+
+        return closed_count
+
     async def reconcile_positions(self, db_session) -> int:
         """
         Compare DB OPEN trades against each broker's actual live positions.

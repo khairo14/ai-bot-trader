@@ -129,6 +129,15 @@ def run_signals(self):
                 # Hydrate in-memory state from DB before processing any signal
                 await forward_engine.initialize(session)
 
+                # Software SL/TP enforcement — runs before signal processing so
+                # breached positions are closed before new entries are evaluated.
+                try:
+                    _sl_closed = await forward_engine.monitor_sl_tp(session)
+                    if _sl_closed:
+                        logger.info(f"[signal_runner] SL/TP monitor closed {_sl_closed} position(s)")
+                except Exception as _mon_err:
+                    logger.debug(f"[signal_runner] SL/TP monitor error (non-fatal): {_mon_err}")
+
                 # Reconcile ghost positions: trades whose SL/TP fired at the broker
                 # but whose DB status is still OPEN (live strategies only).
                 try:
