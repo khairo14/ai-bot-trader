@@ -1,4 +1,5 @@
 import asyncio
+import math
 import ccxt.async_support as ccxt
 import pandas as pd
 from typing import List, Optional, Callable
@@ -191,6 +192,43 @@ class BinanceClient(AbstractBroker):
                     pass
         return positions
 
+    async def _normalize_qty(self, symbol: str, qty: float) -> float:
+        """Truncate qty to the symbol's LOT_SIZE step so Binance accepts the order.
+
+        Works for both CCXT-parsed markets (precision.amount = step size in TICK_SIZE
+        mode) and the raw exchangeInfo fallback (filters[LOT_SIZE].stepSize).
+        """
+        market = (self.exchange.markets or {}).get(symbol, {})
+        step: float | None = None
+
+        if "precision" in market:
+            # CCXT TICK_SIZE mode (Binance default): precision.amount IS the step
+            raw = market["precision"].get("amount")
+            if raw is not None:
+                try:
+                    step = float(raw)
+                except (TypeError, ValueError):
+                    pass
+
+        if step is None and "filters" in market:
+            # Raw exchangeInfo fallback: LOT_SIZE filter carries stepSize
+            for f in market.get("filters", []):
+                if f.get("filterType") == "LOT_SIZE":
+                    try:
+                        step = float(f["stepSize"])
+                    except (TypeError, ValueError):
+                        pass
+                    break
+
+        if step and step > 0:
+            normalized = math.floor(qty / step) * step
+            # Avoid floating-point artifacts (e.g. 0.10000000001)
+            step_str = f"{step:.10f}".rstrip("0")
+            decimals = len(step_str.split(".")[-1]) if "." in step_str else 0
+            return round(normalized, max(0, decimals))
+
+        return qty
+
     async def place_order(
         self,
         symbol: str,
@@ -202,6 +240,13 @@ class BinanceClient(AbstractBroker):
         take_profit_price: Optional[float] = None,
         **kwargs,
     ) -> OrderResult:
+        await self._ensure_markets()
+        quantity = await self._normalize_qty(symbol, quantity)
+        if quantity <= 0:
+            raise ValueError(
+                f"[Binance] Quantity rounds to zero after LOT_SIZE normalization "
+                f"for {symbol}. Check position sizing."
+            )
         logger.info(f"[Binance] Placing {order_type.upper()} {side.upper()} {quantity} {symbol}")
         params = {}
         if stop_price and take_profit_price:
