@@ -537,6 +537,7 @@ async def _run_one_strategy(strat) -> None:
             broker_name=strat.broker.value,
             timeframe=timeframe,
             limit=limit,
+            asset_class=_asset_cls_str,
         )
 
         logger.info(

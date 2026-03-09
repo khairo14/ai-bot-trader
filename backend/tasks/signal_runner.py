@@ -168,6 +168,7 @@ def run_signals(self):
                             broker_name=strat.broker.value,
                             timeframe=timeframe,
                             limit=limit,
+                            asset_class=getattr(strat.asset_class, "value", None),
                         )
 
                         # ── Persist signal to DB ─────────────────────────────────

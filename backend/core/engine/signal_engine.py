@@ -63,6 +63,7 @@ class SignalEngine:
         timeframe: str = "1h",
         limit: int = 200,
         data: Optional[pd.DataFrame] = None,
+        asset_class: Optional[str] = None,
     ) -> Signal:
         """
         Run a strategy and return a Signal.
@@ -92,7 +93,14 @@ class SignalEngine:
         # metadata and must not be overridden.
         if strategy_name not in _OPTIONS_STRATEGIES:
             signal.broker = broker_name
-            signal.asset_class = BROKER_ASSET_CLASS.get(broker_name, signal.asset_class)
+            # If the caller passes an explicit asset_class (from the strategy's DB row),
+            # use it — this is the authoritative source for brokers like IBKR that can
+            # trade stocks, forex, or options depending on the strategy.
+            # Fall back to BROKER_ASSET_CLASS for Binance/Alpaca, or the strategy default.
+            if asset_class is not None:
+                signal.asset_class = asset_class
+            else:
+                signal.asset_class = BROKER_ASSET_CLASS.get(broker_name, signal.asset_class)
 
         logger.info(
             f"[SignalEngine] {strategy_name} | {symbol} | {timeframe} → "
