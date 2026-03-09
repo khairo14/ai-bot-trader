@@ -359,7 +359,7 @@ def run_signals(self):
                         # broker's session is closed. Crypto (Binance) is always open.
                         if allow_execution:
                             from api.routes.forward_test import is_market_open as _is_mkt_open
-                            if not _is_mkt_open(strat.broker.value):
+                            if not _is_mkt_open(strat.broker.value, getattr(strat.asset_class, "value", None)):  # F-098: pass asset_class for FX hours check
                                 allow_execution = False
                                 _market_note = f"execution suppressed: {strat.broker.value} session closed"
                                 sig.reasons = (sig.reasons or []) + [_market_note]

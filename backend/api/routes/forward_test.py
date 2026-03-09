@@ -789,6 +789,7 @@ async def _run_signals_background():
                 strat_q = await session.execute(
                     sa_select(StrategyModel).where(
                         StrategyModel.is_active == True,
+                        StrategyModel.is_paper == True,  # F-097: never execute live strategies via "Run Now"
                     )
                 )
                 strategies = strat_q.scalars().all()
@@ -833,7 +834,7 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
     closed_count = 0
     for t in open_trades:
         try:
-            await engine.close_position(t, reason="emergency_stop")
+            await engine.close_position(t, reason="emergency_stop", db_session=db)  # F-100: pass db_session so atomic guard fires
             closed_count += 1
         except Exception as _e:
             logger.warning(f"[ForwardTest] Emergency stop: failed to close {t.symbol} id={t.id}: {_e}")

@@ -129,9 +129,10 @@ class _IBKRManager:
                             pass
                         # F-082: refresh in-memory position cache after reconnect so
                         # get_positions() (and risk-manager open_count) reflects reality.
+                        # F-101: use reqPositionsAsync() — blocking reqPositions() throws
+                        # "This event loop is already running" inside an async coroutine.
                         try:
-                            self._ib.reqPositions()
-                            await asyncio.sleep(1.0)
+                            await self._ib.reqPositionsAsync()
                         except Exception:
                             pass
                         # F-082: re-subscribe market data for every open bracket order
@@ -232,9 +233,9 @@ class _IBKRManager:
         # Poll until account data is populated or timeout expires.
         # Paper accounts push NetLiquidation/AvailableFunds asynchronously;
         # accountValues() returns an empty list until the subscription fires.
-        _deadline = asyncio.get_event_loop().time() + self._ACCT_TIMEOUT
+        _deadline = asyncio.get_running_loop().time() + self._ACCT_TIMEOUT  # F-099: get_running_loop() not deprecated
         total = available = 0.0
-        while asyncio.get_event_loop().time() < _deadline:
+        while asyncio.get_running_loop().time() < _deadline:
             total = available = 0.0
             for v in self._ib.accountValues():
                 if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
