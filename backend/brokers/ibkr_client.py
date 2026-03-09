@@ -238,6 +238,13 @@ class _IBKRManager:
         assert parent_trade is not None
         return parent_trade
 
+    async def _do_subscribe_mkt_data_for_fill(self, contract) -> None:
+        """Subscribe to market data on the background loop for paper fill simulation."""
+        if not self._ib:
+            return
+        self._ib.reqMktData(contract, "", False, False)
+        await asyncio.sleep(1.0)  # allow at least one tick to arrive
+
     def place_bracket_sync(
         self,
         contract,
@@ -424,6 +431,19 @@ class _IBKRManager:
         """Thread-safe: open a live price tick subscription. Returns the Ticker object."""
         self._start()
         return self._submit(self._do_subscribe_mkt_data(contract), timeout=15.0)
+
+    def subscribe_mkt_data_for_fill(self, contract) -> None:
+        """Fire-and-forget: schedule reqMktData on the background loop so IBKR paper
+        account has a live price reference to simulate fills.  Does not block.
+        Cancel via unsubscribe_mkt_data() once the fill is confirmed.
+        """
+        if self._loop and self._ib:
+            try:
+                self._loop.call_soon_threadsafe(
+                    self._ib.reqMktData, contract, "", False, False
+                )
+            except Exception:
+                pass
 
     def unsubscribe_mkt_data(self, contract) -> None:
         """Cancel a live market data subscription (fire-and-forget)."""
@@ -713,6 +733,13 @@ class IBKRClient(AbstractBroker):
         elif (stop_price or take_profit_price):
             # Market order with SL/TP — send as a bracket order so IBKR
             # actually enforces the stop and take-profit on their side.
+            # F-077: subscribe to live ticks FIRST so IBKR paper account has a
+            # price reference to simulate fills (reqMktData is called inside
+            # _place_bracket_async which runs on the background loop).
+            await _place_loop.run_in_executor(
+                None,
+                lambda: _manager._submit(_manager._do_subscribe_mkt_data_for_fill(contract)),
+            )
             trade = await _place_loop.run_in_executor(
                 None,
                 _manager.place_bracket_sync,
@@ -720,40 +747,48 @@ class IBKRClient(AbstractBroker):
             )
         else:
             order = MarketOrder(action, quantity)
+            # F-077: subscribe before placing so IBKR paper can simulate the fill
+            _manager.subscribe_mkt_data_for_fill(contract)
+            await asyncio.sleep(0.5)  # let at least one tick arrive
             trade = self.ib.placeOrder(contract, order)
         await asyncio.sleep(0.5)
 
-        # ── Poll for fill confirmation (up to 15 s for IBKR paper) ────────────
-        # IBKR paper fills are near-instant for forex market orders but may
-        # take a few seconds for the TWS status to propagate.
+        # ── Poll for fill confirmation ─────────────────────────────────────────
+        # F-077: timeout raised 15 → 30 s; reqMktData is now active so paper
+        # fills arrive reliably.  try/finally ensures the subscription is
+        # always cancelled regardless of fill, timeout, or rejection.
         order_id = str(trade.order.orderId)
         fill_price: Optional[float] = None
-        _FILL_TIMEOUT = 15.0
+        _FILL_TIMEOUT = 30.0
         _POLL_INTERVAL = 0.5
         _elapsed = 0.0
-        while _elapsed < _FILL_TIMEOUT:
-            await asyncio.sleep(_POLL_INTERVAL)
-            _elapsed += _POLL_INTERVAL
-            try:
-                _st = trade.orderStatus.status
-                _filled_price = trade.orderStatus.avgFillPrice
-                if _st in ("Filled", "PreSubmitted") and _filled_price:
-                    fill_price = float(_filled_price)
-                    logger.info(f"[IBKR] Order {order_id} filled @ {fill_price}")
-                    break
-                elif _st == "Filled" and not _filled_price:
-                    # Filled but price not yet pushed — use last trade price
-                    fill_price = float(trade.orderStatus.lastFillPrice or 0) or None
-                    logger.info(f"[IBKR] Order {order_id} filled (lastFillPrice={fill_price})")
-                    break
-                elif _st in ("Cancelled", "Inactive"):
-                    raise RuntimeError(f"IBKR order {order_id} ended with status '{_st}' — not filled")
-            except RuntimeError:
-                raise
-            except Exception as _pe:
-                logger.debug(f"[IBKR] Poll {order_id}: {_pe}")
-        else:
-            logger.warning(f"[IBKR] Order {order_id} not confirmed filled within {_FILL_TIMEOUT}s — treating as pending")
+        try:
+            while _elapsed < _FILL_TIMEOUT:
+                await asyncio.sleep(_POLL_INTERVAL)
+                _elapsed += _POLL_INTERVAL
+                try:
+                    _st = trade.orderStatus.status
+                    _filled_price = trade.orderStatus.avgFillPrice
+                    if _st in ("Filled", "PreSubmitted") and _filled_price:
+                        fill_price = float(_filled_price)
+                        logger.info(f"[IBKR] Order {order_id} filled @ {fill_price}")
+                        break
+                    elif _st == "Filled" and not _filled_price:
+                        # Filled but price not yet pushed — use last trade price
+                        fill_price = float(trade.orderStatus.lastFillPrice or 0) or None
+                        logger.info(f"[IBKR] Order {order_id} filled (lastFillPrice={fill_price})")
+                        break
+                    elif _st in ("Cancelled", "Inactive"):
+                        raise RuntimeError(f"IBKR order {order_id} ended with status '{_st}' — not filled")
+                except RuntimeError:
+                    raise
+                except Exception as _pe:
+                    logger.debug(f"[IBKR] Poll {order_id}: {_pe}")
+            else:
+                logger.warning(f"[IBKR] Order {order_id} not confirmed filled within {_FILL_TIMEOUT}s — treating as pending")
+        finally:
+            # F-077: cancel the market data subscription opened for paper fill simulation
+            _manager.unsubscribe_mkt_data(contract)
 
         return OrderResult(
             order_id=order_id,
