@@ -250,19 +250,50 @@ class BinanceClient(AbstractBroker):
         logger.info(f"[Binance] Placing {order_type.upper()} {side.upper()} {quantity} {symbol}")
         params = {}
         if stop_price and take_profit_price:
-            # OCO order
+            # OCO order: one-cancels-the-other exit bracket
             result = await self.exchange.create_order(
                 symbol, "oco", side, quantity,  # type: ignore[arg-type]
                 price=take_profit_price,
                 params={"stopPrice": stop_price, "stopLimitPrice": stop_price * 0.999}
             )
+            # OCO result["id"] is the orderListId, not a fillable child order ID.
+            # Extract the first child order ID from orderReports for fill polling.
+            _oco_reports = (result.get("info") or {}).get("orderReports", [])
+            order_id = str(_oco_reports[0]["orderId"]) if _oco_reports else str(result["id"])
+            fill_price = float(result.get("average") or result.get("price") or 0.0) or None
+        elif stop_price and not take_profit_price:
+            # SL only: place market entry, then stop-loss protection in opposite direction.
+            result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
+            exit_side = "sell" if side == "buy" else "buy"
+            try:
+                _sl_limit = round(stop_price * (0.999 if exit_side == "sell" else 1.001), 8)
+                await self.exchange.create_order(
+                    symbol, "STOP_LOSS_LIMIT", exit_side, quantity,
+                    price=_sl_limit,
+                    params={"stopPrice": stop_price}
+                )
+            except Exception as _sl_err:
+                logger.warning(f"[Binance] Could not place SL guard order after entry: {_sl_err}")
+            order_id = str(result["id"])
+            fill_price = float(result.get("average") or result.get("price") or 0.0) or None
+        elif take_profit_price and not stop_price:
+            # TP only: place market entry, then limit take-profit in opposite direction.
+            result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
+            exit_side = "sell" if side == "buy" else "buy"
+            try:
+                await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
+            except Exception as _tp_err:
+                logger.warning(f"[Binance] Could not place TP guard order after entry: {_tp_err}")
+            order_id = str(result["id"])
+            fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif order_type == "limit" and price:
             result = await self.exchange.create_limit_order(symbol, side, quantity, price)  # type: ignore[arg-type]
+            order_id = str(result["id"])
+            fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         else:
             result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
-
-        order_id = str(result["id"])
-        fill_price: Optional[float] = float(result.get("average") or result.get("price") or 0.0) or None
+            order_id = str(result["id"])
+            fill_price = float(result.get("average") or result.get("price") or 0.0) or None
 
         # ── Poll for fill confirmation if not immediately filled ─────────────
         if not fill_price or str(result.get("status")) != "closed":

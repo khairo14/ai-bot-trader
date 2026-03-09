@@ -129,6 +129,15 @@ def run_signals(self):
                 # Hydrate in-memory state from DB before processing any signal
                 await forward_engine.initialize(session)
 
+                # Reconcile ghost positions: trades whose SL/TP fired at the broker
+                # but whose DB status is still OPEN (live strategies only).
+                try:
+                    _ghosts = await forward_engine.reconcile_positions(session)
+                    if _ghosts:
+                        logger.info(f"[signal_runner] Reconciled {_ghosts} ghost position(s)")
+                except Exception as _rec_err:
+                    logger.debug(f"[signal_runner] Reconcile error (non-fatal): {_rec_err}")
+
                 for strat in active_strategies:
                     params = strat.parameters or {}
                     strategy_type = params.get("strategy_type") or params.get("strategy_name")

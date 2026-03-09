@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers, X, Loader2, History } from 'lucide-react'
 import axios from 'axios'
@@ -174,6 +174,35 @@ export default function Dashboard() {
   const [trades, setTrades] = useState<Trade[]>([])
   const [closingId, setClosingId] = useState<number | null>(null)
 
+  const enrichPositionsWithLivePnl = useCallback(async (positions: OpenPosition[]): Promise<OpenPosition[]> => {
+    if (positions.length === 0) return positions
+    const pairs = [...new Set(positions.map(p => `${p.symbol}|${p.broker}`))]
+    const now = Date.now()
+    const priceMap: Record<string, number> = {}
+    await Promise.allSettled(
+      pairs.map(async (key) => {
+        const [symbol, broker] = key.split('|')
+        try {
+          const res = await axios.get('/api/charts/candles', {
+            params: { symbol, broker, timeframe: '1m', since: now - 10 * 60_000, until: now }
+          })
+          const candles: { close: number }[] = res.data.candles ?? []
+          if (candles.length > 0) priceMap[key] = candles[candles.length - 1].close
+        } catch { /* silently skip */ }
+      })
+    )
+    return positions.map(p => {
+      if (p.pnl != null) return p
+      const currentPrice = priceMap[`${p.symbol}|${p.broker}`]
+      if (!currentPrice || !p.entry_price) return p
+      const isBuy = p.side === 'buy' || p.side === 'long'
+      const sign  = isBuy ? 1 : -1
+      const pnl     = sign * (currentPrice - p.entry_price) * p.quantity
+      const pnl_pct = sign * (currentPrice / p.entry_price - 1) * 100
+      return { ...p, pnl: parseFloat(pnl.toFixed(4)), pnl_pct: parseFloat(pnl_pct.toFixed(4)) }
+    })
+  }, [])
+
   const fetchAll = async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true)
     // Fetch independently — a slow broker never blocks signals from loading
@@ -191,7 +220,10 @@ export default function Dashboard() {
     if (pendingResult.status === 'fulfilled') setPendingSignals(pendingResult.value.data.signals || [])
     if (mlResult.status === 'fulfilled') setMlStatus(mlResult.value.data)
     if (weightsResult.status === 'fulfilled') setPortfolioWeights(weightsResult.value.data)
-    if (posResult.status === 'fulfilled') setOpenPositions(posResult.value.data.positions || [])
+    if (posResult.status === 'fulfilled') {
+      const enriched = await enrichPositionsWithLivePnl(posResult.value.data.positions || [])
+      setOpenPositions(enriched)
+    }
     if (tradesResult.status === 'fulfilled') setTrades(tradesResult.value.data.trades || [])
 
     // Unblock the loading skeleton immediately after core data arrives.

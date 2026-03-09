@@ -652,6 +652,161 @@ class ForwardEngine:
         logger.warning(f"[ForwardEngine] Emergency stop: {closed} positions closed.")
         return closed
 
+    async def reconcile_positions(self, db_session) -> int:
+        """
+        Compare DB OPEN trades against each broker's actual live positions.
+
+        When a SL or TP bracket order fires at the broker, the broker closes
+        the position but our DB still has status=OPEN (ghost).  This method
+        detects those ghosts and closes them in the DB with an estimated PnL.
+
+        Should be called once per scheduler tick BEFORE processing new signals
+        so that ghost entries don't block new trades on the same symbol.
+
+        Returns the number of positions reconciled.
+        """
+        from sqlalchemy import select as _sel
+        from collections import defaultdict
+
+        # ── Symbol normalisation per broker ───────────────────────────────
+        # IBKR  forex: "GBP/USD" → "GBP"  (IBForex.symbol = base currency only)
+        # Alpaca forex: "GBP/USD" → "GBPUSD"
+        # Binance:      "BTC/USDT" → "BTC/USDT"  (direct match)
+        _FX = {"USD","EUR","GBP","JPY","CHF","CAD","AUD","NZD",
+               "SEK","NOK","DKK","HKD","SGD","MXN","ZAR","HUF","PLN","TRY","CZK","ILS"}
+
+        def _normalize(symbol: str, broker: str) -> str:
+            clean = symbol.replace("/", "").upper()
+            if broker == "ibkr":
+                if len(clean) == 6 and clean[:3] in _FX and clean[3:] in _FX:
+                    return clean[:3]
+                return symbol.split("/")[0].upper() if "/" in symbol else clean
+            if broker == "alpaca":
+                return clean
+            return symbol  # binance and others already match
+
+        open_q = await db_session.execute(
+            _sel(Trade).where(Trade.status == OrderStatus.OPEN)
+        )
+        open_trades: list = open_q.scalars().all()
+        if not open_trades:
+            return 0
+
+        by_broker: dict = defaultdict(list)
+        for t in open_trades:
+            bk = t.broker.value if hasattr(t.broker, "value") else str(t.broker)
+            by_broker[bk].append(t)
+
+        ghost_count = 0
+        _long_sides = {"buy", "cover"}
+
+        for broker_name, trades in by_broker.items():
+            try:
+                broker = get_broker(broker_name)
+                await broker.connect()
+                broker_positions = await broker.get_positions()
+                broker_symbols = {p.symbol for p in broker_positions}
+            except Exception as _e:
+                logger.debug(f"[ForwardEngine] reconcile: {broker_name} positions unavailable: {_e}")
+                continue
+
+            for trade in trades:
+                if _normalize(trade.symbol, broker_name) in broker_symbols:
+                    continue  # still open at broker — skip
+
+                # Position is gone from broker → SL/TP fired (or manually closed via broker UI)
+                logger.info(
+                    f"[ForwardEngine] RECONCILE ghost: {trade.symbol} id={trade.id} "
+                    f"not in {broker_name} positions — closing in DB"
+                )
+                try:
+                    exit_price: float = 0.0
+                    try:
+                        exit_price = await broker.get_price(trade.symbol)
+                    except Exception:
+                        pass
+
+                    # Best-guess reason: compare exit price to SL/TP levels
+                    is_long = trade.side in _long_sides
+                    reason = "broker_sl_tp"
+                    if exit_price and trade.stop_loss and trade.take_profit:
+                        if is_long:
+                            reason = "take_profit" if exit_price >= trade.take_profit else "stop_loss"
+                        else:
+                            reason = "take_profit" if exit_price <= trade.take_profit else "stop_loss"
+                    elif exit_price and trade.stop_loss:
+                        if is_long:
+                            reason = "stop_loss" if exit_price <= trade.stop_loss else "broker_close"
+                        else:
+                            reason = "stop_loss" if exit_price >= trade.stop_loss else "broker_close"
+
+                    # Compute PnL from exit price
+                    if exit_price and trade.entry_price:
+                        side_mult = 1.0 if is_long else -1.0
+                        raw_pnl = (exit_price - trade.entry_price) * trade.quantity * side_mult
+                        trade.exit_price = round(exit_price, 8)
+                        trade.pnl = round(raw_pnl, 4)
+                        cost_basis = trade.entry_price * trade.quantity
+                        trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
+
+                    trade.status = OrderStatus.FILLED
+                    trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    self._paper_positions.pop(trade.symbol, None)
+
+                    # Record outcome for risk manager circuit breaker counters
+                    if trade.pnl is not None:
+                        _broker_val = trade.broker.value if hasattr(trade.broker, "value") else None
+                        self.risk_manager.record_outcome(
+                            won=trade.pnl > 0,
+                            strategy_name=getattr(trade, "strategy_name", None),
+                            broker=_broker_val,
+                        )
+
+                    # In-app notification
+                    try:
+                        from notifications.notifier import dispatch as _dispatch
+                        _mode_tag = "PAPER" if trade.is_paper else "LIVE"
+                        _broker_str = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+                        _pnl_str = (
+                            f" P&L: {'+'if (trade.pnl or 0) >= 0 else ''}{trade.pnl:.4f}"
+                            if trade.pnl is not None else ""
+                        )
+                        _level = "success" if (trade.pnl or 0) > 0 else "warning" if (trade.pnl or 0) == 0 else "error"
+                        await _dispatch(
+                            db_session,
+                            title=f"🎯 [{_mode_tag}] {reason.replace('_', ' ').title()} — {trade.symbol}",
+                            message=(
+                                f"{trade.side.upper()} {trade.symbol} closed by broker "
+                                f"({reason.replace('_', ' ')}) @ {exit_price} on {_broker_str}.{_pnl_str}"
+                            ),
+                            level=_level,
+                            category="trade",
+                            metadata={
+                                "symbol": trade.symbol,
+                                "side": trade.side,
+                                "entry_price": trade.entry_price,
+                                "exit_price": exit_price,
+                                "pnl": trade.pnl,
+                                "broker": _broker_str,
+                                "is_paper": trade.is_paper,
+                                "reason": reason,
+                                "trade_id": trade.id,
+                            },
+                            send_email=True,
+                        )
+                    except Exception as _ne:
+                        logger.debug(f"[ForwardEngine] Reconcile notification failed: {_ne}")
+
+                    ghost_count += 1
+                except Exception as _re:
+                    logger.error(f"[ForwardEngine] Reconcile failed for {trade.symbol} id={trade.id}: {_re}")
+
+        if ghost_count:
+            await db_session.commit()
+            logger.info(f"[ForwardEngine] Reconciled {ghost_count} ghost position(s).")
+
+        return ghost_count
+
     def resume(self):
         """Re-enable trading after emergency stop."""
         self._emergency_stop_active = False

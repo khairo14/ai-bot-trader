@@ -190,6 +190,27 @@ class AlpacaClient(AbstractBroker):
                 stop_loss=StopLossRequest(stop_price=stop_price),
                 take_profit=TakeProfitRequest(limit_price=take_profit_price),
             )
+        elif stop_price and not take_profit_price:
+            # SL only — use OTO (one-triggers-other) so that if the entry fills,
+            # Alpaca immediately submits the stop-loss leg at the broker.
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=quantity,
+                side=order_side,
+                time_in_force=tif,
+                order_class=OrderClass.OTO,
+                stop_loss=StopLossRequest(stop_price=stop_price),
+            )
+        elif take_profit_price and not stop_price:
+            # TP only — OTO with a take-profit limit leg.
+            req = MarketOrderRequest(
+                symbol=symbol,
+                qty=quantity,
+                side=order_side,
+                time_in_force=tif,
+                order_class=OrderClass.OTO,
+                take_profit=TakeProfitRequest(limit_price=take_profit_price),
+            )
         elif order_type == "limit" and price:
             req = LimitOrderRequest(
                 symbol=symbol,

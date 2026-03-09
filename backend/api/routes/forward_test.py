@@ -616,6 +616,15 @@ async def _run_one_strategy(strat) -> None:
             # Hydrate engine state from DB before processing (balance, open positions)
             await forward_engine.initialize(session)
 
+            # ── Reconcile broker positions: close any DB OPEN trades that the
+            # broker already closed via SL/TP bracket orders (ghost detection).
+            try:
+                _ghosts = await forward_engine.reconcile_positions(session)
+                if _ghosts:
+                    logger.info(f"[ForwardTest] Reconciled {_ghosts} ghost position(s) for {strat.name}")
+            except Exception as _rec_err:
+                logger.debug(f"[ForwardTest] Reconcile error (non-fatal): {_rec_err}")
+
             # ── Deduplication: skip if an identical signal already exists within
             # one timeframe-period window to prevent double-saves on rapid Run Now
             _TF_DEDUP_MINUTES: dict[str, int] = {
