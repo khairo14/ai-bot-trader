@@ -345,9 +345,9 @@ class ModelTrainer:
         )
 
         # ── 4. Cross-validated training ──────────────────────────────────────
-        cv = StratifiedKFold(n_splits=min(5, sum(y_train == 1), sum(y_train == 0)),
-                             shuffle=False)
-        scale_pos = max(1, int(sum(y_train == 0) / max(sum(y_train == 1), 1)))
+        _n_pos = int(sum(y_train == 1))
+        _n_neg = int(sum(y_train == 0))
+        scale_pos = max(1, int(_n_neg / max(_n_pos, 1)))
         model = xgb.XGBClassifier(
             n_estimators=100,
             max_depth=4,
@@ -362,13 +362,22 @@ class ModelTrainer:
         )
 
         cv_aucs = []
-        for train_idx, val_idx in cv.split(X_train, y_train):
-            model.fit(X_train[train_idx], y_train[train_idx])
-            proba = model.predict_proba(X_train[val_idx])[:, 1]
-            try:
-                cv_aucs.append(roc_auc_score(y_train[val_idx], proba))
-            except ValueError:
-                pass  # single-class fold — skip
+        if _n_pos < 2 or _n_neg < 2:
+            # Single-class training split — CV would crash with n_splits=0.
+            # Fit directly; the AUC gate (holdout) will still reject a poor model.
+            logger.warning(
+                f"[trainer] {symbol}: single-class training data "
+                f"(pos={_n_pos}, neg={_n_neg}) — skipping CV, fitting directly"
+            )
+        else:
+            cv = StratifiedKFold(n_splits=max(2, min(5, _n_pos, _n_neg)), shuffle=False)
+            for train_idx, val_idx in cv.split(X_train, y_train):
+                model.fit(X_train[train_idx], y_train[train_idx])
+                proba = model.predict_proba(X_train[val_idx])[:, 1]
+                try:
+                    cv_aucs.append(roc_auc_score(y_train[val_idx], proba))
+                except ValueError:
+                    pass  # single-class fold — skip
 
         # Final fit on full training set
         model.fit(X_train, y_train)

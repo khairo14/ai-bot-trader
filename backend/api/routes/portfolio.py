@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends
@@ -11,6 +12,10 @@ from db.models import Trade, OrderStatus, BrokerName
 from config import settings
 
 router = APIRouter()
+
+# Module-level thread pool for IBKR sync calls — created once, reused across requests.
+# Creating a new ThreadPoolExecutor per call leaks threads until GC collects them.
+_ibkr_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 # ── IBKR cooldown: after a failure, skip retries for 60 s to stop log spam ──
 _ibkr_last_fail: float = 0.0
@@ -29,11 +34,9 @@ async def _safe_balance(broker_name: str) -> dict:
                 return {"broker": "ibkr", "total": 0.0, "available": 0.0,
                         "currency": "USD", "connected": False, "is_paper": True}
             from brokers.ibkr_client import ibkr_balance_sync
-            import concurrent.futures
-            _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             loop = asyncio.get_running_loop()
             balance = await asyncio.wait_for(
-                loop.run_in_executor(_pool, ibkr_balance_sync), timeout=10.0
+                loop.run_in_executor(_ibkr_pool, ibkr_balance_sync), timeout=10.0
             )
         else:
             broker = get_broker(broker_name)

@@ -41,7 +41,35 @@ manager = ConnectionManager()
 
 
 async def ws_endpoint(websocket: WebSocket):
-    """WebSocket endpoint — mounts at /ws in main.py."""
+    """WebSocket endpoint — mounts at /ws in main.py.
+
+    Requires a valid JWT to prevent unauthenticated access to live
+    trade/notification broadcasts.  The token is read from:
+      1. The httpOnly 'access_token' cookie (set at login).
+      2. A ?token=<jwt> query parameter (for clients that can't set cookies).
+    """
+    # ── Auth check before accepting the connection ────────────────────────
+    from jose import JWTError, jwt as _jwt
+    from config import settings as _cfg
+
+    _raw_token = (
+        websocket.cookies.get("access_token")
+        or websocket.query_params.get("token", "")
+    )
+    _authed = False
+    if _raw_token:
+        try:
+            _payload = _jwt.decode(_raw_token, _cfg.secret_key, algorithms=["HS256"])
+            _authed = bool(_payload.get("sub"))
+        except JWTError:
+            _authed = False
+
+    if not _authed:
+        # Reject the upgrade — no WS connection established.
+        await websocket.close(code=4001)
+        logger.warning("[WS] Rejected unauthenticated connection")
+        return
+
     await manager.connect(websocket)
     try:
         # Send welcome / heartbeat loop
