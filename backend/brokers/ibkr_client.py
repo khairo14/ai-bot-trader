@@ -75,6 +75,11 @@ class _IBKRManager:
         self._cached: Optional[Balance] = None
         self._cache_ts: float = 0.0
         self._started = False
+        # F-082: contracts for open bracket orders — keep market data subscription
+        # alive after fill so IBKR paper SL/TP child orders have a price feed.
+        # Entries are added in place_order (bracket path) and removed in
+        # cancel_bracket_subscription() which is called from close_position().
+        self._bracket_subscriptions: dict = {}  # symbol_key → contract
 
     # ── background thread / loop ─────────────────────────────────────────────
 
@@ -104,7 +109,23 @@ class _IBKRManager:
             try:
                 if self._ib is not None and not self._ib.isConnected():
                     logger.info("[IBKR] Connection lost — attempting auto-reconnect …")
-                    await self._ensure_connected()
+                    reconnected = await self._ensure_connected()
+                    if reconnected and self._ib:
+                        # F-082: refresh in-memory position cache after reconnect so
+                        # get_positions() (and risk-manager open_count) reflects reality.
+                        try:
+                            self._ib.reqPositions()
+                            await asyncio.sleep(1.0)
+                        except Exception:
+                            pass
+                        # F-082: re-subscribe market data for every open bracket order
+                        # so IBKR paper SL/TP child orders regain their price feed.
+                        for _sym, _contract in list(self._bracket_subscriptions.items()):
+                            try:
+                                self._ib.reqMktData(_contract, "", False, False)
+                                logger.debug(f"[IBKR] Re-subscribed mkt data for bracket: {_sym}")
+                            except Exception as _sub_err:
+                                logger.debug(f"[IBKR] Re-subscribe failed for {_sym}: {_sub_err}")
             except Exception as exc:
                 logger.debug(f"[IBKR] Auto-reconnect attempt failed: {exc}")
 
@@ -453,6 +474,14 @@ class _IBKRManager:
             except Exception:
                 pass
 
+    def cancel_bracket_subscription(self, symbol: str) -> None:
+        """F-082: Cancel the persistent market data subscription kept alive for an open
+        bracket order.  Called from ForwardEngine.close_position() after a trade closes."""
+        contract = self._bracket_subscriptions.pop(symbol, None)
+        if contract:
+            self.unsubscribe_mkt_data(contract)
+            logger.debug(f"[IBKR] Cancelled bracket mkt-data subscription for {symbol}")
+
 
 _manager = _IBKRManager(client_id=settings.ibkr_client_id)
 # Celery workers use a separate clientId to avoid kicking the FastAPI connection
@@ -526,6 +555,11 @@ class IBKRClient(AbstractBroker):
     async def disconnect(self) -> None:
         """No-op: the singleton manager owns the connection lifecycle."""
         logger.debug("[IBKR] IBKRClient.disconnect() called — singleton connection preserved.")
+
+    def cancel_bracket_subscription(self, symbol: str) -> None:
+        """F-082: Cancel the persistent mkt data feed kept for an open bracket order.
+        Called by ForwardEngine.close_position() after a trade is closed."""
+        _manager.cancel_bracket_subscription(symbol)
 
     def _ensure_connected(self) -> None:
         """Raise if the singleton IB manager is not currently connected."""
@@ -715,6 +749,10 @@ class IBKRClient(AbstractBroker):
         logger.info(f"[IBKR] Placing {order_type.upper()} {side.upper()} {quantity} {symbol}")
 
         # Build and qualify contract on the background loop (avoids 'event loop already running')
+        # F-082: track whether this is a bracket order so we know whether to keep
+        # the market data subscription alive after fill (bracket) or cancel it (plain market).
+        _is_bracket = bool(stop_price or take_profit_price)
+
         if option_expiry and option_strike and option_right:
             contract = Option(symbol, option_expiry, option_strike, option_right, "SMART")
         else:
@@ -787,8 +825,16 @@ class IBKRClient(AbstractBroker):
             else:
                 logger.warning(f"[IBKR] Order {order_id} not confirmed filled within {_FILL_TIMEOUT}s — treating as pending")
         finally:
-            # F-077: cancel the market data subscription opened for paper fill simulation
-            _manager.unsubscribe_mkt_data(contract)
+            if _is_bracket:
+                # F-082: keep max data subscription alive — bracket child orders (SL stop,
+                # TP limit) need a live price feed to trigger in IBKR paper simulation.
+                # The subscription is cancelled later by cancel_bracket_subscription()
+                # which ForwardEngine.close_position() calls after the trade closes.
+                _manager._bracket_subscriptions[symbol] = contract
+                logger.debug(f"[IBKR] Keeping mkt-data subscription alive for bracket: {symbol}")
+            else:
+                # Plain market order — subscription only needed for fill simulation; cancel now.
+                _manager.unsubscribe_mkt_data(contract)
 
         return OrderResult(
             order_id=order_id,

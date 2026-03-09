@@ -560,6 +560,14 @@ class ForwardEngine:
         # Remove from in-memory cache
         self._paper_positions.pop(trade.symbol, None)
 
+        # F-082: cancel IBKR persistent bracket market-data subscription for this symbol.
+        # For Alpaca/Binance this is a no-op (hasattr guard).
+        try:
+            if hasattr(broker, "cancel_bracket_subscription"):
+                broker.cancel_bracket_subscription(trade.symbol)
+        except Exception as _sub_err:
+            logger.debug(f"[ForwardEngine] cancel_bracket_subscription failed for {trade.symbol}: {_sub_err}")
+
         # ── Update consecutive-loss counter (portfolio, strategy, broker) ────────
         if trade.pnl is not None:
             _broker_val = trade.broker.value if hasattr(trade.broker, 'value') else None
@@ -685,14 +693,21 @@ class ForwardEngine:
 
         _long_sides = {"buy", "cover"}
         closed_count = 0
+        # F-082: cache prices per (broker, symbol) to avoid redundant API calls when
+        # multiple trades share the same symbol on the same broker (e.g. scaled entries).
+        _price_cache: dict[tuple[str, str], float] = {}
 
         for trade in open_trades:
             try:
-                broker = get_broker(
-                    trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
-                )
-                await broker.connect()
-                current_price: float = await broker.get_price(trade.symbol)
+                broker_name = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+                _cache_key = (broker_name, trade.symbol)
+                if _cache_key in _price_cache:
+                    current_price = _price_cache[_cache_key]
+                else:
+                    broker = get_broker(broker_name)
+                    await broker.connect()
+                    current_price = await broker.get_price(trade.symbol)
+                    _price_cache[_cache_key] = current_price
             except Exception as _pe:
                 logger.debug(f"[ForwardEngine] monitor_sl_tp: price fetch failed for {trade.symbol}: {_pe}")
                 continue

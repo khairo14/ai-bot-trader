@@ -265,25 +265,39 @@ class BinanceClient(AbstractBroker):
             # SL only: place market entry, then stop-loss protection in opposite direction.
             result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
             exit_side = "sell" if side == "buy" else "buy"
-            try:
-                _sl_limit = round(stop_price * (0.999 if exit_side == "sell" else 1.001), 8)
-                await self.exchange.create_order(
-                    symbol, "STOP_LOSS_LIMIT", exit_side, quantity,
-                    price=_sl_limit,
-                    params={"stopPrice": stop_price}
-                )
-            except Exception as _sl_err:
-                logger.warning(f"[Binance] Could not place SL guard order after entry: {_sl_err}")
+            # F-082: retry once (0.5 s delay) so transient Binance errors don't silently
+            # leave a position unprotected.  Log at ERROR on permanent failure.
+            for _attempt in range(2):
+                try:
+                    _sl_limit = round(stop_price * (0.999 if exit_side == "sell" else 1.001), 8)
+                    await self.exchange.create_order(
+                        symbol, "STOP_LOSS_LIMIT", exit_side, quantity,
+                        price=_sl_limit,
+                        params={"stopPrice": stop_price}
+                    )
+                    break  # success
+                except Exception as _sl_err:
+                    if _attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.error(f"[Binance] SL guard order failed after retry: {_sl_err}")
             order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif take_profit_price and not stop_price:
             # TP only: place market entry, then limit take-profit in opposite direction.
             result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
             exit_side = "sell" if side == "buy" else "buy"
-            try:
-                await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
-            except Exception as _tp_err:
-                logger.warning(f"[Binance] Could not place TP guard order after entry: {_tp_err}")
+            # F-082: retry once (0.5 s delay) so transient Binance errors don't silently
+            # leave a position unprotected.  Log at ERROR on permanent failure.
+            for _attempt in range(2):
+                try:
+                    await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
+                    break  # success
+                except Exception as _tp_err:
+                    if _attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.error(f"[Binance] TP guard order failed after retry: {_tp_err}")
             order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif order_type == "limit" and price:
