@@ -79,6 +79,9 @@ class _IBKRManager:
         # Asyncio lock: prevents concurrent connectAsync() on the same IB instance
         # (e.g. _reconnect_loop racing with _fetch_async on startup)
         self._connect_lock: Optional[asyncio.Lock] = None
+        # F-102: serializes concurrent reqPositionsAsync() calls — TWS only sends
+        # positionEnd once; a second concurrent caller would hang until timeout.
+        self._positions_lock: Optional[asyncio.Lock] = None
         self._cached: Optional[Balance] = None
         self._cache_ts: float = 0.0
         self._started = False
@@ -105,9 +108,10 @@ class _IBKRManager:
     def _run_loop(self) -> None:
         assert self._loop is not None
         asyncio.set_event_loop(self._loop)
-        # Create the asyncio lock on the background loop (must be created on the
-        # loop that will use it — asyncio.Lock() is not thread-safe across loops).
+        # Create asyncio locks on the background loop — they must be created on
+        # the loop that will use them (asyncio.Lock is not thread-safe across loops).
         self._connect_lock = asyncio.Lock()
+        self._positions_lock = asyncio.Lock()  # F-102: one reqPositionsAsync at a time
         self._loop.create_task(self._reconnect_loop())
         self._loop.run_forever()
 
@@ -498,11 +502,19 @@ class _IBKRManager:
         Force a fresh position request via reqPositionsAsync() and return the result.
         Uses the async API to avoid calling loop.run_until_complete() inside a
         running event loop (which the blocking reqPositions() does internally).
+        Serialized by _positions_lock (F-102) because TWS sends positionEnd only
+        once — a second concurrent caller would never receive it and hang until timeout.
         """
-        if not await self._ensure_connected():
-            raise ConnectionError("IBKR Gateway is not reachable")
-        assert self._ib is not None
-        return await self._ib.reqPositionsAsync()
+        lock = self._positions_lock
+        if lock is None:
+            # Fallback safety net (should always be set by _run_loop before first call)
+            lock = asyncio.Lock()
+            self._positions_lock = lock
+        async with lock:
+            if not await self._ensure_connected():
+                raise ConnectionError("IBKR Gateway is not reachable")
+            assert self._ib is not None
+            return await self._ib.reqPositionsAsync()
 
     def fetch_positions(self) -> list:
         """Thread-safe fresh position fetch via the singleton IB connection."""
