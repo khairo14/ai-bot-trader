@@ -635,6 +635,16 @@ async def _run_one_strategy(strat) -> None:
             except Exception as _rec_err:
                 logger.debug(f"[ForwardTest] Reconcile error (non-fatal): {_rec_err}")
 
+            # F-083: Commit monitor/reconcile changes before the deduplication check.
+            # An early `return` below (duplicate signal detected) closes the session
+            # without committing, which would roll back any SL/TP closures that
+            # already sent real market orders to the broker — leaving the DB out
+            # of sync (trades showing OPEN after the broker already closed them).
+            try:
+                await session.commit()
+            except Exception as _pre_commit_err:
+                logger.warning(f"[ForwardTest] Monitor/reconcile pre-commit failed: {_pre_commit_err}")
+
             # ── Deduplication: skip if an identical signal already exists within
             # one timeframe-period window to prevent double-saves on rapid Run Now
             _TF_DEDUP_MINUTES: dict[str, int] = {
@@ -721,24 +731,12 @@ async def _run_one_strategy(strat) -> None:
                 trade.signal_id = db_signal.id
                 db_signal.acted_on = True  # mark regardless of OPEN/REJECTED status
 
-            # Capture scalar values before commit — SQLAlchemy expires all attributes
-            # on commit; db_signal and trade become detached after the session closes.
+            # Capture acted_on before commit — SQLAlchemy expires attributes on commit.
             _signal_acted_on = db_signal.acted_on
-            _trade_broadcast: dict | None = None
-            if trade is not None and trade.status == OrderStatus.OPEN:
-                _trade_broadcast = {
-                    "symbol": trade.symbol,
-                    "side": trade.side,
-                    "quantity": trade.quantity,
-                    "entry_price": trade.entry_price,
-                    "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
-                    "strategy_name": trade.strategy_name,
-                    "is_paper": strat.is_paper,
-                }
 
             await session.commit()
 
-        # Broadcast via WebSocket
+        # Broadcast signal via WebSocket
         await manager.broadcast("signal", {
             "symbol": sig.symbol,
             "signal": sig.signal,
@@ -748,9 +746,9 @@ async def _run_one_strategy(strat) -> None:
             "timeframe": sig.timeframe,
             "acted_on": _signal_acted_on,
         })
-
-        if _trade_broadcast is not None:
-            await manager.broadcast("trade", _trade_broadcast)
+        # F-083: process_signal() already broadcasts the "trade" WS event internally
+        # (before commit, with the same data).  Re-broadcasting here after commit
+        # would send a duplicate event to the frontend on every paper trade fill.
 
         logger.info(
             f"[ForwardTest] ✓ {strat.name} | {symbol} → {sig.signal} "

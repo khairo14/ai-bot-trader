@@ -174,6 +174,22 @@ class ForwardEngine:
 
         broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
 
+        # F-083: Compute asset-class exposure so RiskManager Level 3
+        # (max_exposure_per_class_pct) actually fires.  Previously always 0.0.
+        asset_class_exposure = 0.0
+        if db_session is not None:
+            try:
+                _exp_q = await db_session.execute(
+                    select(func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0)).where(
+                        Trade.status == OrderStatus.OPEN,
+                        Trade.asset_class == signal.asset_class,
+                        Trade.broker == signal.broker,
+                    )
+                )
+                asset_class_exposure = float(_exp_q.scalar_one() or 0.0)
+            except Exception as _exp_err:
+                logger.debug(f"[ForwardEngine] Could not compute asset_class_exposure: {_exp_err}")
+
         # ── Load per-broker risk settings from DB ────────────────
         broker_settings: dict | None = None
         if db_session is not None:
@@ -210,6 +226,7 @@ class ForwardEngine:
             account_balance=balance,
             open_positions_count=open_count,
             daily_pnl=daily_pnl,
+            asset_class_exposure=asset_class_exposure,
             broker=broker_key,
             broker_settings=broker_settings,
         )

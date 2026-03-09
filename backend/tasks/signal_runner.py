@@ -147,6 +147,15 @@ def run_signals(self):
                 except Exception as _rec_err:
                     logger.debug(f"[signal_runner] Reconcile error (non-fatal): {_rec_err}")
 
+                # F-083: Commit monitor/reconcile changes before the strategy loop.
+                # If the first strategy below raises and triggers session.rollback(),
+                # WITHOUT this commit the SL/TP closing orders already sent to the
+                # broker would be undone in the DB — leaving ghost OPEN trades.
+                try:
+                    await session.commit()
+                except Exception as _pre_commit_err:
+                    logger.warning(f"[signal_runner] Monitor/reconcile pre-commit failed: {_pre_commit_err}")
+
                 for strat in active_strategies:
                     params = strat.parameters or {}
                     strategy_type = params.get("strategy_type") or params.get("strategy_name")
@@ -381,36 +390,10 @@ def run_signals(self):
                         if trade is not None:
                             trade.signal_id = db_signal.id
                             db_signal.acted_on = True  # mark regardless of OPEN/REJECTED
-                            # Only broadcast / notify for successfully placed orders
-                            if trade.status == OrderStatus.OPEN:
-                                # ── Broadcast trade to WebSocket clients ────────
-                                await ws_manager.broadcast("trade", {
-                                    "symbol": trade.symbol,
-                                    "side": trade.side,
-                                    "quantity": trade.quantity,
-                                    "entry_price": trade.entry_price,
-                                    "is_paper": trade.is_paper,
-                                    "broker": trade.broker.value if hasattr(trade.broker, 'value') else trade.broker,
-                                    "strategy_name": trade.strategy_name,
-                                })
-                                # ── Trade notification (with email) ─────────────
-                                await _notify.trade(
-                                    session,
-                                    title=f"Trade Executed • {trade.side.upper()} {trade.symbol}",
-                                    message=(
-                                        f"{'PAPER' if trade.is_paper else 'LIVE'} order filled | "
-                                        f"Qty: {trade.quantity} | Entry: ${trade.entry_price:,.4f}"
-                                    ),
-                                    metadata={
-                                        "symbol": trade.symbol,
-                                        "side": trade.side,
-                                        "quantity": trade.quantity,
-                                        "entry_price": trade.entry_price,
-                                        "broker": trade.broker.value if hasattr(trade.broker, 'value') else trade.broker,
-                                        "mode": "paper" if trade.is_paper else "live",
-                                        "strategy": trade.strategy_name,
-                                    },
-                                )
+                            # F-083: process_signal() already broadcasts the "trade" WS event
+                            # and sends the trade notification (+ email) internally.
+                            # Removing the redundant block here prevents 2× WS events,
+                            # 2× DB notification rows, and 2× emails per live trade fill.
                         await session.commit()
 
                         logger.info(
