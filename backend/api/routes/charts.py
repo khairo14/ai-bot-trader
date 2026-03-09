@@ -244,6 +244,34 @@ async def get_candles(
             for t_ms, row in all_rows[:MAX_CANDLES]
         ]
 
+        # F-092: Forward-fill gaps in IBKR OHLCV for chart display only.
+        # IBKR returns sparse bars during thin-liquidity or off-hours periods,
+        # leaving blank spaces on the chart.  We fill every missing tf-slot
+        # with a flat doji (open=high=low=close=prev_close, volume=0) so the
+        # chart series is continuous.  This is purely cosmetic — the strategy
+        # engine fetches its own unmodified bars directly from get_ohlcv().
+        # We only forward-fill for IBKR; Binance/Alpaca are already continuous.
+        if broker.lower() == "ibkr" and len(candles) >= 2:
+            tf_secs = tf_ms // 1000
+            filled: list[dict] = []
+            for i, c in enumerate(candles):
+                filled.append(c)
+                if i < len(candles) - 1:
+                    next_t = candles[i + 1]["time"]
+                    cur_t  = c["time"] + tf_secs
+                    # Fill every missing slot between this candle and the next
+                    while cur_t < next_t and len(filled) < MAX_CANDLES:
+                        filled.append({
+                            "time":   cur_t,
+                            "open":   c["close"],
+                            "high":   c["close"],
+                            "low":    c["close"],
+                            "close":  c["close"],
+                            "volume": 0.0,
+                        })
+                        cur_t += tf_secs
+            candles = filled
+
         return {
             "candles": candles,
             "symbol": symbol.upper(),
