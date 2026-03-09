@@ -513,6 +513,30 @@ class ForwardEngine:
 
     async def close_position(self, trade: Trade, reason: str = "manual", db_session=None):
         """Close an open position and compute exit price + realised PnL."""
+        # ── Atomic DB guard: prevent double-close from concurrent callers ─────
+        # Each strategy spawns its own ForwardEngine() instance, so in-memory
+        # sets can't protect across instances.  We need a DB-level lock instead.
+        #
+        # Pattern: UPDATE trade SET status='PENDING' WHERE id=X AND status='OPEN'
+        # PostgreSQL row locking means only ONE concurrent session will get
+        # rowcount=1; all others get rowcount=0 and bail out immediately.
+        # This prevents the observed 4-5 duplicate MKT close orders per second.
+        if db_session is not None and trade.id is not None:
+            from sqlalchemy import update as _upd
+            _guard = await db_session.execute(
+                _upd(Trade)
+                .where(Trade.id == trade.id, Trade.status == OrderStatus.OPEN)
+                .values(status=OrderStatus.PENDING)
+                .execution_options(synchronize_session="fetch")
+            )
+            await db_session.flush()
+            if _guard.rowcount == 0:
+                logger.warning(
+                    f"[ForwardEngine] close_position SKIPPED for {trade.symbol} id={trade.id} "
+                    f"— already closing/closed by another caller (broker bracket or concurrent monitor)"
+                )
+                return
+
         broker = get_broker(trade.broker)
         try:
             await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live

@@ -616,24 +616,29 @@ async def _run_one_strategy(strat) -> None:
             # Hydrate engine state from DB before processing (balance, open positions)
             await forward_engine.initialize(session)
 
-            # ── Software SL/TP enforcement (safety net for broker bracket failures) ──
-            # IBKR paper accounts require active market data for bracket orders to fire.
-            # This runs first so ghost-position reconcile sees already-closed trades.
-            try:
-                _sl_closed = await forward_engine.monitor_sl_tp(session)
-                if _sl_closed:
-                    logger.info(f"[ForwardTest] SL/TP monitor closed {_sl_closed} position(s) for {strat.name}")
-            except Exception as _mon_err:
-                logger.debug(f"[ForwardTest] SL/TP monitor error (non-fatal): {_mon_err}")
-
-            # ── Reconcile broker positions: close any DB OPEN trades that the
-            # broker already closed via SL/TP bracket orders (ghost detection).
+            # ── Reconcile broker positions FIRST: mark any DB OPEN trades as FILLED
+            # that the broker already closed via SL/TP bracket orders.  Must run
+            # before monitor_sl_tp so the software monitor doesn't place a duplicate
+            # close order for a position the broker already exited (which would create
+            # an unintended reverse position at the broker).
             try:
                 _ghosts = await forward_engine.reconcile_positions(session)
                 if _ghosts:
                     logger.info(f"[ForwardTest] Reconciled {_ghosts} ghost position(s) for {strat.name}")
             except Exception as _rec_err:
                 logger.debug(f"[ForwardTest] Reconcile error (non-fatal): {_rec_err}")
+
+            # ── Software SL/TP enforcement (safety net for broker bracket failures) ──
+            # Runs AFTER reconcile so it only sees positions that are genuinely
+            # still open at the broker (not ones the broker already closed above).
+            # The DB atomic guard in close_position() provides a second safety net
+            # against concurrent calls from multiple strategy instances.
+            try:
+                _sl_closed = await forward_engine.monitor_sl_tp(session)
+                if _sl_closed:
+                    logger.info(f"[ForwardTest] SL/TP monitor closed {_sl_closed} position(s) for {strat.name}")
+            except Exception as _mon_err:
+                logger.debug(f"[ForwardTest] SL/TP monitor error (non-fatal): {_mon_err}")
 
             # F-083: Commit monitor/reconcile changes before the deduplication check.
             # An early `return` below (duplicate signal detected) closes the session

@@ -129,23 +129,25 @@ def run_signals(self):
                 # Hydrate in-memory state from DB before processing any signal
                 await forward_engine.initialize(session)
 
-                # Software SL/TP enforcement — runs before signal processing so
-                # breached positions are closed before new entries are evaluated.
-                try:
-                    _sl_closed = await forward_engine.monitor_sl_tp(session)
-                    if _sl_closed:
-                        logger.info(f"[signal_runner] SL/TP monitor closed {_sl_closed} position(s)")
-                except Exception as _mon_err:
-                    logger.debug(f"[signal_runner] SL/TP monitor error (non-fatal): {_mon_err}")
-
-                # Reconcile ghost positions: trades whose SL/TP fired at the broker
-                # but whose DB status is still OPEN (live strategies only).
+                # Reconcile ghost positions FIRST: mark DB OPEN trades as FILLED
+                # that the broker already closed via SL/TP bracket orders.  Running
+                # this before monitor_sl_tp prevents the monitor from placing a
+                # duplicate close order for positions the broker already exited.
                 try:
                     _ghosts = await forward_engine.reconcile_positions(session)
                     if _ghosts:
                         logger.info(f"[signal_runner] Reconciled {_ghosts} ghost position(s)")
                 except Exception as _rec_err:
                     logger.debug(f"[signal_runner] Reconcile error (non-fatal): {_rec_err}")
+
+                # Software SL/TP enforcement — runs AFTER reconcile so it only
+                # fires on positions that are genuinely still open at the broker.
+                try:
+                    _sl_closed = await forward_engine.monitor_sl_tp(session)
+                    if _sl_closed:
+                        logger.info(f"[signal_runner] SL/TP monitor closed {_sl_closed} position(s)")
+                except Exception as _mon_err:
+                    logger.debug(f"[signal_runner] SL/TP monitor error (non-fatal): {_mon_err}")
 
                 # F-083: Commit monitor/reconcile changes before the strategy loop.
                 # If the first strategy below raises and triggers session.rollback(),
