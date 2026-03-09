@@ -216,6 +216,29 @@ class ForwardEngine:
 
         if not validation.approved:
             logger.warning(f"[ForwardEngine] Signal rejected by risk manager: {validation.reason}")
+            if db_session:
+                try:
+                    from notifications.notifier import notifier as _notifier
+                    _mode_tag_risk = "PAPER" if is_paper else "LIVE"
+                    await _notifier.warning(
+                        db_session,
+                        title=f"🛡 [{_mode_tag_risk}] Signal Blocked — {signal.symbol}",
+                        message=(
+                            f"{signal.signal} {signal.symbol} blocked by risk manager.\n"
+                            f"Reason: {validation.reason}"
+                        ),
+                        metadata={
+                            "symbol": signal.symbol,
+                            "side": signal.signal,
+                            "broker": broker_key,
+                            "is_paper": is_paper,
+                            "strategy": signal.strategy_name,
+                            "reason": validation.reason,
+                        },
+                    )
+                    await db_session.commit()
+                except Exception as _n_err:
+                    logger.debug(f"[ForwardEngine] Risk-reject notification failed: {_n_err}")
             return None
         # ── Apply portfolio weight multiplier ─────────────────────────────
         # ML-03: strategies with higher Sharpe weight get proportionally larger size
@@ -256,7 +279,7 @@ class ForwardEngine:
                         f"{_existing.symbol} (id={_existing.id}) before opening {signal.signal}"
                     )
                     try:
-                        await self.close_position(_existing, reason="signal_reversal")
+                        await self.close_position(_existing, reason="signal_reversal", db_session=db_session)
                         await db_session.commit()
                     except Exception as _rev_err:
                         logger.error(
@@ -374,6 +397,27 @@ class ForwardEngine:
                 db_session.add(trade)
                 await db_session.commit()
                 await db_session.refresh(trade)
+                try:
+                    from notifications.notifier import notifier as _notifier
+                    await _notifier.warning(
+                        db_session,
+                        title=f"❌ [{mode_tag}] Order Rejected — {signal.symbol}",
+                        message=(
+                            f"{signal.signal} {signal.symbol} @ {signal.entry_price} rejected.\n"
+                            f"Reason: {order_err}"
+                        ),
+                        metadata={
+                            "symbol": signal.symbol,
+                            "side": signal.signal,
+                            "broker": broker_key,
+                            "is_paper": is_paper,
+                            "strategy": signal.strategy_name,
+                            "reason": str(order_err),
+                        },
+                    )
+                    await db_session.commit()
+                except Exception as _n_err:
+                    logger.debug(f"[ForwardEngine] Rejection notification failed: {_n_err}")
             return trade
 
         if db_session:
@@ -396,13 +440,61 @@ class ForwardEngine:
         except Exception as _ws_err:
             logger.warning(f"[ForwardEngine] WS broadcast failed: {_ws_err}")
 
+        # ── In-app notification ───────────────────────────────
+        if db_session:
+            try:
+                from notifications.notifier import notifier as _notifier
+                _broker_str = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+                if trade.status == OrderStatus.OPEN:
+                    await _notifier.trade(
+                        db_session,
+                        title=f"✅ [{mode_tag}] Trade Filled — {trade.symbol}",
+                        message=(
+                            f"{trade.side.upper()} {trade.quantity:.4f} {trade.symbol} "
+                            f"@ {trade.entry_price} on {_broker_str}."
+                            + (f"  SL: {trade.stop_loss}  TP: {trade.take_profit}" if trade.stop_loss else "")
+                        ),
+                        metadata={
+                            "symbol": trade.symbol,
+                            "side": trade.side,
+                            "quantity": trade.quantity,
+                            "entry_price": trade.entry_price,
+                            "stop_loss": trade.stop_loss,
+                            "take_profit": trade.take_profit,
+                            "broker": _broker_str,
+                            "is_paper": trade.is_paper,
+                            "strategy": trade.strategy_name,
+                            "trade_id": trade.id,
+                        },
+                    )
+                else:  # PENDING
+                    await _notifier.warning(
+                        db_session,
+                        title=f"⏳ [{mode_tag}] Order Pending — {trade.symbol}",
+                        message=(
+                            f"{trade.side.upper()} {trade.quantity:.4f} {trade.symbol} "
+                            f"submitted to {_broker_str} but fill not confirmed yet."
+                        ),
+                        metadata={
+                            "symbol": trade.symbol,
+                            "side": trade.side,
+                            "broker": _broker_str,
+                            "is_paper": trade.is_paper,
+                            "strategy": trade.strategy_name,
+                            "order_id": trade.broker_order_id,
+                        },
+                    )
+                await db_session.commit()
+            except Exception as _n_err:
+                logger.debug(f"[ForwardEngine] Trade notification failed: {_n_err}")
+
         return trade
 
     # ──────────────────────────────────────────────────────────────────────────
     # Position management
     # ──────────────────────────────────────────────────────────────────────────
 
-    async def close_position(self, trade: Trade, reason: str = "manual"):
+    async def close_position(self, trade: Trade, reason: str = "manual", db_session=None):
         """Close an open position and compute exit price + realised PnL."""
         broker = get_broker(trade.broker)
         try:
@@ -482,6 +574,44 @@ class ForwardEngine:
             f"| exit={exit_price} pnl={getattr(trade, 'pnl', None)}"
         )
 
+        # ── In-app notification for closed trade ─────────────────────────
+        try:
+            if db_session is not None:
+                from notifications.notifier import dispatch as _dispatch
+                _mode_tag_close = "PAPER" if trade.is_paper else "LIVE"
+                _broker_str_close = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+                _pnl_str = (
+                    f"  P&L: {'+'if (trade.pnl or 0) >= 0 else ''}{trade.pnl:.4f} ({'+' if (trade.pnl_pct or 0) >= 0 else ''}{trade.pnl_pct:.2f}%)"
+                    if trade.pnl is not None else ""
+                )
+                _level = "success" if (trade.pnl or 0) > 0 else "warning" if (trade.pnl or 0) == 0 else "error"
+                await _dispatch(
+                    db_session,
+                    title=f"🏁 [{_mode_tag_close}] Trade Closed — {trade.symbol}",
+                    message=(
+                        f"{trade.side.upper()} {trade.quantity:.4f} {trade.symbol} "
+                        f"closed @ {exit_price} on {_broker_str_close}.  Reason: {reason}.{_pnl_str}"
+                    ),
+                    level=_level,
+                    category="trade",
+                    metadata={
+                        "symbol": trade.symbol,
+                        "side": trade.side,
+                        "entry_price": trade.entry_price,
+                        "exit_price": exit_price,
+                        "pnl": trade.pnl,
+                        "pnl_pct": trade.pnl_pct,
+                        "broker": _broker_str_close,
+                        "is_paper": trade.is_paper,
+                        "strategy": trade.strategy_name,
+                        "reason": reason,
+                        "trade_id": trade.id,
+                    },
+                    send_email=True,
+                )
+        except Exception as _n_err:
+            logger.debug(f"[ForwardEngine] Close notification failed: {_n_err}")
+
     async def emergency_stop(self, db_session=None) -> int:
         """
         Close ALL open positions immediately.
@@ -504,7 +634,7 @@ class ForwardEngine:
             all_open = open_q.scalars().all()
             for trade in all_open:
                 try:
-                    await self.close_position(trade, reason="emergency_stop")
+                    await self.close_position(trade, reason="emergency_stop", db_session=db_session)
                     closed += 1
                 except Exception as _e:
                     logger.error(f"[ForwardEngine] Emergency stop: failed to close {trade.symbol} id={trade.id}: {_e}")

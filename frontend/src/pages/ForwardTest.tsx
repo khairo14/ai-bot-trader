@@ -363,7 +363,7 @@ export default function ForwardTest() {
           <MarketClock />
           <div className="flex items-center gap-2 text-xs text-gray-600">
             {lastUpdated && <span>Updated {lastUpdated.toLocaleTimeString()}</span>}
-            <button onClick={fetchAll} className="p-1.5 rounded-lg hover:bg-dark-700 text-gray-500 hover:text-gray-300 transition-all">
+            <button onClick={() => fetchAll()} className="p-1.5 rounded-lg hover:bg-dark-700 text-gray-500 hover:text-gray-300 transition-all">
               <RefreshCw size={14} />
             </button>
           </div>
