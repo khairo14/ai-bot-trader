@@ -712,40 +712,46 @@ class ForwardEngine:
         closed_count = 0
         # F-082: cache prices per (broker, symbol) to avoid redundant API calls when
         # multiple trades share the same symbol on the same broker (e.g. scaled entries).
-        _price_cache: dict[tuple[str, str], float] = {}
+        # F-090: cache bid/ask tuples so SL/TP checks use the directionally-correct
+        # price: SHORT exits buy at the ask, LONG exits sell at the bid.
+        _price_cache: dict[tuple[str, str], tuple[float, float]] = {}
 
         for trade in open_trades:
             try:
                 broker_name = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
                 _cache_key = (broker_name, trade.symbol)
                 if _cache_key in _price_cache:
-                    current_price = _price_cache[_cache_key]
+                    bid_price, ask_price = _price_cache[_cache_key]
                 else:
                     broker = get_broker(broker_name)
                     await broker.connect()
-                    current_price = await broker.get_price(trade.symbol)
-                    _price_cache[_cache_key] = current_price
+                    bid_price, ask_price = await broker.get_bid_ask(trade.symbol)
+                    _price_cache[_cache_key] = (bid_price, ask_price)
             except Exception as _pe:
                 logger.debug(f"[ForwardEngine] monitor_sl_tp: price fetch failed for {trade.symbol}: {_pe}")
                 continue
 
             is_long = trade.side in _long_sides
+            # F-090: use directionally-correct price for SL/TP comparison.
+            # LONG exits sell at the bid → check bid against SL/TP.
+            # SHORT exits buy at the ask → check ask against SL/TP.
+            exit_price = bid_price if is_long else ask_price
             reason: str | None = None
 
             if trade.stop_loss is not None:
-                # For long: SL fires when price falls at or below SL
-                # For short: SL fires when price rises at or above SL
-                if is_long and current_price <= trade.stop_loss:
+                # For long: SL fires when bid falls at or below SL
+                # For short: SL fires when ask rises at or above SL
+                if is_long and exit_price <= trade.stop_loss:
                     reason = "stop_loss"
-                elif not is_long and current_price >= trade.stop_loss:
+                elif not is_long and exit_price >= trade.stop_loss:
                     reason = "stop_loss"
 
             if reason is None and trade.take_profit is not None:
-                # For long: TP fires when price rises at or above TP
-                # For short: TP fires when price falls at or below TP
-                if is_long and current_price >= trade.take_profit:
+                # For long: TP fires when bid rises at or above TP
+                # For short: TP fires when ask falls at or below TP
+                if is_long and exit_price >= trade.take_profit:
                     reason = "take_profit"
-                elif not is_long and current_price <= trade.take_profit:
+                elif not is_long and exit_price <= trade.take_profit:
                     reason = "take_profit"
 
             if reason is None:
@@ -754,7 +760,7 @@ class ForwardEngine:
             logger.info(
                 f"[ForwardEngine] SL/TP monitor triggered {reason} for "
                 f"{trade.symbol} id={trade.id} | "
-                f"current={current_price}  sl={trade.stop_loss}  tp={trade.take_profit}"
+                f"exit={'ask' if not is_long else 'bid'}={exit_price}  sl={trade.stop_loss}  tp={trade.take_profit}"
             )
             try:
                 await self.close_position(trade, reason=reason, db_session=db_session)

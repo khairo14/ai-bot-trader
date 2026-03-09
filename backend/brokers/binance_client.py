@@ -94,6 +94,17 @@ class BinanceClient(AbstractBroker):
         ticker = await self.exchange.fetch_ticker(symbol)
         return float(ticker["last"] or 0.0)  # type: ignore[arg-type]
 
+    async def get_bid_ask(self, symbol: str) -> tuple[float, float]:
+        """Return current (bid, ask) from the full ticker. Falls back to (last, last)."""
+        await self._ensure_markets()
+        ticker = await self.exchange.fetch_ticker(symbol)
+        bid = float(ticker.get("bid") or 0.0)  # type: ignore[union-attr]
+        ask = float(ticker.get("ask") or 0.0)  # type: ignore[union-attr]
+        if bid > 0 and ask > 0:
+            return bid, ask
+        last = float(ticker.get("last") or 0.0)  # type: ignore[union-attr]
+        return last, last
+
     async def get_ohlcv(
         self,
         symbol: str,

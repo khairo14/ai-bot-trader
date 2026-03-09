@@ -228,7 +228,21 @@ def _safe_ticker_price(ticker) -> float:
     are considered — 'close' is the *previous session's* final price and would
     send a frozen stale value to the chart, preventing the 60-second no-data
     timeout from firing and misleading the user.
+
+    F-090: Prefer mid-price (bid+ask)/2 when both are available.  Forex pairs
+    on IBKR have no central 'last' trade price — only bid/ask.  Using raw bid
+    caused the chart to show the sell-side price, making it appear that SL was
+    breached when the ask (buy-side) had not yet reached it.
     """
+    try:
+        bid = getattr(ticker, "bid", None)
+        ask = getattr(ticker, "ask", None)
+        if bid is not None and ask is not None:
+            b, a = float(bid), float(ask)
+            if not math.isnan(b) and not math.isnan(a) and b > 0 and a > 0:
+                return (b + a) / 2.0
+    except (TypeError, ValueError):
+        pass
     for attr in ("last", "bid"):
         try:
             raw = getattr(ticker, attr, None)
@@ -278,6 +292,11 @@ async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int)
     period_start = (now_sec // tf_secs) * tf_secs
     o = h = l = c_price = 0.0
     last_valid_ts = _time.monotonic()
+    # F-090: track the last known valid price across all periods so we can emit
+    # flat "heartbeat" candles during thin-liquidity gaps instead of leaving
+    # the chart blank.  This ensures SL/TP lines and candle series stay
+    # continuous and the frontend never shows a disconnected gap.
+    last_valid_price: float = 0.0
 
     try:
         while True:
@@ -292,9 +311,17 @@ async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int)
                 if _time.monotonic() - last_valid_ts > 60:
                     logger.warning(f"[KlineWS][IBKR] No valid price for {sym} in 60 s — closing")
                     break
-                continue
+                # F-090: fill gap — re-use last known price instead of skipping.
+                # Emits a flat continuation candle so the chart stays connected.
+                if last_valid_price > 0:
+                    price = last_valid_price
+                else:
+                    continue
 
-            last_valid_ts = _time.monotonic()
+            else:
+                last_valid_ts = _time.monotonic()
+                last_valid_price = price
+
             now_sec = int(_time.time())
             current_period = (now_sec // tf_secs) * tf_secs
 

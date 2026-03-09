@@ -53,6 +53,17 @@ class AbstractBroker(ABC):
         """Get current market price for a symbol."""
         ...
 
+    async def get_bid_ask(self, symbol: str) -> tuple[float, float]:
+        """
+        Get current bid and ask prices for a symbol.
+        Returns (bid, ask).  Used by monitor_sl_tp for directionally-correct
+        SL/TP checks: SHORT exits are filled at the ask, LONG exits at the bid.
+        Broker subclasses override this for accuracy; default falls back to
+        get_price() and returns the same value for both sides.
+        """
+        price = await self.get_price(symbol)
+        return price, price
+
     @abstractmethod
     async def get_ohlcv(
         self,

@@ -73,6 +73,22 @@ class AlpacaClient(AbstractBroker):
         resp = await loop.run_in_executor(None, lambda: self.data.get_stock_latest_trade(req))
         return float(resp[symbol].price)
 
+    async def get_bid_ask(self, symbol: str) -> tuple[float, float]:
+        """Return current (bid, ask) from the latest quote. Falls back to get_price() on failure."""
+        loop = asyncio.get_running_loop()
+        try:
+            req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
+            resp = await loop.run_in_executor(None, lambda: self.data.get_stock_latest_quote(req))
+            q = resp[symbol]
+            bid = float(q.bid_price)
+            ask = float(q.ask_price)
+            if bid > 0 and ask > 0:
+                return bid, ask
+        except Exception:
+            pass
+        price = await self.get_price(symbol)
+        return price, price
+
     # Minutes per timeframe string � used to compute start date from limit
     _TF_MINUTES: dict[str, int] = {
         "1m": 1, "5m": 5, "15m": 15, "30m": 30,

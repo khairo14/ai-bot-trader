@@ -378,6 +378,44 @@ class _IBKRManager:
         self._start()
         return self._submit(self._do_price(symbol))
 
+    async def _do_bid_ask(self, symbol: str) -> tuple[float, float]:
+        """Fetch current bid/ask prices on the manager's dedicated event loop."""
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        contract = _ibkr_contract(symbol)
+        try:
+            await self._ib.qualifyContractsAsync(contract)
+        except Exception:
+            pass
+        ticker = self._ib.reqMktData(contract, "", False, False)
+        _loop = asyncio.get_running_loop()
+        _deadline = _loop.time() + 5.0
+        bid = ask = 0.0
+        while _loop.time() < _deadline:
+            try:
+                _bid = getattr(ticker, "bid", None)
+                _ask = getattr(ticker, "ask", None)
+                if _bid is not None and _ask is not None:
+                    b, a = float(_bid), float(_ask)
+                    if not math.isnan(b) and not math.isnan(a) and b > 0 and a > 0:
+                        bid, ask = b, a
+                        break
+            except (TypeError, ValueError):
+                pass
+            await asyncio.sleep(0.25)
+        self._ib.cancelMktData(contract)
+        if bid <= 0 or ask <= 0:
+            # Fallback: use mid-price from last/bid for both sides
+            price = await self._do_price(symbol)
+            return price, price
+        return bid, ask
+
+    def fetch_bid_ask(self, symbol: str) -> tuple[float, float]:
+        """Thread-safe bid/ask fetch via the singleton IB connection."""
+        self._start()
+        return self._submit(self._do_bid_ask(symbol))
+
     async def _do_orderbook(self, symbol: str) -> dict:
         """Fetch market depth on the background loop."""
         if not await self._ensure_connected():
@@ -577,6 +615,15 @@ class IBKRClient(AbstractBroker):
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _manager.fetch_price, symbol)
+
+    async def get_bid_ask(self, symbol: str) -> tuple[float, float]:
+        """
+        Fetch current bid and ask prices via the singleton IB connection.
+        Returns (bid, ask). Forex pairs always have bid/ask; stocks during
+        market hours also have both. Falls back to (price, price) on failure.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _manager.fetch_bid_ask, symbol)
 
     async def get_ohlcv(
         self,
