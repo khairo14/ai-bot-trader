@@ -492,6 +492,27 @@ class _IBKRManager:
         self._start()
         return self._submit(self._do_bid_ask(symbol))
 
+    async def _do_positions(self) -> list:
+        """
+        Force a fresh reqPositions() on the background loop and return the result.
+        ib_insync.positions() reads from an in-memory cache that is populated when
+        IB pushes position updates.  If a position was closed by a *different* client
+        (e.g. our emergency flatten script using clientId=99, or a bracket order), the
+        cache held by our manager (clientId=1) may be stale.  Calling reqPositions()
+        clears and repopulates the cache from the live Gateway state.
+        """
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+        self._ib.reqPositions()
+        await asyncio.sleep(1.0)   # allow Gateway to push the updated list
+        return self._ib.positions()
+
+    def fetch_positions(self) -> list:
+        """Thread-safe fresh position fetch via the singleton IB connection."""
+        self._start()
+        return self._submit(self._do_positions(), timeout=15.0)
+
     async def _do_orderbook(self, symbol: str) -> dict:
         """Fetch market depth on the background loop."""
         if not await self._ensure_connected():
@@ -821,8 +842,11 @@ class IBKRClient(AbstractBroker):
         return Balance(total=total, available=available, currency="USD")
 
     async def get_positions(self) -> List[Position]:
-        self._ensure_connected()
-        raw = self.ib.positions()
+        loop = asyncio.get_running_loop()
+        # Use fetch_positions() which forces reqPositions() before reading the cache.
+        # This ensures positions closed by broker brackets or external clients are
+        # reflected immediately rather than showing stale in-memory data.
+        raw = await loop.run_in_executor(None, _manager.fetch_positions)
         positions = []
         for p in raw:
             contract = p.contract
