@@ -992,18 +992,8 @@ async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
     trade.signal_id = db_signal.id
     await db.commit()
 
-    # Only broadcast for successfully placed orders
-    if trade.status == OrderStatus.OPEN:
-        await manager.broadcast("trade", {
-            "symbol": trade.symbol,
-            "side": trade.side,
-            "quantity": trade.quantity,
-            "entry_price": trade.entry_price,
-            "broker": trade.broker.value if hasattr(trade.broker, "value") else trade.broker,
-            "strategy_name": trade.strategy_name,
-            "is_paper": is_paper,
-            "triggered_by": "manual_execute",
-        })
+    # F-085: process_signal() already broadcasts the "trade" WS event internally.
+    # Re-broadcasting here would send 2× events to the frontend on every manual execute.
 
     if trade.status == OrderStatus.REJECTED:
         raise HTTPException(
