@@ -230,8 +230,14 @@ class Notification(Base):
     __tablename__ = "notifications"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    level: Mapped[NotificationLevel] = mapped_column(SAEnum(NotificationLevel), nullable=False, default=NotificationLevel.INFO)
-    category: Mapped[NotificationCategory] = mapped_column(SAEnum(NotificationCategory), nullable=False, default=NotificationCategory.SYSTEM)
+    level: Mapped[NotificationLevel] = mapped_column(
+        SAEnum(NotificationLevel, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False, default=NotificationLevel.INFO,
+    )
+    category: Mapped[NotificationCategory] = mapped_column(
+        SAEnum(NotificationCategory, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False, default=NotificationCategory.SYSTEM,
+    )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)

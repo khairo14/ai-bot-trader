@@ -494,19 +494,14 @@ class _IBKRManager:
 
     async def _do_positions(self) -> list:
         """
-        Force a fresh reqPositions() on the background loop and return the result.
-        ib_insync.positions() reads from an in-memory cache that is populated when
-        IB pushes position updates.  If a position was closed by a *different* client
-        (e.g. our emergency flatten script using clientId=99, or a bracket order), the
-        cache held by our manager (clientId=1) may be stale.  Calling reqPositions()
-        clears and repopulates the cache from the live Gateway state.
+        Force a fresh position request via reqPositionsAsync() and return the result.
+        Uses the async API to avoid calling loop.run_until_complete() inside a
+        running event loop (which the blocking reqPositions() does internally).
         """
         if not await self._ensure_connected():
             raise ConnectionError("IBKR Gateway is not reachable")
         assert self._ib is not None
-        self._ib.reqPositions()
-        await asyncio.sleep(1.0)   # allow Gateway to push the updated list
-        return self._ib.positions()
+        return await self._ib.reqPositionsAsync()
 
     def fetch_positions(self) -> list:
         """Thread-safe fresh position fetch via the singleton IB connection."""
