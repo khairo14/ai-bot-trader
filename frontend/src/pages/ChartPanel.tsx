@@ -334,6 +334,10 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
   const macdLineRef = useRef<ISeriesApi<'Line'>       | null>(null)
   const macdSignRef = useRef<ISeriesApi<'Line'>       | null>(null)
   const macdHistRef = useRef<ISeriesApi<'Histogram'>  | null>(null)
+  // Sub-chart logical-index offset relative to the main chart.
+  // RSI/MACD need warmup bars, so sub-chart logical 0 = main logical N.
+  // Set after every fetchAndRender; used by the scroll-sync callback.
+  const subChartOffsetRef = useRef<number>(0)
 
   // ─── Init charts ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -431,19 +435,31 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     // the main chart (MACD starts at candle 25+, signal at 33+), so the same
     // logical index maps to a different timestamp in each chart — causing the
     // MACD line to appear shifted relative to the candles beneath it.
-    // One-way sync: main chart → sub-chart only.
-    // Two-way sync causes zoom: the sub-chart's data starts later than the main
-    // chart's (RSI at bar 14, MACD at bar 26). When the main chart scrolls left
-    // past the sub-chart's first data point, LWC reports a narrower visible range
-    // for the sub-chart (from its first bar, not from the empty space). Syncing
-    // that narrower range back to the main chart zooms it in.
-    // The sub-chart time scale is hidden (visible: false), so the user cannot drag
-    // it directly — one-way sync is sufficient.
-    mc.timeScale().subscribeVisibleTimeRangeChange(range => {
-      if (!range || !subChart.current) return
-      // Guard: setVisibleRange on an empty chart throws "Value is null"
-      if (subChart.current.timeScale().getVisibleLogicalRange() === null) return
-      try { subChart.current.timeScale().setVisibleRange(range) } catch {}
+// One-way sync: main chart → sub-chart only, using LOGICAL range + offset.
+      //
+      // Why not subscribeVisibleTimeRangeChange + setVisibleRange?
+      //   visibleTimeRangeChange returns null whenever the scroll position is in
+      //   empty space (e.g. scrolling right of the last/live candle), so the
+      //   sub-chart stops following.  setVisibleRange also behaves inconsistently
+      //   in LWC v5 when `from` is before the sub-chart's first data point.
+      //
+      // Why logical range + offset?
+      //   subscribeVisibleLogicalRangeChange fires on EVERY drag frame and never
+      //   returns null.  Logical index k in the main chart corresponds to the same
+      //   timestamp as logical index (k − subChartOffset) in the sub-chart, because
+      //   RSI/MACD need warmup bars so the sub-chart's logical-0 sits at main
+      //   logical-N (N = first valid indicator bar).  Applying the same logical
+      //   width shifted by the offset keeps both charts pixel-perfect in sync.
+      mc.timeScale().subscribeVisibleLogicalRangeChange(range => {
+        if (!range || !subChart.current) return
+        if (subChart.current.timeScale().getVisibleLogicalRange() === null) return
+        const o = subChartOffsetRef.current
+        try {
+          subChart.current.timeScale().setVisibleLogicalRange({
+            from: range.from - o,
+            to:   range.to   - o,
+          })
+        } catch {}
     })
 
     // ResizeObserver — responds to grid cell size changes (not just window resize)
@@ -671,7 +687,12 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
       try { bbLowerRef.current?.setData(candles.flatMap((c, i) => isOK(bb.lower[i]) ? [{ time: c.time as any, value: bb.lower[i]! }] : [])) } catch {}
 
       const rsi = computeRSI(closes)
-      try { rsiRef.current?.setData(candles.flatMap((c, i) => isOK(rsi[i]) ? [{ time: c.time as any, value: rsi[i]! }] : [])) } catch {}
+      const rsiData = candles.flatMap((c, i) => isOK(rsi[i]) ? [{ time: c.time as any, value: rsi[i]! }] : [])
+      try { rsiRef.current?.setData(rsiData) } catch {}
+      // Record offset: sub-chart logical 0 = main chart logical (firstRsiIdx).
+      // subscribeVisibleLogicalRangeChange uses this to keep the sub-chart in sync.
+      const firstRsiIdx = rsi.findIndex(v => isOK(v))
+      subChartOffsetRef.current = firstRsiIdx >= 0 ? firstRsiIdx : 0
 
       const { macd, signal: macdSig, hist } = computeMACD(closes)
       try { macdLineRef.current?.setData(candles.flatMap((c, i) => isOK(macd[i])    ? [{ time: c.time as any, value: macd[i]! }]    : [])) } catch {}

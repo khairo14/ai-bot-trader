@@ -192,57 +192,121 @@ class AlpacaClient(AbstractBroker):
         take_profit_price: Optional[float] = None,
         **kwargs,
     ) -> OrderResult:
+        # entry_price is passed by ForwardEngine so we can reanchor stale SL/TP
+        # to current market price if Alpaca rejects the bracket (error 42210000).
+        entry_price: Optional[float] = kwargs.get("entry_price")
+
         loop = asyncio.get_running_loop()
         logger.info(f"[Alpaca] {order_type.upper()} {side.upper()} {quantity} {symbol}")
         order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
         tif = TimeInForce.GTC
-        if stop_price and take_profit_price:
-            req = MarketOrderRequest(
-                symbol=symbol,
-                qty=quantity,
-                side=order_side,
-                time_in_force=tif,
-                order_class=OrderClass.BRACKET,
-                stop_loss=StopLossRequest(stop_price=stop_price),
-                take_profit=TakeProfitRequest(limit_price=take_profit_price),
-            )
-        elif stop_price and not take_profit_price:
-            # SL only — use OTO (one-triggers-other) so that if the entry fills,
-            # Alpaca immediately submits the stop-loss leg at the broker.
-            req = MarketOrderRequest(
-                symbol=symbol,
-                qty=quantity,
-                side=order_side,
-                time_in_force=tif,
-                order_class=OrderClass.OTO,
-                stop_loss=StopLossRequest(stop_price=stop_price),
-            )
-        elif take_profit_price and not stop_price:
-            # TP only — OTO with a take-profit limit leg.
-            req = MarketOrderRequest(
-                symbol=symbol,
-                qty=quantity,
-                side=order_side,
-                time_in_force=tif,
-                order_class=OrderClass.OTO,
-                take_profit=TakeProfitRequest(limit_price=take_profit_price),
-            )
-        elif order_type == "limit" and price:
-            req = LimitOrderRequest(
-                symbol=symbol,
-                qty=quantity,
-                side=order_side,
-                time_in_force=tif,
-                limit_price=price,
-            )
-        else:
-            req = MarketOrderRequest(
-                symbol=symbol,
-                qty=quantity,
-                side=order_side,
-                time_in_force=TimeInForce.DAY,
-            )
-        raw_result: Any = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+
+        def _build_req(sl: Optional[float], tp: Optional[float]):
+            """Build the appropriate MarketOrderRequest given current sl/tp values."""
+            if sl and tp:
+                return MarketOrderRequest(
+                    symbol=symbol, qty=quantity, side=order_side, time_in_force=tif,
+                    order_class=OrderClass.BRACKET,
+                    stop_loss=StopLossRequest(stop_price=sl),
+                    take_profit=TakeProfitRequest(limit_price=tp),
+                )
+            elif sl and not tp:
+                return MarketOrderRequest(
+                    symbol=symbol, qty=quantity, side=order_side, time_in_force=tif,
+                    order_class=OrderClass.OTO,
+                    stop_loss=StopLossRequest(stop_price=sl),
+                )
+            elif tp and not sl:
+                return MarketOrderRequest(
+                    symbol=symbol, qty=quantity, side=order_side, time_in_force=tif,
+                    order_class=OrderClass.OTO,
+                    take_profit=TakeProfitRequest(limit_price=tp),
+                )
+            elif order_type == "limit" and price:
+                return LimitOrderRequest(
+                    symbol=symbol, qty=quantity, side=order_side, time_in_force=tif,
+                    limit_price=price,
+                )
+            else:
+                return MarketOrderRequest(
+                    symbol=symbol, qty=quantity, side=order_side,
+                    time_in_force=TimeInForce.DAY,
+                )
+
+        req = _build_req(stop_price, take_profit_price)
+        try:
+            raw_result: Any = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+        except Exception as _bracket_err:
+            # ── Stale SL/TP bracket rejection (Alpaca code 42210000) ─────────
+            # When a signal is generated and then executed later, the market may
+            # have moved enough that the precomputed stop_loss is on the wrong
+            # side of current price.  Alpaca validates against `base_price`
+            # (current market) and rejects with:
+            #   stop_loss.stop_price must be >= base_price + 0.01  (SHORT)
+            #   stop_loss.stop_price must be <= base_price - 0.01  (BUY)
+            # Fix: extract base_price from the error JSON, reanchor the
+            # SL/TP using the same ATR distance from the original signal's
+            # entry_price, and retry.  If that also fails, fall back to a
+            # plain market order so the trade is never fully lost.
+            import json as _json, re as _re
+            _err_str = str(_bracket_err)
+            _code_match = _re.search(r'"code"\s*:\s*42210000', _err_str)
+            if _code_match and (stop_price or take_profit_price):
+                # Extract base_price from the Alpaca error JSON payload
+                _base_price: Optional[float] = None
+                _bp_match = _re.search(r'"base_price"\s*:\s*"?([\d.]+)"?', _err_str)
+                if _bp_match:
+                    try:
+                        _base_price = float(_bp_match.group(1))
+                    except ValueError:
+                        pass
+                if _base_price and entry_price:
+                    # Preserve the ATR distance from the original signal
+                    _is_short = order_side == OrderSide.SELL
+                    _sl_dist = abs(stop_price - entry_price) if stop_price and entry_price else 0.0
+                    _tp_dist = abs(take_profit_price - entry_price) if take_profit_price and entry_price else 0.0
+                    _min_tick = 0.02  # ensure Alpaca's >= base + 0.01 is satisfied
+                    new_sl: Optional[float] = None
+                    new_tp: Optional[float] = None
+                    if _is_short:
+                        # SHORT: SL above market, TP below market
+                        if stop_price is not None:
+                            new_sl = round(_base_price + max(_sl_dist, _min_tick), 4)
+                        if take_profit_price is not None:
+                            new_tp = round(_base_price - max(_tp_dist, _min_tick), 4)
+                    else:
+                        # BUY: SL below market, TP above market
+                        if stop_price is not None:
+                            new_sl = round(_base_price - max(_sl_dist, _min_tick), 4)
+                        if take_profit_price is not None:
+                            new_tp = round(_base_price + max(_tp_dist, _min_tick), 4)
+                    logger.warning(
+                        f"[Alpaca] Bracket rejected (stale SL/TP): {symbol} {side} "
+                        f"base_price={_base_price}, original entry={entry_price}, "
+                        f"original SL={stop_price}→{new_sl}, TP={take_profit_price}→{new_tp}. Retrying."
+                    )
+                    req = _build_req(new_sl, new_tp)
+                    try:
+                        raw_result = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+                    except Exception as _retry_err:
+                        # Adjusted bracket also failed — fall back to plain market order
+                        logger.warning(
+                            f"[Alpaca] Adjusted bracket also failed for {symbol}: {_retry_err}. "
+                            f"Placing plain market order (no bracket)."
+                        )
+                        req = _build_req(None, None)
+                        raw_result = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+                else:
+                    # No base_price or entry_price — fall back to plain market order
+                    logger.warning(
+                        f"[Alpaca] Bracket rejected (code 42210000) for {symbol} "
+                        f"and cannot reanchor SL/TP (missing base_price or entry_price). "
+                        f"Placing plain market order."
+                    )
+                    req = _build_req(None, None)
+                    raw_result = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+            else:
+                raise  # unrelated error — propagate normally
         order_id = str(raw_result.id)
         fill_price: Optional[float] = None
 

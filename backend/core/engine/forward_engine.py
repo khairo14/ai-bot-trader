@@ -472,6 +472,7 @@ class ForwardEngine:
                 order_type="market",
                 stop_price=signal.stop_loss,
                 take_profit_price=signal.take_profit,
+                entry_price=signal.entry_price,  # used by Alpaca to reanchor stale SL/TP
                 **option_kwargs,
             )
             # Use broker-confirmed fill price if available, fall back to signal price
