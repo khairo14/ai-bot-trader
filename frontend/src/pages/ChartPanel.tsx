@@ -261,6 +261,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
   const [customFrom, setCustomFrom]   = useState(() => toDateInput(Date.now() - 30*24*3600*1000))
   const [customTo, setCustomTo]       = useState(() => toDateInput(Date.now()))
   const [loading, setLoading]         = useState(false)
+  const [loadingMsg, setLoadingMsg]   = useState('Loading…')
   const [showEMA, setShowEMA]         = useState(initInds.showEMA)
   const [showBB, setShowBB]           = useState(initInds.showBB)
   const [showVolume, setShowVolume]   = useState(true)
@@ -558,6 +559,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     const { signal } = ctrl
     isFetchingRef.current = true
     setLoading(true)
+    setLoadingMsg(broker === 'ibkr' ? 'Connecting to IBKR…' : 'Loading…')
     // Update paramsKey so in-flight live polls from the previous symbol abort
     paramsKeyRef.current = `${broker}/${symbol}/${timeframe}`
     // Clear all series immediately so the chart goes blank while the new
@@ -952,7 +954,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
         <button onClick={fetchAndRender} disabled={loading}
           className="flex items-center gap-1 text-xs px-2 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white disabled:opacity-50 transition-all">
           <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
-          {!compact && (loading ? 'Loading…' : 'Refresh')}
+          {!compact && (loading ? loadingMsg : 'Refresh')}
         </button>
 
         {/* ─── Indicators dropdown ───────────────────────────────── */}

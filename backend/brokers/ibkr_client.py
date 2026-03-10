@@ -390,9 +390,11 @@ class _IBKRManager:
         Runs _ensure_connected() on the background loop (where ib_insync lives).
         Returns True if connected, False if Gateway is unreachable.
         Unlike get_balance(), exceptions are NOT swallowed here.
+        Timeout is 90 s — long enough to survive all 4 connect retries (4 × 15 s)
+        plus delays, so trading callers (ForwardEngine) are never cut short.
         """
         self._start()
-        return self._submit(self._ensure_connected())
+        return self._submit(self._ensure_connected(), timeout=90.0)
 
     def get_ib(self) -> "IB":
         """

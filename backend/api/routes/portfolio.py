@@ -10,6 +10,11 @@ from sqlalchemy import select, func
 from db.database import get_db
 from db.models import Trade, OrderStatus, BrokerName
 from config import settings
+from core.risk_manager import RiskManager as _RiskManager
+
+# Singleton — reads risk_state.json the same way ForwardEngine does.
+# _load_state() is called inside each request to refresh from disk.
+_risk_mgr = _RiskManager()
 
 router = APIRouter()
 
@@ -109,8 +114,9 @@ async def portfolio_summary(db: AsyncSession = Depends(get_db)):
     )
     today_pnl = round(float(pnl_result.scalar() or 0.0), 2)
 
-    # Per-broker daily P&L (same window — trades closed since midnight UTC)
+    # Per-broker daily P&L + per-broker open position count (same today window)
     today_pnl_by_broker: dict[str, float] = {}
+    open_positions_by_broker: dict[str, int] = {}
     for _broker in [BrokerName.BINANCE, BrokerName.ALPACA, BrokerName.IBKR]:
         _pnl_q = await db.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0))
@@ -120,14 +126,38 @@ async def portfolio_summary(db: AsyncSession = Depends(get_db)):
         )
         today_pnl_by_broker[_broker.value] = round(float(_pnl_q.scalar() or 0.0), 2)
 
+        _open_q = await db.execute(
+            select(func.count(Trade.id))
+            .where(Trade.status == OrderStatus.OPEN)
+            .where(Trade.broker == _broker)
+        )
+        _cnt = int(_open_q.scalar() or 0)
+        if _cnt > 0:
+            open_positions_by_broker[_broker.value] = _cnt
+
     # Max open positions from config
     max_positions = settings.max_open_positions
+
+    # Circuit breaker state — reload from disk so the latest tripped/reset state
+    # is reflected without needing a server restart.
+    _risk_mgr._load_state()
+    cb_active = _risk_mgr.is_circuit_breaker_active()
+    per_broker_cb: dict[str, dict] = {}
+    for _b in ["binance", "alpaca", "ibkr"]:
+        _bs = _risk_mgr._per_broker.get(_b, {})
+        per_broker_cb[_b] = {
+            "active": _bs.get("circuit_breaker_active", False),
+            "consecutive_losses": _bs.get("consecutive_losses", 0),
+        }
 
     return {
         "brokers": broker_balances,
         "open_positions": open_count,
+        "open_positions_by_broker": open_positions_by_broker,
         "max_positions": max_positions,
         "today_pnl": today_pnl,
         "today_pnl_by_broker": today_pnl_by_broker,
         "circuit_breaker_pct": settings.daily_circuit_breaker_pct,
+        "circuit_breaker_active": cb_active,
+        "per_broker_circuit_breaker": per_broker_cb,
     }

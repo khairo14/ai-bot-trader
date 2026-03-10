@@ -39,9 +39,12 @@ interface BrokerBalance {
 interface PortfolioSummary {
   brokers: BrokerBalance[]
   open_positions: number
+  open_positions_by_broker: Record<string, number>
   max_positions: number
   today_pnl: number
   circuit_breaker_pct: number
+  circuit_breaker_active: boolean
+  per_broker_circuit_breaker: Record<string, { active: boolean; consecutive_losses: number }>
   today_pnl_by_broker: Record<string, number>
 }
 
@@ -367,22 +370,54 @@ export default function Dashboard() {
 
       {/* Stats Row */}
       <div className="grid grid-cols-3 gap-4">
-        <StatCard
-          label="Open Positions"
-          value={portfolio ? String(portfolio.open_positions) : '—'}
-          sub={portfolio ? `of ${portfolio.max_positions} max` : undefined}
-        />
+        {/* Open Positions */}
+        <div className="bg-dark-800 border border-dark-600 rounded-xl p-4">
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Open Positions</p>
+          <p className="text-2xl font-bold text-white">{portfolio ? String(portfolio.open_positions) : '—'}</p>
+          {portfolio && (
+            <p className="text-xs text-gray-500 mt-0.5">
+              {`of ${portfolio.max_positions} max`}
+              {Object.keys(portfolio.open_positions_by_broker ?? {}).length > 0 && (
+                <span className="ml-1 text-gray-600">
+                  ({Object.entries(portfolio.open_positions_by_broker).map(([b, c]) => `${b} ${c}`).join(', ')})
+                </span>
+              )}
+            </p>
+          )}
+        </div>
+
+        {/* Today's P&L */}
         <StatCard
           label="Today's P&L"
           value={portfolio ? formatPnl(portfolio.today_pnl) : '—'}
           color={pnlColor}
         />
-        <StatCard
-          label="Circuit Breaker"
-          value={portfolio ? `${portfolio.circuit_breaker_pct}% limit` : '—'}
-          sub="Daily max loss"
-          color="text-brand-500"
-        />
+
+        {/* Circuit Breaker */}
+        <div className="bg-dark-800 border border-dark-600 rounded-xl p-4">
+          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Circuit Breaker</p>
+          <p className={`text-2xl font-bold ${
+            !portfolio ? 'text-white'
+            : portfolio.circuit_breaker_active ? 'text-red-400'
+            : 'text-brand-500'
+          }`}>
+            {!portfolio ? '—'
+              : portfolio.circuit_breaker_active ? 'TRIPPED'
+              : `${portfolio.circuit_breaker_pct}% limit`}
+          </p>
+          {portfolio && (() => {
+            const tripped = Object.entries(portfolio.per_broker_circuit_breaker ?? {})
+              .filter(([, v]) => v.active)
+              .map(([b]) => b)
+            return (
+              <p className="text-xs mt-0.5">
+                {tripped.length > 0
+                  ? <span className="text-red-400">{tripped.join(', ')} tripped</span>
+                  : <span className="text-gray-500">Daily max loss — all clear</span>}
+              </p>
+            )
+          })()}
+        </div>
       </div>
 
       {/* Signal summary */}

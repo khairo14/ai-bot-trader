@@ -21,6 +21,11 @@ router = APIRouter(tags=["notifications"])
 
 
 def _notif_dict(n: Notification) -> dict:
+    # Timestamps are stored as naive UTC (tzinfo stripped by _utcnow).
+    # Appending 'Z' makes JavaScript parse them as UTC, not local time,
+    # so timeAgo() in the frontend is always correct regardless of the
+    # user's browser timezone.
+    created_iso = (n.created_at.isoformat() + 'Z') if n.created_at else None
     return {
         "id": n.id,
         "level": n.level.value if hasattr(n.level, "value") else n.level,
@@ -30,7 +35,7 @@ def _notif_dict(n: Notification) -> dict:
         "is_read": n.is_read,
         "email_sent": n.email_sent,
         "metadata": n.extra or {},
-        "created_at": n.created_at.isoformat() if n.created_at else None,
+        "created_at": created_iso,
     }
 
 

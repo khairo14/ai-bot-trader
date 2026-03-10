@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import asyncio
 import time
 from collections import defaultdict
 from typing import Optional, Any
@@ -210,9 +211,19 @@ async def get_candles(
         if broker.lower() == "binance":
             from brokers.binance_client import BinanceClient
             client = BinanceClient(paper=False)
+        elif broker.lower() == "ibkr":
+            # For IBKR charts: only start the singleton background thread — do NOT call
+            # connect() / ensure_connected_sync() here.  connect() holds _connect_lock
+            # for up to ~60 s during a Gateway reconnect, which can starve a concurrent
+            # ForwardEngine trade call that also needs that lock.  _do_ohlcv() calls
+            # _ensure_connected() internally, and _reconnect_loop fires every 15 s, so
+            # the first OHLCV retry (3 attempts × 3 s) will catch up naturally.
+            from brokers.ibkr_client import get_ibkr_manager as _ibkr_mgr
+            _ibkr_mgr()._start()
+            client = _get_broker_client(broker)
         else:
             client = _get_broker_client(broker)
-            await client.connect()   # no-op for Alpaca; ensures IBKR singleton is live
+            await client.connect()   # no-op for Alpaca
 
         all_rows: list[tuple[int, object]] = []
         current_since = since
@@ -225,11 +236,23 @@ async def get_candles(
         try:
             if is_ibkr:
                 ibkr_limit = max(CHUNK, int((until - since) / tf_ms) + 10)
-                df = await client.get_ohlcv(
-                    symbol.upper(), timeframe=timeframe,
-                    limit=ibkr_limit, since=since,
-                )
-                if not df.empty:
+                # Retry up to 3 times — the first call often returns empty while the
+                # IBKR Gateway singleton is warming up or recovering from a pacing delay.
+                df = None
+                for _attempt in range(3):
+                    df = await client.get_ohlcv(
+                        symbol.upper(), timeframe=timeframe,
+                        limit=ibkr_limit, since=since,
+                    )
+                    if not df.empty:
+                        break
+                    if _attempt < 2:
+                        logger.info(
+                            f"[Charts] IBKR returned empty for {symbol}/{timeframe} "
+                            f"— retrying in 3 s (attempt {_attempt + 1}/3, Gateway warmup)"
+                        )
+                        await asyncio.sleep(3)
+                if df is not None and not df.empty:
                     for ts, row in df.iterrows():
                         try:
                             t_ms = int(ts.timestamp() * 1000)  # type: ignore[union-attr]

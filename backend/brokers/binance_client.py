@@ -261,16 +261,37 @@ class BinanceClient(AbstractBroker):
         logger.info(f"[Binance] Placing {order_type.upper()} {side.upper()} {quantity} {symbol}")
         params = {}
         if stop_price and take_profit_price:
-            # OCO order: one-cancels-the-other exit bracket
-            result = await self.exchange.create_order(
-                symbol, "oco", side, quantity,  # type: ignore[arg-type]
-                price=take_profit_price,
-                params={"stopPrice": stop_price, "stopLimitPrice": stop_price * 0.999}
-            )
-            # OCO result["id"] is the orderListId, not a fillable child order ID.
-            # Extract the first child order ID from orderReports for fill polling.
-            _oco_reports = (result.get("info") or {}).get("orderReports", [])
-            order_id = str(_oco_reports[0]["orderId"]) if _oco_reports else str(result["id"])
+            # Bracket: market entry first, then SL + TP exit guards on the opposite side.
+            # Binance OCO via ccxt "oco" type is rejected on testnet and unreliable on spot;
+            # placing two separate exit orders achieves the same protection.
+            result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
+            exit_side = "sell" if side == "buy" else "buy"
+            # SL guard
+            for _attempt in range(2):
+                try:
+                    _sl_limit = round(stop_price * (0.999 if exit_side == "sell" else 1.001), 8)
+                    await self.exchange.create_order(
+                        symbol, "STOP_LOSS_LIMIT", exit_side, quantity,
+                        price=_sl_limit,
+                        params={"stopPrice": stop_price}
+                    )
+                    break
+                except Exception as _sl_err:
+                    if _attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.error(f"[Binance] SL guard (bracket) failed after retry: {_sl_err}")
+            # TP guard
+            for _attempt in range(2):
+                try:
+                    await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
+                    break
+                except Exception as _tp_err:
+                    if _attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.error(f"[Binance] TP guard (bracket) failed after retry: {_tp_err}")
+            order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif stop_price and not take_profit_price:
             # SL only: place market entry, then stop-loss protection in opposite direction.
