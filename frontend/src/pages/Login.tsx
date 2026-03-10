@@ -75,7 +75,7 @@ export default function Login({ onLogin }: LoginProps) {
           <div className="p-3 rounded-2xl bg-brand-500/10 border border-brand-500/20 mb-4">
             <Zap className="text-brand-500" size={30} />
           </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">AI Bot Trader</h1>
+          <h1 className="text-2xl font-bold text-white tracking-tight">EvoTrade</h1>
           <p className="text-sm text-gray-500 mt-1">{isLogin ? 'Sign in to your dashboard' : 'Create a new account'}</p>
         </div>
 

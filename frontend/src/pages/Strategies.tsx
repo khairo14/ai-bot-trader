@@ -290,9 +290,33 @@ export default function Strategies() {
             <Link to="/strategy-library" className="text-brand-500 hover:underline">Strategy Library</Link>.
           </p>
         </div>
-      ) : (
-        <div className="space-y-3">
-          {strategies.map(s => (
+      ) : (() => {
+        // Group by broker, preserving BROKERS order, then any unknown brokers
+        const known = BROKERS.map(b => ({ broker: b, items: strategies.filter(s => s.broker === b) })).filter(g => g.items.length > 0)
+        const knownSet = new Set(BROKERS)
+        const unknownItems = strategies.filter(s => !knownSet.has(s.broker))
+        const groups = unknownItems.length > 0 ? [...known, { broker: 'other', items: unknownItems }] : known
+
+        const brokerAccent: Record<string, string> = {
+          binance: 'text-yellow-400',
+          alpaca:  'text-blue-400',
+          ibkr:    'text-orange-400',
+          other:   'text-gray-400',
+        }
+
+        return (
+          <div className="space-y-6">
+            {groups.map(({ broker, items }) => (
+              <div key={broker}>
+                <div className="flex items-center gap-3 mb-3">
+                  <span className={`text-xs font-bold uppercase tracking-widest ${brokerAccent[broker] ?? 'text-gray-400'}`}>
+                    {broker}
+                  </span>
+                  <div className="flex-1 h-px bg-dark-600" />
+                  <span className="text-xs text-gray-600">{items.length} {items.length === 1 ? 'strategy' : 'strategies'}</span>
+                </div>
+                <div className="space-y-3">
+                  {items.map(s => (
             <div key={s.id} className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center justify-between">
               <div className="flex items-center gap-4">
                 <button onClick={() => toggleActive(s)}>
@@ -304,7 +328,7 @@ export default function Strategies() {
                 <div>
                   <p className="text-sm font-medium text-white">{s.name}</p>
                   <p className="text-xs text-gray-500">
-                    {s.broker} · {s.asset_class} · {s.is_paper ? '📄 Paper' : '💰 Live'}
+                    {s.asset_class} · {s.is_paper ? '📄 Paper' : '💰 Live'}
                     {s.parameters?.symbol ? ` · ${s.parameters.symbol}` : ''}
                     {s.parameters?.timeframe ? ` · ${s.parameters.timeframe}` : ''}
                   </p>
@@ -354,8 +378,12 @@ export default function Strategies() {
               </div>
             </div>
           ))}
-        </div>
-      )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      })()}
 
       {/* Create / Edit Strategy Modal */}
       {showModal && (
