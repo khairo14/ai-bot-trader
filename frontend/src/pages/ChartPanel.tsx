@@ -50,12 +50,22 @@ function computeMACD(closes: number[], fast = 12, slow = 26, sig = 9): MACDResul
   const macd: (number | null)[] = closes.map((_, i) =>
     emaFast[i] !== null && emaSlow[i] !== null ? emaFast[i]! - emaSlow[i]! : null
   )
-  const macdForEMA = macd.map(v => v ?? 0)
-  const rawSig = computeEMA(macdForEMA, sig)
-  const signal: (number | null)[] = macd.map((v, i) => v !== null && rawSig[i] !== null ? rawSig[i] : null)
-  const hist: (number | null)[] = macd.map((v, i) =>
-    v !== null && signal[i] !== null ? v - signal[i]! : null
-  )
+  // Compute the signal EMA only over valid MACD values — seeding it from zeros
+  // (via `macd.map(v => v ?? 0)`) causes the EMA warmup to run on zeroed data,
+  // producing a signal line that lags many candles behind where it should start.
+  const signal: (number | null)[] = new Array(closes.length).fill(null)
+  const hist: (number | null)[] = new Array(closes.length).fill(null)
+  const firstValid = macd.findIndex(v => v !== null)
+  if (firstValid !== -1) {
+    const validMacd = macd.slice(firstValid) as number[]
+    const sigEMA = computeEMA(validMacd, sig)
+    for (let i = 0; i < sigEMA.length; i++) {
+      if (sigEMA[i] !== null) {
+        signal[firstValid + i] = sigEMA[i]
+        hist[firstValid + i] = macd[firstValid + i]! - sigEMA[i]!
+      }
+    }
+  }
   return { macd, signal, hist }
 }
 
