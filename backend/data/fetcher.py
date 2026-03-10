@@ -29,10 +29,7 @@ class DataFetcher:
         timestamp, open, high, low, close, volume
         """
         await self.broker.connect()  # no-op for Binance/Alpaca; ensures IBKR is live
-        try:
-            raw = await self.broker.get_ohlcv(symbol, timeframe, limit, since)
-        finally:
-            await self.broker.close()
+        raw = await self.broker.get_ohlcv(symbol, timeframe, limit, since)
         # Broker clients return a DataFrame directly — don't re-wrap it.
         if isinstance(raw, pd.DataFrame):
             return raw

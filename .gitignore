@@ -29,12 +29,17 @@ wheels/
 venv/
 ENV/
 
-# ML Models (large binary files)
+# ML Models (large binary files — regenerated weekly by Celery retrain task)
 backend/models/saved/*.pkl
 backend/models/saved/*.joblib
 backend/models/saved/*.pt
 backend/models/saved/*.h5
 backend/models/saved/*.json
+backend/data/models/*.pkl
+backend/data/models/*.joblib
+backend/data/models/*.pt
+backend/data/models/*.h5
+backend/data/models/latest.json
 backend/runtime/*.json
 
 # Celery
