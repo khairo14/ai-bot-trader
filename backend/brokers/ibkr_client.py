@@ -1,12 +1,23 @@
 import asyncio
 import math
+import os
 import threading
 import time
 import pandas as pd
 from typing import List, Optional, Callable
 from loguru import logger
 
-from ib_insync import IB, Stock, Forex as IBForex, Option, Contract, MarketOrder, LimitOrder, StopLimitOrder, StopOrder, Trade as IBTrade
+# ib_insync's eventkit calls asyncio.get_event_loop() at module import time.
+# In Celery forked workers (Python 3.10+) there is no default event loop in the
+# forked child process, which raises RuntimeError before any code runs.
+# Ensure one exists so the import succeeds; tasks use asyncio.run() which
+# creates its own isolated loop and is unaffected by this.
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+from ib_insync import IB, Stock, Forex as IBForex, Option, Contract, Order, MarketOrder, LimitOrder, StopLimitOrder, StopOrder, Trade as IBTrade
 
 from config import settings
 from brokers.base import AbstractBroker, OrderResult, Position, Balance
@@ -77,7 +88,14 @@ class _IBKRManager:
     _CONNECT_RETRY_DELAY = 8.0  # seconds between connect retries
 
     def __init__(self, client_id: int | None = None) -> None:
-        self._client_id: int = client_id if client_id is not None else settings.ibkr_client_id
+        # Use the Celery-specific clientId when running inside a worker process
+        # so it doesn't collide with the FastAPI singleton connection (IBKR Error 326).
+        if client_id is not None:
+            self._client_id: int = client_id
+        elif os.environ.get("CELERY_WORKER_PROCESS") == "1":
+            self._client_id = settings.ibkr_client_id_celery
+        else:
+            self._client_id = settings.ibkr_client_id
         self._ib: Optional[IB] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -134,7 +152,7 @@ class _IBKRManager:
                     if reconnected and self._ib:
                         # Re-subscribe to account updates so accountValues() repopulates.
                         try:
-                            self._ib.reqAccountUpdates(subscribe=True)
+                            self._ib.reqAccountUpdates(True)  # type: ignore[arg-type]
                         except Exception:
                             pass
                         # F-082: refresh in-memory position cache after reconnect so
@@ -205,7 +223,7 @@ class _IBKRManager:
                     # Explicitly subscribe to account updates so accountValues() is
                     # populated.  Paper accounts are slow to push NetLiquidation.
                     try:
-                        self._ib.reqAccountUpdates(subscribe=True)
+                        self._ib.reqAccountUpdates(True)  # type: ignore[arg-type]
                     except Exception:
                         pass
                     # Wait for Gateway to push the initial account snapshot.
@@ -312,7 +330,7 @@ class _IBKRManager:
             orderId=ib.client.getReqId(),
             transmit=not (has_tp or has_sl),
         )
-        orders = [parent]
+        orders: list[Order] = [parent]
 
         if has_tp:
             tp = LimitOrder(
@@ -637,18 +655,25 @@ _manager = _IBKRManager(client_id=settings.ibkr_client_id)
 _celery_manager = _IBKRManager(client_id=settings.ibkr_client_id_celery)
 
 
+def _get_manager() -> "_IBKRManager":
+    """Return the correct IBKR singleton — clientId 2 in Celery workers, clientId 1 in FastAPI."""
+    if os.environ.get("CELERY_WORKER_PROCESS") == "1":
+        return _celery_manager
+    return _manager
+
+
 def ibkr_balance_sync() -> Balance:
     """
     Thread-safe entry-point used by portfolio route.
     Returns a cached or freshly fetched IBKR balance WITHOUT spawning a new
     IB connection on every call.
     """
-    return _manager.get_balance()
+    return _get_manager().get_balance()
 
 
 def get_ibkr_manager() -> "_IBKRManager":
     """Return the singleton IBKR manager (used by /ws/kline for live tick streaming)."""
-    return _manager
+    return _get_manager()
 
 
 class IBKRClient(AbstractBroker):
@@ -678,7 +703,7 @@ class IBKRClient(AbstractBroker):
         Return the singleton IB instance shared by the persistent manager.
         Raises ConnectionError if the Gateway is not reachable.
         """
-        return _manager.get_ib()
+        return _get_manager().get_ib()
 
     async def connect(self) -> None:
         """
@@ -686,10 +711,10 @@ class IBKRClient(AbstractBroker):
         Submits _ensure_connected directly to the background loop so the real
         socket state is checked — no exception swallowing.
         """
-        _manager._start()
+        _get_manager()._start()
         loop = asyncio.get_running_loop()
         try:
-            connected = await loop.run_in_executor(None, _manager.ensure_connected_sync)
+            connected = await loop.run_in_executor(None, _get_manager().ensure_connected_sync)
         except Exception as exc:
             raise ConnectionError(
                 f"IBKRClient: could not connect to IB Gateway: {exc}"
@@ -708,11 +733,11 @@ class IBKRClient(AbstractBroker):
     def cancel_bracket_subscription(self, symbol: str) -> None:
         """F-082: Cancel the persistent mkt data feed kept for an open bracket order.
         Called by ForwardEngine.close_position() after a trade is closed."""
-        _manager.cancel_bracket_subscription(symbol)
+        _get_manager().cancel_bracket_subscription(symbol)
 
     def _ensure_connected(self) -> None:
         """Raise if the singleton IB manager is not currently connected."""
-        if not _manager.is_connected():
+        if not _get_manager().is_connected():
             raise ConnectionError(
                 "IBKRClient is not connected. Call connect() first or ensure IB Gateway is running."
             )
@@ -725,7 +750,7 @@ class IBKRClient(AbstractBroker):
         Runs the ib_insync async call on the manager's dedicated event loop.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _manager.fetch_price, symbol)
+        return await loop.run_in_executor(None, _get_manager().fetch_price, symbol)
 
     async def get_bid_ask(self, symbol: str) -> tuple[float, float]:
         """
@@ -734,7 +759,7 @@ class IBKRClient(AbstractBroker):
         market hours also have both. Falls back to (price, price) on failure.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _manager.fetch_bid_ask, symbol)
+        return await loop.run_in_executor(None, _get_manager().fetch_bid_ask, symbol)
 
     async def get_ohlcv(
         self,
@@ -795,7 +820,7 @@ class IBKRClient(AbstractBroker):
 
         loop = asyncio.get_running_loop()
         bars = await loop.run_in_executor(
-            None, _manager.fetch_ohlcv, symbol, bar_size, duration
+            None, _get_manager().fetch_ohlcv, symbol, bar_size, duration
         )
         _EMPTY_OHLCV = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         if not bars:
@@ -827,7 +852,7 @@ class IBKRClient(AbstractBroker):
 
     async def get_orderbook(self, symbol: str) -> dict:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _manager.fetch_orderbook, symbol)
+        return await loop.run_in_executor(None, _get_manager().fetch_orderbook, symbol)
 
     # ── Options Chain ────────────────────────────────────
 
@@ -837,7 +862,7 @@ class IBKRClient(AbstractBroker):
         Returns strikes, expirations, IVs, and Greeks via IBKR.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _manager.fetch_options_chain, symbol)
+        return await loop.run_in_executor(None, _get_manager().fetch_options_chain, symbol)
 
     # ── Account ──────────────────────────────────────────
 
@@ -860,7 +885,7 @@ class IBKRClient(AbstractBroker):
         # Use fetch_positions() which forces reqPositions() before reading the cache.
         # This ensures positions closed by broker brackets or external clients are
         # reflected immediately rather than showing stale in-memory data.
-        raw = await loop.run_in_executor(None, _manager.fetch_positions)
+        raw = await loop.run_in_executor(None, _get_manager().fetch_positions)
         positions = []
         for p in raw:
             contract = p.contract
@@ -919,7 +944,7 @@ class IBKRClient(AbstractBroker):
         else:
             contract = _ibkr_contract(symbol)
         _place_loop = asyncio.get_running_loop()
-        await _place_loop.run_in_executor(None, _manager.qualify_contract_sync, contract)
+        await _place_loop.run_in_executor(None, _get_manager().qualify_contract_sync, contract)
 
         # Build order
         action = "BUY" if side.lower() == "buy" else "SELL"
@@ -937,17 +962,17 @@ class IBKRClient(AbstractBroker):
             # _place_bracket_async which runs on the background loop).
             await _place_loop.run_in_executor(
                 None,
-                lambda: _manager._submit(_manager._do_subscribe_mkt_data_for_fill(contract)),
+                lambda: _get_manager()._submit(_get_manager()._do_subscribe_mkt_data_for_fill(contract)),
             )
             trade = await _place_loop.run_in_executor(
                 None,
-                _manager.place_bracket_sync,
+                _get_manager().place_bracket_sync,
                 contract, action, quantity, take_profit_price, stop_price,
             )
         else:
             order = MarketOrder(action, quantity)
             # F-077: subscribe before placing so IBKR paper can simulate the fill
-            _manager.subscribe_mkt_data_for_fill(contract)
+            _get_manager().subscribe_mkt_data_for_fill(contract)
             await asyncio.sleep(0.5)  # let at least one tick arrive
             trade = self.ib.placeOrder(contract, order)
         await asyncio.sleep(0.5)
@@ -996,11 +1021,11 @@ class IBKRClient(AbstractBroker):
                 # TP limit) need a live price feed to trigger in IBKR paper simulation.
                 # The subscription is cancelled later by cancel_bracket_subscription()
                 # which ForwardEngine.close_position() calls after the trade closes.
-                _manager._bracket_subscriptions[symbol] = contract
+                _get_manager()._bracket_subscriptions[symbol] = contract
                 logger.debug(f"[IBKR] Keeping mkt-data subscription alive for bracket: {symbol}")
             else:
                 # Plain market order — subscription only needed for fill simulation; cancel now.
-                _manager.unsubscribe_mkt_data(contract)
+                _get_manager().unsubscribe_mkt_data(contract)
 
         return OrderResult(
             order_id=order_id,
@@ -1052,7 +1077,7 @@ class IBKRClient(AbstractBroker):
         contracts = [Stock(s, "SMART", "USD") for s in symbols]
         _stream_loop = asyncio.get_running_loop()
         for _c in contracts:
-            await _stream_loop.run_in_executor(None, _manager.qualify_contract_sync, _c)
+            await _stream_loop.run_in_executor(None, _get_manager().qualify_contract_sync, _c)
 
         tickers = [self.ib.reqMktData(c) for c in contracts]
         logger.info(f"[IBKR] Starting price stream for: {symbols}")

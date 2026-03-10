@@ -172,6 +172,8 @@ export default function Dashboard() {
   const [optimizing, setOptimizing] = useState(false)
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([])
   const [trades, setTrades] = useState<Trade[]>([])
+  const [tradePage, setTradePage] = useState(1)
+  const TRADES_PER_PAGE = 8
   const [closingId, setClosingId] = useState<number | null>(null)
 
   const enrichPositionsWithLivePnl = useCallback(async (positions: OpenPosition[]): Promise<OpenPosition[]> => {
@@ -213,7 +215,7 @@ export default function Dashboard() {
       axios.get('/api/ml/status'),
       axios.get('/api/portfolio-optimizer/weights'),
       axios.get('/api/positions/open'),
-      axios.get('/api/forward-test/trades?limit=20'),
+      axios.get('/api/forward-test/trades?limit=100'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
@@ -705,55 +707,99 @@ export default function Dashboard() {
           <div className="px-4 py-8 text-center">
             <p className="text-gray-600 text-sm">No trades yet</p>
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-gray-500 border-b border-dark-600">
-                  {['Symbol', 'Side', 'Entry', 'Exit', 'SL', 'TP', 'P&L', 'Status', 'Broker', 'Strategy', 'Opened'].map(h => (
-                    <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {trades.map(t => (
-                  <tr key={t.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
-                    <td className="px-3 py-2 font-medium text-white">{t.symbol}</td>
-                    <td className={`px-3 py-2 font-bold ${
-                      t.side === 'buy' || t.side === 'long' || t.side === 'cover' ? 'text-green-400' : 'text-red-400'
-                    }`}>{t.side === 'long' ? 'BUY' : t.side === 'short' ? 'SELL' : t.side.toUpperCase()}</td>
-                    <td className="px-3 py-2 text-gray-300">{fmtPrice(t.entry_price)}</td>
-                    <td className="px-3 py-2 text-gray-300">{fmtPrice(t.exit_price)}</td>
-                    <td className="px-3 py-2 text-red-400">{fmtPrice(t.stop_loss)}</td>
-                    <td className="px-3 py-2 text-green-400">{fmtPrice(t.take_profit)}</td>
-                    <td className={`px-3 py-2 font-medium ${
-                      (t.pnl ?? 0) > 0 ? 'text-green-400' : (t.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'
-                    }`}>
-                      {t.pnl != null ? formatPnl(t.pnl) : '—'}
-                      {t.pnl_pct != null && (
-                        <span className="text-gray-500 ml-1">({t.pnl_pct > 0 ? '+' : ''}{t.pnl_pct.toFixed(2)}%)</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                        t.status === 'open'     ? 'bg-blue-500/15 text-blue-400' :
-                        t.status === 'filled'   ? 'bg-green-500/15 text-green-400' :
-                        t.status === 'pending'  ? 'bg-yellow-500/15 text-yellow-400' :
-                        t.status === 'rejected' ? 'bg-red-500/15 text-red-400' :
-                        'bg-gray-700 text-gray-400'
-                      }`}>{t.status}</span>
-                    </td>
-                    <td className="px-3 py-2 text-gray-400 capitalize">{t.broker}</td>
-                    <td className="px-3 py-2 text-gray-400 max-w-[90px] truncate">{t.strategy_name ?? '—'}</td>
-                    <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
-                      {t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        ) : (() => {
+          const totalPages = Math.ceil(trades.length / TRADES_PER_PAGE)
+          const pageTrades = trades.slice((tradePage - 1) * TRADES_PER_PAGE, tradePage * TRADES_PER_PAGE)
+          return (
+            <>
+              <div className="overflow-x-auto overflow-y-auto max-h-[340px]">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-dark-800 z-10">
+                    <tr className="text-gray-500 border-b border-dark-600">
+                      {['Symbol', 'Side', 'Entry', 'Exit', 'SL', 'TP', 'P&L', 'Status', 'Broker', 'Strategy', 'Opened'].map(h => (
+                        <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pageTrades.map(t => (
+                      <tr key={t.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
+                        <td className="px-3 py-2 font-medium text-white">{t.symbol}</td>
+                        <td className={`px-3 py-2 font-bold ${
+                          t.side === 'buy' || t.side === 'long' || t.side === 'cover' ? 'text-green-400' : 'text-red-400'
+                        }`}>{t.side === 'long' ? 'BUY' : t.side === 'short' ? 'SELL' : t.side.toUpperCase()}</td>
+                        <td className="px-3 py-2 text-gray-300">{fmtPrice(t.entry_price)}</td>
+                        <td className="px-3 py-2 text-gray-300">{fmtPrice(t.exit_price)}</td>
+                        <td className="px-3 py-2 text-red-400">{fmtPrice(t.stop_loss)}</td>
+                        <td className="px-3 py-2 text-green-400">{fmtPrice(t.take_profit)}</td>
+                        <td className={`px-3 py-2 font-medium ${
+                          (t.pnl ?? 0) > 0 ? 'text-green-400' : (t.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'
+                        }`}>
+                          {t.pnl != null ? formatPnl(t.pnl) : '—'}
+                          {t.pnl_pct != null && (
+                            <span className="text-gray-500 ml-1">({t.pnl_pct > 0 ? '+' : ''}{t.pnl_pct.toFixed(2)}%)</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+                            t.status === 'open'     ? 'bg-blue-500/15 text-blue-400' :
+                            t.status === 'filled'   ? 'bg-green-500/15 text-green-400' :
+                            t.status === 'pending'  ? 'bg-yellow-500/15 text-yellow-400' :
+                            t.status === 'rejected' ? 'bg-red-500/15 text-red-400' :
+                            'bg-gray-700 text-gray-400'
+                          }`}>{t.status}</span>
+                        </td>
+                        <td className="px-3 py-2 text-gray-400 capitalize">{t.broker}</td>
+                        <td className="px-3 py-2 text-gray-400 max-w-[90px] truncate">{t.strategy_name ?? '—'}</td>
+                        <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
+                          {t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {totalPages > 1 && (
+                <div className="px-4 py-2.5 border-t border-dark-600 flex items-center justify-between">
+                  <span className="text-xs text-gray-500">
+                    {(tradePage - 1) * TRADES_PER_PAGE + 1}–{Math.min(tradePage * TRADES_PER_PAGE, trades.length)} of {trades.length}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setTradePage(p => Math.max(1, p - 1))}
+                      disabled={tradePage === 1}
+                      className="px-2 py-1 text-xs rounded text-gray-400 hover:text-white hover:bg-dark-600 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    >← Prev</button>
+                    {Array.from({ length: totalPages }, (_, i) => i + 1)
+                      .filter(p => p === 1 || p === totalPages || Math.abs(p - tradePage) <= 1)
+                      .reduce<(number | '...')[]>((acc, p, idx, arr) => {
+                        if (idx > 0 && typeof arr[idx - 1] === 'number' && (p as number) - (arr[idx - 1] as number) > 1) acc.push('...')
+                        acc.push(p)
+                        return acc
+                      }, [])
+                      .map((p, i) => p === '...' ? (
+                        <span key={`ellipsis-${i}`} className="px-1 text-xs text-gray-600">…</span>
+                      ) : (
+                        <button
+                          key={p}
+                          onClick={() => setTradePage(p as number)}
+                          className={`w-6 h-6 text-xs rounded transition-colors ${
+                            tradePage === p ? 'bg-brand-500 text-white' : 'text-gray-400 hover:text-white hover:bg-dark-600'
+                          }`}
+                        >{p}</button>
+                      ))
+                    }
+                    <button
+                      onClick={() => setTradePage(p => Math.min(totalPages, p + 1))}
+                      disabled={tradePage === totalPages}
+                      className="px-2 py-1 text-xs rounded text-gray-400 hover:text-white hover:bg-dark-600 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                    >Next →</button>
+                  </div>
+                </div>
+              )}
+            </>
+          )
+        })()}
       </div>
 
       {/* Recent Signals */}

@@ -76,7 +76,83 @@ async def _fetch_ohlcv_broker(
             logger.warning(f"[resolver] broker={broker_name} {symbol}/{tf} OHLCV failed: {exc}")
         if tf != "1h" and timeframe in _SUB_HOUR:
             logger.info(f"[resolver] {symbol}/{timeframe} insufficient — retrying with 1h")
-    return None
+
+    # Fallback: yfinance — works for all asset classes without a broker connection.
+    # Covers the common case where IBKR clientId is already held by the API process.
+    return await _fetch_ohlcv_yfinance(symbol, timeframe, since)
+
+
+_YF_INTERVAL_MAP: dict[str, str] = {
+    "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+    "1h": "60m", "1Hour": "60m", "4h": "60m", "1d": "1d", "1w": "1wk",
+}
+_REAL_FX = {
+    "USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
+    "HKD", "SGD", "MXN", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF",
+}
+
+
+def _to_yf_ticker(symbol: str) -> str:
+    """Convert trading symbol to yfinance ticker (mirrors models/trainer.py logic)."""
+    if "/" in symbol:
+        base, quote = symbol.split("/", 1)
+        base, quote = base.upper(), quote.upper()
+        if base in _REAL_FX and quote in _REAL_FX:
+            return f"{base}{quote}=X"
+        quote_yf = "USD" if quote in ("USDT", "USDC", "BUSD") else quote
+        return f"{base}-{quote_yf}"
+    # 6-char all-alpha with no slash → IBKR-style forex (e.g. GBPUSD)
+    if len(symbol) == 6 and symbol.isalpha():
+        return f"{symbol}=X"
+    return symbol
+
+
+async def _fetch_ohlcv_yfinance(
+    symbol: str,
+    timeframe: str,
+    since: datetime.datetime,
+):
+    """yfinance fallback when broker OHLCV is unavailable."""
+    try:
+        import yfinance as yf
+        import pandas as pd
+    except ImportError:
+        return None
+
+    ticker = _to_yf_ticker(symbol)
+    yf_interval = _YF_INTERVAL_MAP.get(timeframe, "1d")
+    days = max(14, int((datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - since).total_seconds() / 86400) + 5)
+    # Cap at yfinance intraday limits (60m max 730d, 1m max 7d)
+    if yf_interval in ("1m",):
+        days = min(days, 7)
+    elif yf_interval in ("60m", "5m", "15m", "30m"):
+        days = min(days, 729)
+
+    try:
+        df = yf.download(ticker, period=f"{days}d", interval=yf_interval,
+                         progress=False, auto_adjust=True)
+        if df is None or df.empty:
+            logger.warning(f"[resolver:yf] No data for {ticker} ({yf_interval})")
+            return None
+        df = df.rename(columns=str.lower)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] for c in df.columns]
+        df = df[["open", "high", "low", "close", "volume"]].dropna()
+        df.index = pd.to_datetime(df.index)
+        if hasattr(df.index, "tz") and df.index.tz is not None:
+            df.index = df.index.tz_convert("UTC").tz_localize(None)
+        # Resample 4h since yfinance only offers 1h natively
+        if timeframe == "4h" and yf_interval == "60m":
+            df = df.resample("4h").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            ).dropna()
+        since_naive = since.replace(tzinfo=None)
+        df = df[df.index >= since_naive]
+        logger.info(f"[resolver:yf] {ticker} ({yf_interval}): {len(df)} rows")
+        return df if len(df) >= 2 else None
+    except Exception as exc:
+        logger.warning(f"[resolver:yf] fetch failed for {ticker}: {exc}")
+        return None
 
 
 def _resolve_outcome(

@@ -50,43 +50,45 @@ celery_app.conf.beat_schedule = {
 }
 
 
-# ── Celery prefork fix ───────────────────────────────────────────────────────
-# When Celery forks a worker process it inherits the SQLAlchemy async engine
-# from the parent.  The asyncpg connections inside that engine are bound to the
-# parent's event loop which no longer exists in the child, causing:
-#   "Future attached to a different loop"
-# Fix: dispose the inherited engine immediately after each fork so the child
-# creates fresh connections on its own event loop when it first needs them.
+# ── Post-fork worker initialization ─────────────────────────────────────────
+# Runs once in each Celery forked worker process immediately after the fork.
+# Three concerns:
+#   1. asyncpg engine: the parent's connection pool futures are bound to the
+#      parent's event loop (now dead in the child) → dispose so the child
+#      creates fresh asyncpg connections on its own event loop.
+#   2. IBKR clientId: FastAPI uses ibkr_client_id (default 1). Every Celery
+#      worker must use ibkr_client_id_celery (default 2) so they don't
+#      collide with the FastAPI singleton connection (IBKR error 326).
+#   3. Broker singletons: the cached IBKRClient from the parent (clientId 1)
+#      must be evicted so the Celery task creates a fresh one with clientId 2.
 from celery.signals import worker_process_init
+import os
+
 
 @worker_process_init.connect
-def _reset_db_engine_on_fork(**kwargs):
-    """Dispose stale asyncpg connections inherited from the parent process."""
+def _init_worker_process(**kwargs):
+    """One-time post-fork setup for each Celery worker process."""
+    # 1. Mark this process as a Celery worker so IBKRClient picks up the
+    #    celery-specific clientId instead of the FastAPI one.
+    os.environ["CELERY_WORKER_PROCESS"] = "1"
+
+    # 2. Evict broker singletons built in the parent (wrong clientId).
     try:
-        from db.database import engine
+        from brokers import invalidate_broker_cache
+        invalidate_broker_cache()
+    except Exception:
+        pass
+
+    # 3. Dispose inherited asyncpg connections (bound to the dead parent loop).
+    try:
         import asyncio
+        from db.database import engine
         loop = asyncio.new_event_loop()
         loop.run_until_complete(engine.dispose())
         loop.close()
     except Exception:
-        pass  # best-effort — a missing engine is not fatal here
+        pass
+
 
 if __name__ == "__main__":
     celery_app.start()
-
-
-# ── Fix: asyncpg event-loop mismatch after Celery prefork ────────────────────
-# engine and AsyncSessionLocal are created at module import time in db/database.py.
-# When Celery forks a worker, the child inherits the parent's asyncpg connection
-# pool whose futures are bound to the parent's (now-closed) event loop.
-# Disposing the pool immediately after fork forces fresh connections to be
-# created inside the child's own event loop on first use.
-from celery.signals import worker_process_init  # noqa: E402
-
-@worker_process_init.connect
-def _reset_db_pool_after_fork(**kwargs):
-    try:
-        from db.database import engine
-        engine.sync_engine.dispose()
-    except Exception:
-        pass

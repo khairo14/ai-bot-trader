@@ -830,6 +830,7 @@ class ForwardEngine:
             # LONG exits sell at the bid → check bid against SL/TP.
             # SHORT exits buy at the ask → check ask against SL/TP.
             exit_price = bid_price if is_long else ask_price
+            reason = None  # reset per iteration — prevents UnboundLocalError when SL xor TP is set
 
             # ── Trailing stop: ratchet stop_loss with price movement ─────────
             # Only moves the stop in the favourable direction (never widens it).
