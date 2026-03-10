@@ -174,13 +174,32 @@ class ForwardEngine:
             logger.warning(f"[ForwardEngine] Could not fetch balance from {signal.broker}: {_bal_err} — using fallback")
             broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
             balance = self._paper_balance.get(broker_key, _cfg.paper_initial_balance)
-        try:
-            positions = await broker.get_positions()
-            open_count = len(positions)
-        except Exception:
-            open_count = len(self._paper_positions)  # fallback
-
+        # Count open positions for this broker from the DB (authoritative source).
+        # broker.get_positions() returns ALL non-zero exchange balances which
+        # includes pre-funded testnet assets unrelated to bot trades, causing false
+        # "Max open positions" rejections across brokers.  When no DB session is
+        # available, fall back to in-memory paper positions filtered by broker.
         broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
+        if db_session is not None:
+            try:
+                _open_q = await db_session.execute(
+                    select(func.count()).where(
+                        Trade.status == OrderStatus.OPEN,
+                        Trade.broker == signal.broker,
+                    )
+                )
+                open_count = int(_open_q.scalar_one() or 0)
+            except Exception as _cnt_err:
+                logger.debug(f"[ForwardEngine] Could not count open positions from DB: {_cnt_err}")
+                open_count = sum(
+                    1 for t in self._paper_positions.values()
+                    if (t.broker.value if hasattr(t.broker, 'value') else str(t.broker)) == broker_key
+                )
+        else:
+            open_count = sum(
+                1 for t in self._paper_positions.values()
+                if (t.broker.value if hasattr(t.broker, 'value') else str(t.broker)) == broker_key
+            )
 
         # F-083: Compute asset-class exposure so RiskManager Level 3
         # (max_exposure_per_class_pct) actually fires.  Previously always 0.0.
