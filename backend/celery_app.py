@@ -79,13 +79,32 @@ def _init_worker_process(**kwargs):
     except Exception:
         pass
 
-    # 3. Dispose inherited asyncpg connections (bound to the dead parent loop).
+    # 3. Dispose inherited asyncpg connections AND recreate the engine with
+    #    NullPool so Celery tasks don't share pooled connections across
+    #    multiple asyncio.run() calls (each call creates/destroys a loop,
+    #    leaving pooled connections bound to a dead loop → "Future attached
+    #    to a different loop").  NullPool opens a fresh DB connection per
+    #    session and closes it immediately — correct for short-lived tasks.
     try:
         import asyncio
-        from db.database import engine
+        import db.database as _db
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+        from sqlalchemy.pool import NullPool
+        # Dispose old pool gracefully
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(engine.dispose())
+        loop.run_until_complete(_db.engine.dispose())
         loop.close()
+        # Replace with a NullPool engine (no connection reuse between tasks)
+        _db.engine = create_async_engine(
+            _db.async_db_url,
+            echo=False,
+            poolclass=NullPool,
+        )
+        _db.AsyncSessionLocal = async_sessionmaker(
+            _db.engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
     except Exception:
         pass
 

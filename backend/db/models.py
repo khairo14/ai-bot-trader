@@ -130,7 +130,10 @@ class TradeOutcome(Base):
     take_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     trailing_stop_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # e.g. 2.0 → trail by 2%
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    outcome: Mapped[Optional[OutcomeResult]] = mapped_column(SAEnum(OutcomeResult), nullable=True)
+    outcome: Mapped[Optional[OutcomeResult]] = mapped_column(
+        SAEnum(OutcomeResult, values_callable=lambda x: [e.value for e in x]),
+        nullable=True,
+    )
     pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # % gain/loss
     candles_held: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ml_label: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)   # 1=win, 0=loss (for retraining)
