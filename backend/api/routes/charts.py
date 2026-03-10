@@ -240,11 +240,18 @@ async def get_candles(
                 # IBKR Gateway singleton is warming up or recovering from a pacing delay.
                 df = None
                 for _attempt in range(3):
-                    df = await client.get_ohlcv(
-                        symbol.upper(), timeframe=timeframe,
-                        limit=ibkr_limit, since=since,
-                    )
-                    if not df.empty:
+                    try:
+                        df = await client.get_ohlcv(
+                            symbol.upper(), timeframe=timeframe,
+                            limit=ibkr_limit, since=since,
+                        )
+                    except Exception as _ohlcv_exc:
+                        logger.warning(
+                            f"[Charts] IBKR get_ohlcv error for {symbol}/{timeframe} "
+                            f"(attempt {_attempt + 1}/3): {_ohlcv_exc}"
+                        )
+                        df = None
+                    if df is not None and not df.empty:
                         break
                     if _attempt < 2:
                         logger.info(
