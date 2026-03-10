@@ -431,22 +431,19 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     // the main chart (MACD starts at candle 25+, signal at 33+), so the same
     // logical index maps to a different timestamp in each chart — causing the
     // MACD line to appear shifted relative to the candles beneath it.
-    // Guard against infinite feedback: setVisibleRange fires subscribeVisibleTimeRangeChange
-    // synchronously, so without this flag A→setRange(B)→B fires→setRange(A)→∞ loop.
-    let syncing = false
+    // One-way sync: main chart → sub-chart only.
+    // Two-way sync causes zoom: the sub-chart's data starts later than the main
+    // chart's (RSI at bar 14, MACD at bar 26). When the main chart scrolls left
+    // past the sub-chart's first data point, LWC reports a narrower visible range
+    // for the sub-chart (from its first bar, not from the empty space). Syncing
+    // that narrower range back to the main chart zooms it in.
+    // The sub-chart time scale is hidden (visible: false), so the user cannot drag
+    // it directly — one-way sync is sufficient.
     mc.timeScale().subscribeVisibleTimeRangeChange(range => {
-      if (syncing || !range || !subChart.current) return
-      // Guard: setVisibleRange on an empty chart calls logicalRangeForTimeRange
-      // which calls ensureNotNull(firstIndex()) — firstIndex is null when the
-      // sub-chart has no data, throwing "Value is null" synchronously inside
-      // the main chart's setData() call (because setData fires this event).
+      if (!range || !subChart.current) return
+      // Guard: setVisibleRange on an empty chart throws "Value is null"
       if (subChart.current.timeScale().getVisibleLogicalRange() === null) return
-      syncing = true; try { subChart.current.timeScale().setVisibleRange(range) } catch {} ; syncing = false
-    })
-    sc.timeScale().subscribeVisibleTimeRangeChange(range => {
-      if (syncing || !range || !mainChart.current) return
-      if (mainChart.current.timeScale().getVisibleLogicalRange() === null) return
-      syncing = true; try { mainChart.current.timeScale().setVisibleRange(range) } catch {} ; syncing = false
+      try { subChart.current.timeScale().setVisibleRange(range) } catch {}
     })
 
     // ResizeObserver — responds to grid cell size changes (not just window resize)

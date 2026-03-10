@@ -56,6 +56,7 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
   const [open, setOpen] = useState(false)
   const [notifications, setNotifications] = useState<Notif[]>([])
   const [unread, setUnread] = useState(0)
+  const [expandedId, setExpandedId] = useState<number | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   const fetchNotifications = useCallback(async () => {
@@ -110,6 +111,7 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
     e.stopPropagation()
     await axios.delete(`/api/notifications/${id}`).catch(() => null)
     setNotifications(prev => prev.filter(n => n.id !== id))
+    if (expandedId === id) setExpandedId(null)
     setUnread(prev => {
       const wasUnread = notifications.find(n => n.id === id && !n.is_read)
       return wasUnread ? Math.max(0, prev - 1) : prev
@@ -139,7 +141,7 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
 
       {/* Dropdown */}
       {open && (
-        <div className={`absolute w-80 bg-dark-800 border border-dark-600 rounded-xl shadow-2xl z-50 overflow-hidden ${
+        <div className={`absolute w-96 bg-dark-800 border border-dark-600 rounded-xl shadow-2xl z-50 overflow-hidden ${
           collapsed ? 'left-full ml-2 bottom-0' : 'bottom-full left-0 mb-2'
         }`}>
           {/* Header */}
@@ -167,7 +169,10 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
               notifications.map(n => (
                 <div
                   key={n.id}
-                  onClick={() => !n.is_read && markRead(n.id)}
+                  onClick={() => {
+                    setExpandedId(prev => prev === n.id ? null : n.id)
+                    if (!n.is_read) markRead(n.id)
+                  }}
                   className={`group relative flex items-start gap-3 px-4 py-3 border-b border-dark-700 last:border-0 cursor-pointer transition-colors ${
                     n.is_read ? 'hover:bg-dark-700/50' : 'bg-dark-700/40 hover:bg-dark-700/70'
                   }`}
@@ -187,7 +192,17 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
                     <p className={`text-xs font-semibold truncate ${n.is_read ? 'text-gray-400' : 'text-white'}`}>
                       {n.title}
                     </p>
-                    <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.message}</p>
+                    <p className={`text-xs text-gray-400 mt-0.5 ${
+                      expandedId === n.id ? 'whitespace-pre-wrap break-words' : 'line-clamp-2'
+                    }`}>{n.message}</p>
+                    {n.message && n.message.length > 80 && (
+                      <button
+                        onClick={e => { e.stopPropagation(); setExpandedId(prev => prev === n.id ? null : n.id) }}
+                        className="text-[10px] text-brand-400 hover:text-brand-300 mt-0.5 transition-colors"
+                      >
+                        {expandedId === n.id ? 'Show less' : 'Show more'}
+                      </button>
+                    )}
                     <p className="text-[10px] text-gray-600 mt-1">{timeAgo(n.created_at)}</p>
                   </div>
 

@@ -198,14 +198,14 @@ async def get_candles(
         since = until - 200 * tf_ms  # default: last 200 candles
 
     # Cache check — return immediately for duplicate/recent requests.
-    # IBKR is excluded: pacing delays and connection warmup mean the first
-    # request often returns empty; we must always let it retry the broker.
+    # IBKR is included: we only ever store non-empty results (see _cache_set
+    # guard below), so a cache hit is always valid data — no risk of serving
+    # an empty/warmup response.
     ck = _cache_key(symbol.upper(), timeframe, broker.lower(), since, until, tf_ms)
-    if broker.lower() != "ibkr":
-        cached = _cache_get(ck)
-        if cached is not None:
-            logger.debug(f"[Charts] cache hit {symbol}/{timeframe}")
-            return cached
+    cached = _cache_get(ck)
+    if cached is not None:
+        logger.debug(f"[Charts] cache hit {symbol}/{timeframe}")
+        return cached
     try:
         # Always use production Binance for OHLCV — testnet has <30 days history
         if broker.lower() == "binance":
@@ -256,9 +256,9 @@ async def get_candles(
                     if _attempt < 2:
                         logger.info(
                             f"[Charts] IBKR returned empty for {symbol}/{timeframe} "
-                            f"— retrying in 3 s (attempt {_attempt + 1}/3, Gateway warmup)"
+                            f"— retrying in 1 s (attempt {_attempt + 1}/3, Gateway warmup)"
                         )
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(1)
                 if df is not None and not df.empty:
                     for ts, row in df.iterrows():
                         try:
@@ -387,12 +387,9 @@ async def get_candles(
             "candle_count": len(candles),
         }
 
-        # Only cache non-empty results — empty responses from IBKR during
-        # connection warmup or pacing delays must not be stored, otherwise
-        # Refresh within the TTL window also returns a blank chart.
-        # Also skip caching for IBKR entirely: its pacing restrictions and
-        # connection warmup mean repeated retries are expected and desirable.
-        if candles and broker.lower() != "ibkr":
+        # Only cache non-empty results — empty IBKR warmup responses are never
+        # stored, so a cache hit is always genuine data that is safe to serve.
+        if candles:
             _cache_set(ck, result, _cache_ttl(tf_ms))
         return result
 
