@@ -304,32 +304,46 @@ async def get_candles(
                 except Exception:
                     pass
 
-        # Sort by timestamp and deduplicate — IBKR can return out-of-order or
-        # duplicate bars (e.g. DST transitions, reconnect overlaps).  A single
-        # duplicate timestamp makes lightweight-charts setData() throw, which the
-        # frontend catch block reports as the generic 'Failed to load chart data.'.
+        # Sort by timestamp and deduplicate at SECOND resolution — IBKR can
+        # return out-of-order or sub-second duplicate bars (DST transitions,
+        # reconnect overlaps).  lightweight-charts requires strictly-increasing
+        # integer `time` values (in seconds); a single collision makes setData()
+        # throw 'Value of property time must be greater of the previous one',
+        # which the frontend catch reports as 'Failed to load chart data.'.
+        # We dedup by the final `time` (t_ms // 1000) rather than by raw ms so
+        # two bars with the same second but different sub-second offsets don't
+        # both appear to be unique and then collide in the output array.
         all_rows.sort(key=lambda x: x[0])
-        seen_times: set[int] = set()
+        seen_secs: set[int] = set()
         deduped: list[tuple[int, object]] = []
         for t_ms, row in all_rows:
-            if t_ms not in seen_times:
-                seen_times.add(t_ms)
+            t_sec = t_ms // 1000
+            if t_sec not in seen_secs:
+                seen_secs.add(t_sec)
                 deduped.append((t_ms, row))
         all_rows = deduped
 
-        candles = [
-            {
-                "time": t_ms // 1000,
-                "open":   round(float(row["open"]),  8),  # type: ignore[index]
-                "high":   round(float(row["high"]),  8),  # type: ignore[index]
-                "low":    round(float(row["low"]),   8),  # type: ignore[index]
-                "close":  round(float(row["close"]), 8),  # type: ignore[index]
-                # IBKR MIDPOINT bars report -1 volume when real volume is unavailable;
-                # clamp to 0 so the histogram series never renders negative bars.
-                "volume": max(0.0, round(float(row.get("volume", 0)), 4)),  # type: ignore[union-attr]
-            }
-            for t_ms, row in all_rows[:MAX_CANDLES]
-        ]
+        import math as _math
+        candles = []
+        for t_ms, row in all_rows[:MAX_CANDLES]:
+            try:
+                o = round(float(row["open"]),  8)  # type: ignore[index]
+                h = round(float(row["high"]),  8)  # type: ignore[index]
+                lo = round(float(row["low"]),   8)  # type: ignore[index]
+                c = round(float(row["close"]), 8)  # type: ignore[index]
+                # IBKR MIDPOINT bars: volume=-1 when unavailable; clamp to 0.
+                # Also skip any bar where OHLC contains NaN/Inf (ib_insync
+                # sentinel values) or where all prices are 0 (empty bar) —
+                # these cause NaN to propagate through EMA/RSI on the frontend
+                # and make lightweight-charts throw 'Value is null'.
+                vol = max(0.0, round(float(row.get("volume", 0)), 4))  # type: ignore[union-attr]
+                if any(_math.isnan(v) or _math.isinf(v) for v in (o, h, lo, c)):
+                    continue
+                if o == 0.0 and h == 0.0 and lo == 0.0 and c == 0.0:
+                    continue
+            except Exception:
+                continue
+            candles.append({"time": t_ms // 1000, "open": o, "high": h, "low": lo, "close": c, "volume": vol})
 
         # F-092: Forward-fill gaps in IBKR OHLCV for chart display only.
         # IBKR returns sparse bars during thin-liquidity or off-hours periods,

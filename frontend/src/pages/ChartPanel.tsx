@@ -614,27 +614,40 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
         candles.map(c => ({ time: c.time as any, value: c.volume, color: c.close >= c.open ? '#22c55e33' : '#ef444433' }))
       )
 
-      const closes = candles.map(c => c.close)
+      // Sanitise closes: replace null/NaN/Infinity (IBKR sentinel values) with
+      // the nearest previous valid close so EMA/RSI/MACD don't propagate NaN.
+      const rawCloses = candles.map(c => c.close)
+      let lastValid = rawCloses.find(v => v != null && isFinite(v)) ?? 0
+      const closes = rawCloses.map(v => {
+        if (v == null || !isFinite(v)) return lastValid
+        lastValid = v; return v
+      })
+
+      // Each indicator series is wrapped in its own try/catch so that an error
+      // on one (e.g. lightweight-charts "Value is null" for an edge-case value)
+      // does not prevent subsequent indicators from being rendered.
+      // isOK(v) rejects null AND NaN/Infinity which all pass a plain !== null check.
+      const isOK = (v: number | null): v is number => v !== null && isFinite(v)
 
       const ema20 = computeEMA(closes, 20)
       const ema50 = computeEMA(closes, 50)
-      ema20Ref.current?.setData(candles.flatMap((c, i) => ema20[i] !== null ? [{ time: c.time as any, value: ema20[i]! }] : []))
-      ema50Ref.current?.setData(candles.flatMap((c, i) => ema50[i] !== null ? [{ time: c.time as any, value: ema50[i]! }] : []))
+      try { ema20Ref.current?.setData(candles.flatMap((c, i) => isOK(ema20[i]) ? [{ time: c.time as any, value: ema20[i]! }] : [])) } catch {}
+      try { ema50Ref.current?.setData(candles.flatMap((c, i) => isOK(ema50[i]) ? [{ time: c.time as any, value: ema50[i]! }] : [])) } catch {}
 
       const bb = computeBB(closes)
-      bbUpperRef.current?.setData(candles.flatMap((c, i) => bb.upper[i] !== null ? [{ time: c.time as any, value: bb.upper[i]! }] : []))
-      bbMidRef.current?.setData(candles.flatMap((c, i) => bb.mid[i] !== null   ? [{ time: c.time as any, value: bb.mid[i]! }]   : []))
-      bbLowerRef.current?.setData(candles.flatMap((c, i) => bb.lower[i] !== null ? [{ time: c.time as any, value: bb.lower[i]! }] : []))
+      try { bbUpperRef.current?.setData(candles.flatMap((c, i) => isOK(bb.upper[i]) ? [{ time: c.time as any, value: bb.upper[i]! }] : [])) } catch {}
+      try { bbMidRef.current?.setData(candles.flatMap((c, i)   => isOK(bb.mid[i])   ? [{ time: c.time as any, value: bb.mid[i]! }]   : [])) } catch {}
+      try { bbLowerRef.current?.setData(candles.flatMap((c, i) => isOK(bb.lower[i]) ? [{ time: c.time as any, value: bb.lower[i]! }] : [])) } catch {}
 
       const rsi = computeRSI(closes)
-      rsiRef.current?.setData(candles.flatMap((c, i) => rsi[i] !== null ? [{ time: c.time as any, value: rsi[i]! }] : []))
+      try { rsiRef.current?.setData(candles.flatMap((c, i) => isOK(rsi[i]) ? [{ time: c.time as any, value: rsi[i]! }] : [])) } catch {}
 
       const { macd, signal: macdSig, hist } = computeMACD(closes)
-      macdLineRef.current?.setData(candles.flatMap((c, i) => macd[i] !== null ? [{ time: c.time as any, value: macd[i]! }] : []))
-      macdSignRef.current?.setData(candles.flatMap((c, i) => macdSig[i] !== null ? [{ time: c.time as any, value: macdSig[i]! }] : []))
-      macdHistRef.current?.setData(candles.flatMap((c, i) => hist[i] !== null ? [{
+      try { macdLineRef.current?.setData(candles.flatMap((c, i) => isOK(macd[i])    ? [{ time: c.time as any, value: macd[i]! }]    : [])) } catch {}
+      try { macdSignRef.current?.setData(candles.flatMap((c, i) => isOK(macdSig[i]) ? [{ time: c.time as any, value: macdSig[i]! }] : [])) } catch {}
+      try { macdHistRef.current?.setData(candles.flatMap((c, i) => isOK(hist[i]) ? [{
         time: c.time as any, value: hist[i]!, color: hist[i]! >= 0 ? '#22c55e66' : '#ef444466',
-      }] : []))
+      }] : [])) } catch {}
 
       const markers: SignalMarker[] = signalRes.data.markers
       setSignalCount(markers.length)
