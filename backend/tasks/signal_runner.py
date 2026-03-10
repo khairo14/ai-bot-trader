@@ -409,6 +409,7 @@ def run_signals(self):
                             is_paper=strat.is_paper,
                             db_session=session,
                             position_size_multiplier=port_weight,
+                            strategy_params=params,
                         ) if allow_execution else None
 
                         if trade is not None:

@@ -148,6 +148,7 @@ class ForwardEngine:
         is_paper: bool,
         db_session=None,
         position_size_multiplier: float = 1.0,
+        strategy_params: dict | None = None,
     ) -> Optional[Trade]:
         """
         Process a signal based on execution mode.
@@ -332,12 +333,34 @@ class ForwardEngine:
                             f"{_existing.symbol} id={_existing.id}: {_rev_err}"
                         )
                 else:
-                    # G1: same-direction position already OPEN — block pyramiding
-                    logger.info(
-                        f"[ForwardEngine] G1: Same-direction duplicate blocked: "
-                        f"{signal.signal} {signal.symbol} — already {_existing.side.upper()} id={_existing.id}"
-                    )
-                    return None
+                    # G1: same-direction position already OPEN — block pyramiding unless
+                    # ML confidence is high enough to justify a fresh re-entry.
+                    # g1_override_min_confidence in strategy params opts-in to this;
+                    # when confidence >= threshold, allow the new entry trusting the model's
+                    # own SL/TP fully (no artificial tightening — we trust the model).
+                    _g1_threshold = None
+                    if strategy_params:
+                        try:
+                            _g1_threshold = float(strategy_params["g1_override_min_confidence"])
+                        except (KeyError, TypeError, ValueError):
+                            pass
+                    if (
+                        _g1_threshold is not None
+                        and signal.confidence is not None
+                        and signal.confidence >= _g1_threshold
+                    ):
+                        logger.info(
+                            f"[ForwardEngine] G1 overridden by ML confidence "
+                            f"({signal.confidence:.2f} >= {_g1_threshold}): allowing re-entry "
+                            f"{signal.signal} {signal.symbol} alongside id={_existing.id}"
+                        )
+                        # Fall through — new entry proceeds with signal's own SL/TP
+                    else:
+                        logger.info(
+                            f"[ForwardEngine] G1: Same-direction duplicate blocked: "
+                            f"{signal.signal} {signal.symbol} — already {_existing.side.upper()} id={_existing.id}"
+                        )
+                        return None
         elif signal.symbol in self._paper_positions:
             _existing = self._paper_positions[signal.symbol]
             _existing_is_long = _existing.side in _long_sides
@@ -353,12 +376,29 @@ class ForwardEngine:
                         f"[ForwardEngine] Failed to close opposing position for {_existing.symbol}: {_rev_err}"
                     )
             else:
-                # G1: same-direction in-memory position exists — block pyramiding
-                logger.info(
-                    f"[ForwardEngine] G1: Same-direction duplicate blocked (in-memory): "
-                    f"{signal.signal} {signal.symbol} — already {_existing.side.upper()}"
-                )
-                return None
+                # G1 in-memory path — same override logic
+                _g1_threshold_mem = None
+                if strategy_params:
+                    try:
+                        _g1_threshold_mem = float(strategy_params["g1_override_min_confidence"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                if (
+                    _g1_threshold_mem is not None
+                    and signal.confidence is not None
+                    and signal.confidence >= _g1_threshold_mem
+                ):
+                    logger.info(
+                        f"[ForwardEngine] G1 overridden by ML confidence "
+                        f"({signal.confidence:.2f} >= {_g1_threshold_mem}): allowing re-entry "
+                        f"{signal.signal} {signal.symbol} (in-memory)"
+                    )
+                else:
+                    logger.info(
+                        f"[ForwardEngine] G1: Same-direction duplicate blocked (in-memory): "
+                        f"{signal.signal} {signal.symbol} — already {_existing.side.upper()}"
+                    )
+                    return None
 
         # G5: IBKR forex minimum lot size pre-check (25,000 base currency units)
         _IBKR_FOREX_MIN_LOT = 25_000.0
@@ -828,17 +868,36 @@ class ForwardEngine:
 
     async def _monitor_sl_tp_inner(self, db_session) -> int:
         from sqlalchemy import select as _sel
+        from db.models import Strategy as _StratModel
 
+        # Fetch ALL open trades — we need trades without SL/TP too for time-based exits.
         open_q = await db_session.execute(
-            _sel(Trade).where(
-                Trade.status == OrderStatus.OPEN,
-                # Only monitor trades that have at least one guard level
-                (Trade.stop_loss.isnot(None) | Trade.take_profit.isnot(None)),
-            )
+            _sel(Trade).where(Trade.status == OrderStatus.OPEN)
         )
         open_trades: list = open_q.scalars().all()
         if not open_trades:
             return 0
+
+        # Cache strategy params by strategy_name to avoid repeated DB hits.
+        _strat_params_cache: dict[str, dict] = {}
+        _strategy_names = {t.strategy_name for t in open_trades if t.strategy_name}
+        if _strategy_names:
+            _sq = await db_session.execute(
+                _sel(_StratModel).where(_StratModel.name.in_(_strategy_names))
+            )
+            for _sr in _sq.scalars().all():
+                _strat_params_cache[_sr.name] = _sr.parameters or {}
+
+        # Helper: safe float from strategy params
+        def _param_float(strategy_name: str | None, key: str) -> float | None:
+            if not strategy_name:
+                return None
+            params = _strat_params_cache.get(strategy_name, {})
+            try:
+                v = params.get(key)
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
 
         # NOTE: "long" is an alias for "buy" used by the DB rebuild script.
         _long_sides = {"buy", "cover", "long"}
@@ -853,6 +912,16 @@ class ForwardEngine:
         from core.engine.price_stream import price_stream_manager as _psm
 
         for trade in open_trades:
+            # Skip price fetch entirely if this trade has nothing to monitor:
+            # no SL, no TP, no trailing stop, and no time-based exit params.
+            _has_sl_tp  = trade.stop_loss is not None or trade.take_profit is not None or trade.trailing_stop_pct is not None
+            _has_time   = (
+                _param_float(trade.strategy_name, "breakeven_after_hours") is not None
+                or _param_float(trade.strategy_name, "max_hold_hours") is not None
+            )
+            if not _has_sl_tp and not _has_time:
+                continue
+
             try:
                 broker_name = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
                 _cache_key = (broker_name, trade.symbol)
@@ -981,6 +1050,63 @@ class ForwardEngine:
                     reason = "take_profit"
                 elif not is_long and exit_price <= trade.take_profit:
                     reason = "take_profit"
+
+            # ── Time-based exits (breakeven + max-hold) ──────────────────────
+            # These run regardless of whether SL/TP fired above.
+            # opened_at is tz-naive UTC stored in DB.
+            if reason is None and trade.opened_at is not None and trade.entry_price is not None:
+                _now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                _age_hours = (_now_utc - trade.opened_at).total_seconds() / 3600.0
+
+                _breakeven_h = _param_float(trade.strategy_name, "breakeven_after_hours")
+                _maxhold_h   = _param_float(trade.strategy_name, "max_hold_hours")
+
+                # max_hold: force-close the position — capital has been tied up too long.
+                if _maxhold_h is not None and _age_hours >= _maxhold_h:
+                    reason = "max_hold_timeout"
+                    logger.info(
+                        f"[ForwardEngine] Max-hold timeout: {trade.symbol} id={trade.id} "
+                        f"open {_age_hours:.1f}h >= {_maxhold_h}h — force closing"
+                    )
+
+                # breakeven: slide SL to entry price so the worst outcome is a scratch.
+                # Only acts when the position is not already at or past breakeven.
+                elif (
+                    _breakeven_h is not None
+                    and _age_hours >= _breakeven_h
+                    and (trade.stop_loss is None or (
+                        is_long  and trade.stop_loss < trade.entry_price or
+                        not is_long and trade.stop_loss > trade.entry_price
+                    ))
+                ):
+                    _old_sl = trade.stop_loss
+                    trade.stop_loss = trade.entry_price
+                    db_session.add(trade)
+                    await db_session.flush()
+                    logger.info(
+                        f"[ForwardEngine] Breakeven: {trade.symbol} id={trade.id} "
+                        f"open {_age_hours:.1f}h >= {_breakeven_h}h — SL moved "
+                        f"{_old_sl} → {trade.entry_price} (entry)"
+                    )
+                    # Sync to broker's standing stop order
+                    try:
+                        await broker.update_stop_loss(
+                            trade.symbol, trade.side, trade.quantity, trade.entry_price
+                        )
+                    except Exception as _be_err:
+                        logger.debug(f"[ForwardEngine] Breakeven broker SL sync failed: {_be_err}")
+                    try:
+                        from api.websocket import manager as _ws_mgr
+                        await _ws_mgr.broadcast("trailing_stop_moved", {
+                            "trade_id": trade.id, "symbol": trade.symbol,
+                            "old_stop": round(_old_sl, 8) if _old_sl else None,
+                            "new_stop": round(trade.entry_price, 8),
+                            "direction": "breakeven",
+                            "broker": trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker),
+                        })
+                    except Exception:
+                        pass
+                    # Don't close yet — let price reach the new breakeven SL naturally
 
             if reason is None:
                 continue

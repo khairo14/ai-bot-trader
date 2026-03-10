@@ -426,12 +426,16 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     macdSignRef.current = sc.addSeries(LineSeries, { color: '#ec4899', lineWidth: 1, priceLineVisible: false, lastValueVisible: true, priceFormat: macdPriceFmt, visible: false })
     macdHistRef.current = sc.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: true, priceFormat: macdPriceFmt, visible: false })
 
-    // Sync scroll/zoom between panels
-    mc.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (range && subChart.current) subChart.current.timeScale().setVisibleLogicalRange(range)
+    // Sync scroll/zoom between panels using TIME range (not logical index).
+    // Logical-index sync breaks because the sub chart has fewer data points than
+    // the main chart (MACD starts at candle 25+, signal at 33+), so the same
+    // logical index maps to a different timestamp in each chart — causing the
+    // MACD line to appear shifted relative to the candles beneath it.
+    mc.timeScale().subscribeVisibleTimeRangeChange(range => {
+      if (range && subChart.current) subChart.current.timeScale().setVisibleRange(range)
     })
-    sc.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (range && mainChart.current) mainChart.current.timeScale().setVisibleLogicalRange(range)
+    sc.timeScale().subscribeVisibleTimeRangeChange(range => {
+      if (range && mainChart.current) mainChart.current.timeScale().setVisibleRange(range)
     })
 
     // ResizeObserver — responds to grid cell size changes (not just window resize)
