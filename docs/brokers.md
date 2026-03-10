@@ -27,7 +27,10 @@ Every broker connector must implement these methods:
 | `place_order(symbol, side, qty, order_type, price)` | Place a new order |
 | `cancel_order(order_id)` | Cancel an open order |
 | `get_order_status(order_id)` | Check order fill status |
-| `stream_prices(symbols, callback)` | WebSocket live price stream |
+| `stream_prices(symbols, callback)` | WebSocket live price stream — used by `PriceStreamManager` |
+| `get_bid_ask(symbol)` | Live best bid and ask prices |
+| `update_stop_loss(symbol, side, quantity, new_sl_price)` | Move stop loss on an open position (trailing stop sync) |
+| `close_position(symbol, side, quantity)` | Close an open position at market price |
 
 ---
 
@@ -185,8 +188,11 @@ IBKR_HOST=127.0.0.1
 
 IBKR_PORT=7497          # 7497 = paper trading, 7496 = live trading
 IBKR_CLIENT_ID=1        # Unique ID per connection; balance fetches use random 50-99 to avoid collisions
+IBKR_CLIENT_ID_CELERY=2 # Must differ from IBKR_CLIENT_ID — used by Celery workers (validated at startup)
 IBKR_PAPER=true         # Set to false for live trading
 ```
+
+> **IBKR Client ID Collision:** IB Gateway rejects a second connection that shares a client ID with an existing session. The bot validates at startup that `IBKR_CLIENT_ID ≠ IBKR_CLIENT_ID_CELERY` and raises a `ValueError` if they match, preventing silent Celery order failures.
 
 ### Minimum Balance Requirements
 - **Paper account:** No minimum (free, unlimited)
@@ -229,6 +235,48 @@ The Market Scanner enforces a broker-to-watchlist mapping so crypto watchlists a
 | `ibkr` | `us_stocks`, `us_stocks_mid` |
 
 This is enforced in both the backend (`GET /api/scanner/watchlists?broker=binance`) and the frontend (`BROKER_WATCHLISTS` constant in `MarketScanner.tsx`).
+
+---
+
+## Real-Time Price Streaming (`PriceStreamManager`)
+
+`core/engine/price_stream.py` implements a singleton `PriceStreamManager` that maintains one live WebSocket stream per active broker and feeds the SL/TP monitor with sub-second prices.
+
+### How It Works
+
+```
+FastAPI lifespan startup
+  → price_stream_manager.start(AsyncSessionLocal)
+        ↓
+  Every 30s: query DB for OPEN trades → group symbols by broker
+        ↓
+  For each broker with open trades:
+    If no stream task running → launch _stream_worker(broker, symbols)
+    If symbols changed → cancel old task, resubscribe
+        ↓
+  _stream_worker():
+    calls broker.stream_prices(symbols, callback=_update_price)
+    on error: sleep 5s, restart (auto-reconnect)
+        ↓
+  _update_price(symbol, price):
+    _prices[symbol] = price   ← in-process dict, O(1) read
+```
+
+### Usage in `monitor_sl_tp`
+
+```python
+streamed = price_stream_manager.get_price(trade.symbol)
+if streamed is not None:
+    bid = ask = streamed          # use WebSocket mid-price
+else:
+    bid, ask = broker.get_bid_ask(trade.symbol)   # REST fallback
+```
+
+### Important Notes
+
+- `PriceStreamManager` is process-local. Each uvicorn worker maintains its own set of streams. Cross-process state (whether a trade was actually closed) is managed via the PostgreSQL `trades.status` column.
+- If a broker does not have any open trades, its stream is cleanly cancelled to avoid unnecessary connections.
+- On shutdown, the stream background task is cancelled in the lifespan shutdown loop.
 
 ---
 

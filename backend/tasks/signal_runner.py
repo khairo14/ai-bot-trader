@@ -37,6 +37,11 @@ _STRATEGY_CONFLUENCE_DEFAULTS: dict[str, float] = {
     "hybrid_macd_rsi":    0.5,
     "momentum_breakout":  0.5,
     "volatility_squeeze": 0.6,  # breakout after compression — multi-TF helps
+    # Options income strategies emit SELL (non-directional) — higher TFs will
+    # always return HOLD, so confluence suppression must be disabled for them.
+    "covered_call":       0.0,
+    "iron_condor":        0.0,
+    "bull_call_spread":   0.0,
 }
 
 
@@ -292,8 +297,11 @@ def run_signals(self):
                                         pass
                             # Attach trailing_stop_pct to the signal so execute_signal
                             # stores it on the Trade record for live monitoring.
+                            # Priority: static strategy param > dynamic ATR value from _enhance_signal.
                             if _trailing is not None:
                                 sig.trailing_stop_pct = _trailing
+                            # Use sig.trailing_stop_pct (which may be ATR-dynamic) so the
+                            # TradeOutcome resolver applies the same trailing logic as the live trade.
                             session.add(TradeOutcomeModel(
                                 signal_id=db_signal.id,
                                 symbol=sig.symbol,
@@ -303,7 +311,7 @@ def run_signals(self):
                                 entry_price=sig.entry_price,
                                 stop_loss=sig.stop_loss,
                                 take_profit=sig.take_profit,
-                                trailing_stop_pct=_trailing,
+                                trailing_stop_pct=sig.trailing_stop_pct,
                                 resolved=False,
                             ))
 

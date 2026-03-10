@@ -169,7 +169,7 @@ class BullCallSpreadStrategy(BaseStrategy):
             f"Expiry: {expiry[:4]}-{expiry[4:6]}-{expiry[6:]}",
         ]
 
-        return Signal(
+        return self._enhance_signal(Signal(
             symbol=symbol,
             signal="BUY",
             entry_price=round(net_debit, 4),
@@ -196,4 +196,4 @@ class BullCallSpreadStrategy(BaseStrategy):
                     {"action": "SELL", "right": "C", "strike": sell_strike, "premium": round(short_premium, 4)},
                 ],
             },
-        )
+        ), data)  # _enhance_signal: confirmation candle only (options — no trailing stop / S/R snap)

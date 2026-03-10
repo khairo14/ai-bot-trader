@@ -110,7 +110,7 @@ class MeanReversionBBStrategy(BaseStrategy):
                 reasons.append(f"Volume {vol_out.signal}")
 
             confidence = min(score / 3, 1.0)
-            return Signal(
+            return self._enhance_signal(Signal(
                 symbol=symbol, signal="BUY",
                 entry_price=current_price,
                 stop_loss=round(current_price - atr_mults["sl"] * atr_val, 6),
@@ -120,7 +120,7 @@ class MeanReversionBBStrategy(BaseStrategy):
                 asset_class=self.asset_class, broker=self.broker,
                 reasons=reasons + [f"Regime: {regime_name}"],
                 regime=regime_name,
-            )
+            ), data, atr_val)
 
         if at_upper and rsi_val > self.RSI_OVERBOUGHT:
             score = 2
@@ -133,7 +133,7 @@ class MeanReversionBBStrategy(BaseStrategy):
                 reasons.append(f"Volume {vol_out.signal}")
 
             confidence = min(score / 3, 1.0)
-            return Signal(
+            return self._enhance_signal(Signal(
                 symbol=symbol, signal="SHORT",
                 entry_price=current_price,
                 stop_loss=round(current_price + atr_mults["sl"] * atr_val, 6),
@@ -143,7 +143,7 @@ class MeanReversionBBStrategy(BaseStrategy):
                 asset_class=self.asset_class, broker=self.broker,
                 reasons=reasons + [f"Regime: {regime_name}"],
                 regime=regime_name,
-            )
+            ), data, atr_val)
 
         hold_reasons = [f"Price mid-band (band_pct={bb_out.value:.3f}), RSI={rsi_val:.1f}"]
         if bb_out.signal == "squeeze":

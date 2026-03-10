@@ -135,7 +135,7 @@ class MomentumBreakoutStrategy(BaseStrategy):
 
         if broke_up and long_score >= LONG_THRESHOLD:
             confidence = min(long_score / 5, 1.0)
-            return Signal(
+            return self._enhance_signal(Signal(
                 symbol=symbol, signal="BUY",
                 entry_price=current_price,
                 stop_loss=round(current_price - atr_mults["sl"] * atr_val, 6),
@@ -145,11 +145,11 @@ class MomentumBreakoutStrategy(BaseStrategy):
                 asset_class=self.asset_class, broker=self.broker,
                 reasons=reasons_long + [f"Regime: {regime_name}"],
                 regime=regime_name,
-            )
+            ), data, atr_val)
 
         if broke_down and short_score >= SHORT_THRESHOLD:
             confidence = min(short_score / 5, 1.0)
-            return Signal(
+            return self._enhance_signal(Signal(
                 symbol=symbol, signal="SHORT",
                 entry_price=current_price,
                 stop_loss=round(current_price + atr_mults["sl"] * atr_val, 6),
@@ -159,7 +159,7 @@ class MomentumBreakoutStrategy(BaseStrategy):
                 asset_class=self.asset_class, broker=self.broker,
                 reasons=(reasons_short if broke_down else reasons) + [f"Regime: {regime_name}"],
                 regime=regime_name,
-            )
+            ), data, atr_val)
 
         hold_reasons = [f"No breakout (high {highest_high:.4f} / low {lowest_low:.4f})"]
         if not adx_ok:

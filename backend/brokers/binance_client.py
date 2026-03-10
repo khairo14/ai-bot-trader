@@ -377,6 +377,61 @@ class BinanceClient(AbstractBroker):
             raw=dict(result),  # type: ignore[arg-type]
         )
 
+    async def update_stop_loss(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        new_sl_price: float,
+    ) -> bool:
+        """
+        Cancel the existing STOP_LOSS_LIMIT for *symbol* and place a new one at
+        *new_sl_price*.  Binance has no in-place order modify, so cancel + replace
+        is used.  G1 guarantees at most one SL order per symbol at a time.
+        """
+        try:
+            await self._ensure_markets()
+            exit_side = "sell" if side.lower() == "buy" else "buy"
+            open_orders = await self.exchange.fetch_open_orders(symbol)
+            stop_orders = [
+                o for o in open_orders
+                if str(o.get("type", "")).upper() in ("STOP_LOSS_LIMIT", "STOP_LOSS")
+                and str(o.get("side", "")).lower() == exit_side
+            ]
+            if not stop_orders:
+                logger.debug(f"[Binance] update_stop_loss: no open stop order for {symbol}")
+                return False
+
+            # Cancel all matching SL orders (normally exactly one)
+            for o in stop_orders:
+                try:
+                    await self.exchange.cancel_order(str(o["id"]), symbol)
+                except Exception as _ce:
+                    logger.debug(f"[Binance] cancel stop {o['id']}: {_ce}")
+
+            # Replace with new STOP_LOSS_LIMIT at the trailed price
+            _sl_limit = round(new_sl_price * (0.999 if exit_side == "sell" else 1.001), 8)
+            for _attempt in range(2):
+                try:
+                    await self.exchange.create_order(
+                        symbol, "STOP_LOSS_LIMIT", exit_side, quantity,
+                        price=_sl_limit,
+                        params={"stopPrice": new_sl_price},
+                    )
+                    break
+                except Exception as _pe:
+                    if _attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.error(f"[Binance] replace SL order failed after retry: {_pe}")
+                        return False
+
+            logger.info(f"[Binance] ⚡ Trailing stop synced: {symbol} SL → {new_sl_price}")
+            return True
+        except Exception as exc:
+            logger.warning(f"[Binance] update_stop_loss failed for {symbol}: {exc}")
+            return False
+
     async def stream_prices(
         self,
         symbols: List[str],
@@ -416,6 +471,3 @@ class BinanceClient(AbstractBroker):
                 except Exception as e:
                     logger.error(f"[Binance] Stream error: {e}")
                     await asyncio.sleep(1)
-
-    async def close(self):
-        await self.exchange.close()

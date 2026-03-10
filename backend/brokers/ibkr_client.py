@@ -649,6 +649,29 @@ class _IBKRManager:
             self.unsubscribe_mkt_data(contract)
             logger.debug(f"[IBKR] Cancelled bracket mkt-data subscription for {symbol}")
 
+    async def _do_modify_stop_order(
+        self, contract_symbol: str, exit_action: str, new_price: float
+    ) -> bool:
+        """
+        Background-loop coroutine: find the open STP child order for *contract_symbol*
+        whose action matches *exit_action* (SELL for longs, BUY for shorts) and modify
+        its auxPrice (stop trigger) in-place.  Runs on the _IBKRManager event loop via
+        _submit() so ib_insync handles the thread correctly.
+        """
+        if not self._ib:
+            return False
+        open_trades = self._ib.openTrades()
+        for t in open_trades:
+            if (t.order.orderType in ("STP", "STOP")
+                    and t.order.action == exit_action
+                    and hasattr(t, "contract")
+                    and t.contract.symbol == contract_symbol):
+                t.order.auxPrice = new_price
+                self._ib.placeOrder(t.contract, t.order)
+                await asyncio.sleep(0.1)   # let the Gateway process the amendment
+                return True
+        return False
+
 
 _manager = _IBKRManager(client_id=settings.ibkr_client_id)
 # Celery workers use a separate clientId to avoid kicking the FastAPI connection
@@ -1049,6 +1072,42 @@ class IBKRClient(AbstractBroker):
             return False
         except Exception as e:
             logger.error(f"[IBKR] Cancel order failed: {e}")
+            return False
+
+    async def update_stop_loss(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        new_sl_price: float,
+    ) -> bool:
+        """
+        Modify the IBKR STP bracket child order in-place by sending the same
+        orderId with an updated auxPrice.  IBKR treats re-submitting an existing
+        orderId as a modify request, not a new order.
+        Uses the _IBKRManager background loop so the ib_insync event loop is
+        not violated from the asyncio task running in Celery/FastAPI.
+        """
+        try:
+            self._ensure_connected()
+            contract = _ibkr_contract(symbol)
+            exit_action = "SELL" if side.lower() == "buy" else "BUY"
+            _place_loop = asyncio.get_running_loop()
+            found: bool = await _place_loop.run_in_executor(
+                None,
+                lambda: _get_manager()._submit(
+                    _get_manager()._do_modify_stop_order(
+                        contract.symbol, exit_action, new_sl_price
+                    )
+                ),
+            )
+            if found:
+                logger.info(f"[IBKR] \u26a1 Trailing stop synced: {symbol} SL \u2192 {new_sl_price}")
+            else:
+                logger.debug(f"[IBKR] update_stop_loss: no open STP order found for {symbol}")
+            return found
+        except Exception as exc:
+            logger.warning(f"[IBKR] update_stop_loss failed for {symbol}: {exc}")
             return False
 
     async def get_order_status(self, order_id: str, symbol: str) -> OrderResult:

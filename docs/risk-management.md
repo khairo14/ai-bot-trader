@@ -169,6 +169,23 @@ MAX_CONSECUTIVE_LOSSES=3
 
 ---
 
+## Risk State Persistence — Async-Safe I/O
+
+`RiskManager` persists its live state (daily P&L, circuit breaker flag, consecutive-loss counters) to `runtime/risk_state.json` after every trade.
+
+### Save Mechanism
+
+`_save_state()` is a dispatcher that adapts to the calling context to avoid blocking the event loop:
+
+| Calling context | Behaviour |
+|---|---|
+| FastAPI (asyncio event loop running) | Offloads `_do_save_state()` to thread pool via `loop.run_in_executor(None, ...)`. Fire-and-forget; does not stall signal processing. |
+| Celery task (sync context, no running loop) | Calls `_do_save_state()` directly (synchronous, safe in worker thread). |
+
+`_do_save_state()` performs an atomic write: data is first written to a `.tmp` file then renamed over the target. This prevents a corrupt JSON file if the process is interrupted mid-write.
+
+---
+
 ## Risk Report
 
 The dashboard shows a live risk summary:

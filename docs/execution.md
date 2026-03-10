@@ -23,6 +23,10 @@ The execution engine is responsible for translating signals into actual orders (
 | Semi-auto approve/reject | ✅ Complete | `POST /api/signals/{id}/approve` + `/reject` + Dashboard panel |
 | ML inference | ✅ Complete | `MLScorer` blends into HybridStrategy (60% rule / 40% ML) |
 | In-app notifications | ✅ Complete | DB-backed, WS real-time bell, Gmail SMTP alerts |
+| Notification archival | ✅ Complete | `tasks/notification_cleanup.py` — weekly Sunday 04:00 UTC, 30-day TTL for read notifications |
+| Real-time price streaming | ✅ Complete | `core/engine/price_stream.py` — `PriceStreamManager` singleton; one asyncio Task per broker |
+| SL/TP concurrency lock | ✅ Complete | `_MONITOR_SL_TP_LOCK` in `forward_engine.py` — prevents duplicate monitor runs |
+| Static SL enforcement | ✅ Fixed | Static stop loss now checked for all trades, not only trailing-stop trades (BUG-1) |
 
 ---
 
@@ -334,6 +338,38 @@ Every action the execution engine takes is logged:
   "signal_confidence": 0.78
 }
 ```
+
+---
+
+## SL/TP Monitor — Real-Time Price Streaming
+
+The SL/TP heartbeat runs every 60 seconds and checks all open positions for stop-loss or take-profit triggers. Starting with audit 3, price data is sourced from a live WebSocket stream for much lower latency.
+
+### Price Lookup Order
+
+```
+For each open trade:
+  1. Check PriceStreamManager.get_price(symbol)  ← sub-second, WebSocket
+        → if price available: use it immediately
+  2. Fallback: _price_cache[symbol] + timestamp check ← 60s cached REST price
+        → if still fresh (< lookback window): use cached
+  3. Final fallback: broker.get_bid_ask(symbol)  ← live REST call
+```
+
+### PriceStreamManager (`core/engine/price_stream.py`)
+
+| Property | Value |
+|---|---|
+| Subscription refresh interval | Every 30 seconds (auto-adds newly opened trades) |
+| Reconnect delay on stream failure | 5 seconds |
+| Price storage | `dict[symbol → latest_mid_price]` (in-process) |
+| Lifecycle | Launched in FastAPI `lifespan` startup; cancelled cleanly at shutdown |
+
+All three brokers implement `stream_prices(symbols, callback)` and `update_stop_loss(symbol, side, quantity, new_sl_price)`. `PriceStreamManager` calls broker-specific streams per the set of symbols with open trades for that broker.
+
+### Concurrency Guard
+
+`_MONITOR_SL_TP_LOCK` (module-level `asyncio.Lock`) prevents duplicate concurrent runs of `monitor_sl_tp` within the same FastAPI process. If a previous run is still in progress when a new call arrives, the new call returns immediately with `0` processed trades. This is process-local only — cross-process deduplication (Celery + FastAPI) is handled by a DB-level advisory lock inside `close_position`.
 
 Full execution logs are viewable on the dashboard under **Activity → Execution Log**.
 

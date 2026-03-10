@@ -150,6 +150,15 @@ class Settings(BaseSettings):
                 f"[Config] Missing or default secrets detected: {', '.join(warnings)}. "
                 "Update your .env file."
             )
+
+        # ── IBKR client ID collision (Error 326) check ─────────────────
+        if self.ibkr_client_id == self.ibkr_client_id_celery:
+            raise ValueError(
+                f"IBKR_CLIENT_ID and IBKR_CLIENT_ID_CELERY must be different "
+                f"(both are {self.ibkr_client_id}). IB Gateway rejects duplicate "
+                f"client IDs with Error 326."
+            )
+
         return self
 
 

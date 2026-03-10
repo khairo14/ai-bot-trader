@@ -11,7 +11,7 @@ celery_app = Celery(
     "ai_bot_trader",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["tasks.ml_retrain", "tasks.signal_runner", "tasks.outcome_resolver", "tasks.portfolio_rebalancer"],
+    include=["tasks.ml_retrain", "tasks.signal_runner", "tasks.outcome_resolver", "tasks.portfolio_rebalancer", "tasks.notification_cleanup"],
 )
 
 celery_app.conf.update(
@@ -46,6 +46,11 @@ celery_app.conf.beat_schedule = {
     "portfolio-rebalance-weekly": {
         "task": "tasks.portfolio_rebalancer.rebalance",
         "schedule": crontab(hour=3, minute=0, day_of_week="sunday"),
+    },
+    # Delete read notifications older than 30 days (Sunday 04:00 UTC)
+    "cleanup-notifications-weekly": {
+        "task": "tasks.notification_cleanup.cleanup_notifications",
+        "schedule": crontab(hour=4, minute=0, day_of_week="sunday"),
     },
 }
 

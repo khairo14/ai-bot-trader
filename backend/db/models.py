@@ -164,11 +164,11 @@ class Trade(Base):
     pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[OrderStatus] = mapped_column(SAEnum(OrderStatus), default=OrderStatus.PENDING)
     execution_mode: Mapped[ExecutionMode] = mapped_column(SAEnum(ExecutionMode), nullable=False)
-    broker: Mapped[BrokerName] = mapped_column(SAEnum(BrokerName), nullable=False)
+    broker: Mapped[BrokerName] = mapped_column(SAEnum(BrokerName), nullable=False, index=True)
     asset_class: Mapped[AssetClass] = mapped_column(SAEnum(AssetClass), nullable=False)
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
     broker_order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    strategy_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    strategy_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # rejection reason, halt info, etc.
     opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

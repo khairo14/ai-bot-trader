@@ -22,7 +22,8 @@ Every strategy produces a standardized signal object:
   "strategy_name": "hybrid_macd_rsi",
   "regime": "trending",
   "timestamp": "2026-03-04T12:00:00Z",
-  "reasons": ["RSI oversold", "MACD bullish crossover", "ML score 0.78"]
+  "reasons": ["RSI oversold", "MACD bullish crossover", "ML score 0.78"],
+  "trailing_stop_pct": 0.018 // Optional: ATR-derived trailing stop %; null if fixed SL only
 }
 ```
 
@@ -242,13 +243,38 @@ confluence_score = (agreeing timeframes) / (total timeframes checked)
 
 If `confluence_score < min_confluence`, execution is suppressed and the reason is recorded in the signal's reasons list.
 
-### Per-Strategy Confluence Defaults
+---
+
+## Signal Enhancement (`_enhance_signal`)
+
+After a strategy's `generate_signal()` returns a raw signal, `BaseStrategy._enhance_signal()` applies three automatic enhancements before the signal reaches the execution engine:
+
+### 1. Confirmation Candle
+Checks that the most recent closed candle confirms the signal direction (bullish close for BUY, bearish close for SHORT/SELL). If the candle disagrees, the signal is downgraded to HOLD with reason `"Confirmation candle not aligned"`.
+
+### 2. Support/Resistance TP Snap
+Scans nearby historical swing highs/lows. If the computed take profit is within 0.5% of a significant S/R level, the TP is snapped to that level. This prevents the bot from placing a TP that will frustratingly fail within a few ticks of a major level.
+
+### 3. ATR-Based Dynamic Trailing Stop
+If the strategy's `parameters["trailing_stop_pct"]` is set, `_enhance_signal` recomputes it using current ATR:
+```python
+dynamic_trailing = (ATR-14 * 1.5) / entry_price
+sig.trailing_stop_pct = dynamic_trailing
+```
+This makes the trailing distance adaptive to current volatility rather than fixed. The computed value is stored in `sig.trailing_stop_pct` and also recorded in `TradeOutcome.trailing_stop_pct` for ML training continuity.
+
+---
+
+## Per-Strategy Confluence Defaults
 
 | Strategy | Default `min_confluence` | Rationale |
 |---|---|---|
 | `hybrid_macd_rsi` | `0.5` | Trend-following — benefits from higher-TF alignment |
 | `momentum_breakout` | `0.5` | Breakouts confirm better when multiple TFs agree |
 | `mean_reversion_bb` | `0.0` | **Counter-trend by design** — always disagrees with higher TFs; bypass entirely |
+| `covered_call` | `0.0` | **Income strategy** — SELL signal by design; higher-TF HOLD would suppress every trade |
+| `iron_condor` | `0.0` | **Range-bound income** — same reason as covered call |
+| `bull_call_spread` | `0.0` | **Defined-risk directional** — direction encoded in signal, not confluence |
 
 The threshold is a three-level lookup:
 1. `strategy.parameters["min_confluence"]` — DB-level override (highest priority)

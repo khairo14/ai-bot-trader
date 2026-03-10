@@ -200,7 +200,11 @@ def _resolve_outcome(
         else:
             effective_stop = stop_loss
 
-        # Check take profit first (optimistic — assume best intra-candle fill)
+        # Check take profit first (optimistic — assume best intra-candle fill).
+        # NOTE: if both TP and SL hit on the same candle (high >= TP and low <= SL),
+        # we always resolve as WIN. In reality SL could have fired first; this
+        # assumption over-states the win rate by a small margin but is standard
+        # practice for backtesting. Actual live trades are resolved by the broker.
         if take_profit is not None:
             if is_long and high >= take_profit:
                 pnl_pct = round((take_profit - entry_price) / entry_price * 100, 4)

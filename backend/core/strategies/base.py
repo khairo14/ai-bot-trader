@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List
 import pandas as pd
 from abc import ABC, abstractmethod
+from loguru import logger
 
 from tools.base import ToolOutput
 
@@ -69,3 +70,104 @@ class BaseStrategy(ABC):
     def get_default_tools(self) -> List[str]:
         """Return the list of tool names this strategy uses by default."""
         return ["RSI", "MACD", "BollingerBands", "MovingAverages", "VolumeAnalysis", "ATR", "ADX"]
+
+    # ── Common signal-quality filters (shared across all strategies) ──────────
+
+    def _enhance_signal(self, signal: "Signal", data: pd.DataFrame,
+                        atr_val: Optional[float] = None) -> "Signal":
+        """
+        Apply three quality filters to any BUY / SHORT signal:
+          1. Confirmation candle  — previous closed candle must close in direction of signal
+          2. S/R TP snap          — snap take-profit to nearest pivot high/low if closer
+          3. Trailing stop        — set trailing_stop_pct = 1.5 × ATR / price
+        Options signals (asset_class == 'option') only get the confirmation candle;
+        S/R and trailing stop are skipped (premium-based exit mechanics).
+        HOLD / SELL / COVER pass through unchanged.
+        """
+        if signal.signal not in ("BUY", "SHORT"):
+            return signal
+
+        is_options = getattr(signal, "asset_class", None) == "option"
+        signal_type = signal.signal
+        current_price = signal.entry_price
+        reasons = list(signal.reasons or [])
+
+        # Feature 3: Confirmation candle
+        if len(data) >= 2:
+            prev_close = float(data["close"].iloc[-2])
+            prev_open  = float(data["open"].iloc[-2])
+            if signal_type == "BUY" and prev_close <= prev_open:
+                logger.info(
+                    f"[{self.name}] {signal.symbol} BUY → HOLD: "
+                    f"prev candle bearish (close={prev_close:.5f} <= open={prev_open:.5f})"
+                )
+                signal.signal         = "HOLD"
+                signal.confidence     = 0.0
+                signal.stop_loss      = None
+                signal.take_profit    = None
+                signal.trailing_stop_pct = None
+                signal.reasons        = reasons + ["Awaiting confirmation candle (prev candle bearish)"]
+                return signal
+            elif signal_type == "SHORT" and prev_close >= prev_open:
+                logger.info(
+                    f"[{self.name}] {signal.symbol} SHORT → HOLD: "
+                    f"prev candle bullish (close={prev_close:.5f} >= open={prev_open:.5f})"
+                )
+                signal.signal         = "HOLD"
+                signal.confidence     = 0.0
+                signal.stop_loss      = None
+                signal.take_profit    = None
+                signal.trailing_stop_pct = None
+                signal.reasons        = reasons + ["Awaiting confirmation candle (prev candle bullish)"]
+                return signal
+
+        # Options strategies: confirmation candle is sufficient — skip the rest
+        if is_options:
+            return signal
+
+        # Feature 1: S/R TP snap (non-options only)
+        if signal.take_profit is not None:
+            if signal_type == "BUY":
+                resistance = self._find_resistance(data, current_price)
+                if resistance is not None and resistance < signal.take_profit:
+                    signal.take_profit = round(resistance * 0.9998, 6)
+                    signal.reasons = reasons + [f"TP snapped to resistance {resistance:.5f}"]
+            elif signal_type == "SHORT":
+                support = self._find_support(data, current_price)
+                if support is not None and support > signal.take_profit:
+                    signal.take_profit = round(support * 1.0002, 6)
+                    signal.reasons = reasons + [f"TP snapped to support {support:.5f}"]
+
+        # Feature 2: Trailing stop (non-options only)
+        if atr_val and current_price:
+            signal.trailing_stop_pct = round(atr_val * 1.5 / current_price * 100, 4)
+
+        return signal
+
+    def _find_resistance(
+        self, data: pd.DataFrame, current_price: float,
+        window: int = 5, lookback: int = 100,
+    ) -> Optional[float]:
+        """Nearest pivot high strictly above current_price, or None."""
+        h = data["high"].values[-lookback:]
+        candidates: list = []
+        for i in range(window, len(h) - window):
+            if (h[i] > current_price
+                    and all(h[i] >= h[i - window: i])
+                    and all(h[i] >= h[i + 1: i + window + 1])):
+                candidates.append(float(h[i]))
+        return min(candidates) if candidates else None
+
+    def _find_support(
+        self, data: pd.DataFrame, current_price: float,
+        window: int = 5, lookback: int = 100,
+    ) -> Optional[float]:
+        """Nearest pivot low strictly below current_price, or None."""
+        lo = data["low"].values[-lookback:]
+        candidates: list = []
+        for i in range(window, len(lo) - window):
+            if (lo[i] < current_price
+                    and all(lo[i] <= lo[i - window: i])
+                    and all(lo[i] <= lo[i + 1: i + window + 1])):
+                candidates.append(float(lo[i]))
+        return max(candidates) if candidates else None

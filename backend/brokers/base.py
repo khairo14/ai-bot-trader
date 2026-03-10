@@ -145,6 +145,30 @@ class AbstractBroker(ABC):
         """Optional: establish connection before use (e.g. IBKR TWS). No-op by default."""
         pass
 
+    async def update_stop_loss(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        new_sl_price: float,
+    ) -> bool:
+        """
+        Cancel the existing broker-side SL order for *symbol* and replace it
+        with a new stop at *new_sl_price*.  Called by monitor_sl_tp every time
+        the trailing stop ratchets so the broker bracket stays in sync with the
+        software stop.
+
+        *side*     — original entry side: "buy" (long) or "sell"/"short" (short).
+        *quantity* — position size (needed to re-create the replacement order).
+
+        Returns True if the broker order was found and replaced, False / raises
+        on failure (caller logs and continues — software SL still protects).
+
+        Default implementation is a no-op (False) for brokers that don't
+        support order modification.  Alpaca, Binance, and IBKR override this.
+        """
+        return False
+
     # ── Helpers ──────────────────────────────────────────
 
     def is_paper(self) -> bool:

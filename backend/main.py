@@ -254,6 +254,11 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized.")
 
+    # Start price streaming cache (feeds monitor_sl_tp with sub-second prices)
+    from core.engine.price_stream import price_stream_manager
+    from db.database import AsyncSessionLocal as _ASL
+    stream_task = asyncio.create_task(price_stream_manager.start(_ASL))
+
     # Start auto-scheduler (skip if interval set to 0 — manual-only mode)
     scheduler_task = None
     heartbeat_task = asyncio.create_task(_sl_tp_heartbeat())
@@ -264,15 +269,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    heartbeat_task.cancel()
-    try:
-        await heartbeat_task
-    except asyncio.CancelledError:
-        pass
-    if scheduler_task:
-        scheduler_task.cancel()
+    for _t in filter(None, [heartbeat_task, stream_task, scheduler_task]):
+        _t.cancel()
         try:
-            await scheduler_task
+            await _t
         except asyncio.CancelledError:
             pass
     logger.info("Shutting down AI Bot Trader backend...")

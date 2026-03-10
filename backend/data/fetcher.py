@@ -28,7 +28,11 @@ class DataFetcher:
         Fetch OHLCV candles and return as a DataFrame with columns:
         timestamp, open, high, low, close, volume
         """
-        raw = await self.broker.get_ohlcv(symbol, timeframe, limit, since)
+        await self.broker.connect()  # no-op for Binance/Alpaca; ensures IBKR is live
+        try:
+            raw = await self.broker.get_ohlcv(symbol, timeframe, limit, since)
+        finally:
+            await self.broker.close()
         # Broker clients return a DataFrame directly — don't re-wrap it.
         if isinstance(raw, pd.DataFrame):
             return raw

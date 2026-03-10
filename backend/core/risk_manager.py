@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from dataclasses import dataclass
@@ -111,7 +112,23 @@ class RiskManager:
         """Persist circuit-breaker and consecutive-loss state to disk atomically.
         Uses write-to-temp-then-rename to avoid partial writes corrupting the state
         file when FastAPI and Celery workers both call _save_state concurrently.
+
+        IMP-4: When called from an async context (FastAPI event loop), the blocking
+        file I/O is offloaded to a thread executor so the event loop is not stalled.
+        When called from a sync context (Celery worker before asyncio.run), falls
+        back to direct synchronous I/O.
         """
+        try:
+            loop = asyncio.get_running_loop()
+            # We are on an event loop — offload to thread pool (fire-and-forget).
+            # The write is atomic (temp+rename) so a concurrent call can't corrupt.
+            loop.run_in_executor(None, self._do_save_state)
+        except RuntimeError:
+            # No running loop (e.g. pure-sync Celery task context)
+            self._do_save_state()
+
+    def _do_save_state(self) -> None:
+        """Blocking file write — always safe to call from a thread."""
         try:
             import tempfile
             os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)

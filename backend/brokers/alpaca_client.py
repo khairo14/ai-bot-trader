@@ -307,8 +307,56 @@ class AlpacaClient(AbstractBroker):
             raw=raw_result.model_dump(),
         )
 
-    async def stream_prices(self, symbols: List[str], callback: Callable) -> None:
-        # Use credentials matching the current mode (paper vs live)
+    async def update_stop_loss(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        new_sl_price: float,
+    ) -> bool:
+        """
+        Find the open SL stop child order for *symbol* and replace its stop price.
+        Uses Alpaca's replace_order_by_id which modifies in-place (no cancel needed).
+        G1 guarantees only one active stop order per symbol at a time.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            from alpaca.trading.requests import GetOrdersRequest, ReplaceOrderRequest
+            from alpaca.trading.enums import QueryOrderStatus
+
+            _norm_sym = symbol.replace("/", "").upper()
+            # The SL exit side is opposite to entry: BUY position exits via SELL stop
+            exit_side = "sell" if side.lower() == "buy" else "buy"
+
+            open_orders: Any = await loop.run_in_executor(
+                None,
+                lambda: self.trading.get_orders(filter=GetOrdersRequest(
+                    status=QueryOrderStatus.OPEN,
+                    symbols=[_norm_sym],
+                )),
+            )
+            stop_orders = [
+                o for o in open_orders
+                if str(getattr(o, "type", "")).lower() in ("stop", "stop_limit")
+                and str(getattr(o, "side", "")).lower() == exit_side
+            ]
+            if not stop_orders:
+                logger.debug(f"[Alpaca] update_stop_loss: no open stop order for {symbol}")
+                return False
+
+            for o in stop_orders:
+                await loop.run_in_executor(
+                    None,
+                    lambda oid=str(o.id): self.trading.replace_order_by_id(
+                        oid, ReplaceOrderRequest(stop_price=new_sl_price)
+                    ),
+                )
+            logger.info(f"[Alpaca] ⚡ Trailing stop synced: {symbol} SL → {new_sl_price}")
+            return True
+        except Exception as exc:
+            logger.warning(f"[Alpaca] update_stop_loss failed for {symbol}: {exc}")
+            return False
+    async def stream_prices(self, symbols: List[str], callback: Callable) -> None:        # Use credentials matching the current mode (paper vs live)
         api_key = settings.alpaca_api_key if self._paper else (settings.alpaca_api_key_live or settings.alpaca_api_key)
         api_secret = settings.alpaca_api_secret if self._paper else (settings.alpaca_api_secret_live or settings.alpaca_api_secret)
         stream = StockDataStream(

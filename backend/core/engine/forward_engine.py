@@ -10,6 +10,15 @@ from brokers import get_broker
 from db.models import Trade, OrderStatus, ExecutionMode
 from config import settings as _cfg
 
+# Convenience alias used by tests and external code
+PAPER_INITIAL_CAPITAL: float = _cfg.paper_initial_balance
+
+# IMP-3: prevent concurrent monitor_sl_tp calls within the same FastAPI process.
+# Each ForwardEngine instance (heartbeat, signal_runner) gets its own lock; since
+# they run on the same event loop (FastAPI process) this stops double-ratcheting.
+# Cross-process (Celery vs FastAPI) deduplication is handled by the DB advisory lock.
+_MONITOR_SL_TP_LOCK: asyncio.Lock = asyncio.Lock()
+
 
 class ForwardEngine:
     """
@@ -588,7 +597,7 @@ class ForwardEngine:
         try:
             _bpos = await broker.get_positions()
             _norm_sym = _norm_sym_close(trade.symbol)
-            _has_pos = any(abs(p.quantity) >= 1 and p.symbol == _norm_sym for p in _bpos)
+            _has_pos = any(abs(p.quantity) > 0 and p.symbol == _norm_sym for p in _bpos)
             if not _has_pos:
                 logger.warning(
                     f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} qty=0 at {_broker_key} "
@@ -788,6 +797,17 @@ class ForwardEngine:
 
         Returns the number of positions closed.
         """
+        # IMP-3: skip if another coroutine in the same event loop is already running
+        # the monitor. The DB advisory lock inside close_position prevents double-close
+        # across processes; this lock prevents redundant update_stop_loss broker calls
+        # when the FastAPI heartbeat and a signal_runner coroutine overlap.
+        if _MONITOR_SL_TP_LOCK.locked():
+            logger.debug("[ForwardEngine] monitor_sl_tp: already running in this process, skipping.")
+            return 0
+        async with _MONITOR_SL_TP_LOCK:
+            return await self._monitor_sl_tp_inner(db_session)
+
+    async def _monitor_sl_tp_inner(self, db_session) -> int:
         from sqlalchemy import select as _sel
 
         open_q = await db_session.execute(
@@ -810,14 +830,27 @@ class ForwardEngine:
         # price: SHORT exits buy at the ask, LONG exits sell at the bid.
         _price_cache: dict[tuple[str, str], tuple[float, float]] = {}
 
+        # Use streamed prices (sub-second) where available; fall back to REST.
+        from core.engine.price_stream import price_stream_manager as _psm
+
         for trade in open_trades:
             try:
                 broker_name = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
                 _cache_key = (broker_name, trade.symbol)
-                if _cache_key in _price_cache:
+                # Always resolve the broker object (factory is cheap; it returns a singleton/cached
+                # client). This ensures update_stop_loss is called on the correct broker even when
+                # the bid/ask price comes from the cache (cache-hit path skips the else branch).
+                broker = get_broker(broker_name)
+
+                streamed = _psm.get_price(trade.symbol)
+                if streamed is not None:
+                    # Streaming mid-price available — no REST call needed.
+                    # bid ≈ ask ≈ mid for liquid assets; acceptable for SL/TP trigger.
+                    bid_price, ask_price = streamed, streamed
+                    _price_cache[_cache_key] = (bid_price, ask_price)
+                elif _cache_key in _price_cache:
                     bid_price, ask_price = _price_cache[_cache_key]
                 else:
-                    broker = get_broker(broker_name)
                     await broker.connect()
                     bid_price, ask_price = await broker.get_bid_ask(trade.symbol)
                     _price_cache[_cache_key] = (bid_price, ask_price)
@@ -850,6 +883,16 @@ class ForwardEngine:
                         trade.stop_loss = _new_trail
                         db_session.add(trade)
                         await db_session.flush()
+                        # Sync the new SL to the broker's standing stop order
+                        try:
+                            await broker.update_stop_loss(
+                                trade.symbol, trade.side, trade.quantity, _new_trail
+                            )
+                        except Exception as _bsl_err:
+                            logger.debug(
+                                f"[ForwardEngine] broker SL sync failed for "
+                                f"{trade.symbol} id={trade.id}: {_bsl_err}"
+                            )
                         # G11: broadcast and notify trailing stop movement
                         try:
                             from api.websocket import manager as _ws_mgr
@@ -873,6 +916,16 @@ class ForwardEngine:
                         trade.stop_loss = _new_trail
                         db_session.add(trade)
                         await db_session.flush()
+                        # Sync the new SL to the broker's standing stop order
+                        try:
+                            await broker.update_stop_loss(
+                                trade.symbol, trade.side, trade.quantity, _new_trail
+                            )
+                        except Exception as _bsl_err:
+                            logger.debug(
+                                f"[ForwardEngine] broker SL sync failed for "
+                                f"{trade.symbol} id={trade.id}: {_bsl_err}"
+                            )
                         # G11: broadcast and notify trailing stop movement
                         try:
                             from api.websocket import manager as _ws_mgr
@@ -884,6 +937,19 @@ class ForwardEngine:
                             })
                         except Exception:
                             pass
+                if is_long and exit_price <= trade.stop_loss:
+                    reason = "stop_loss"
+                elif not is_long and exit_price >= trade.stop_loss:
+                    reason = "stop_loss"
+
+            # ── Static SL check (non-trailing trades) ─────────────────────────
+            # Must run even when trailing_stop_pct is None so that trades with a
+            # fixed stop_loss (including legacy open positions with no trailing pct)
+            # are closed when they breach their level. The trailing block above
+            # handles this for trailing-stop trades; this covers the fixed-SL case.
+            if (reason is None
+                    and trade.trailing_stop_pct is None
+                    and trade.stop_loss is not None):
                 if is_long and exit_price <= trade.stop_loss:
                     reason = "stop_loss"
                 elif not is_long and exit_price >= trade.stop_loss:

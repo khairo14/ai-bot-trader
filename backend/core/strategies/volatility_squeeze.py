@@ -242,7 +242,7 @@ class VolatilitySqueezeStrategy(BaseStrategy):
 
         if long_score >= long_threshold:
             confidence = round(min(long_score / 5.0, 1.0), 3)
-            return Signal(
+            return self._enhance_signal(Signal(
                 symbol=symbol, signal="BUY",
                 entry_price=current_price,
                 stop_loss=round(current_price - atr_sl, 6),
@@ -252,11 +252,11 @@ class VolatilitySqueezeStrategy(BaseStrategy):
                 asset_class=self.asset_class, broker=self.broker,
                 reasons=long_reasons + [f"Regime: {regime_name}"],
                 regime=regime_name,
-            )
+            ), data, atr_val)
 
         if short_score >= short_threshold:
             confidence = round(min(short_score / 5.0, 1.0), 3)
-            return Signal(
+            return self._enhance_signal(Signal(
                 symbol=symbol, signal="SHORT",
                 entry_price=current_price,
                 stop_loss=round(current_price + atr_sl, 6),
@@ -266,7 +266,7 @@ class VolatilitySqueezeStrategy(BaseStrategy):
                 asset_class=self.asset_class, broker=self.broker,
                 reasons=short_reasons + [f"Regime: {regime_name}"],
                 regime=regime_name,
-            )
+            ), data, atr_val)
 
         hold_reasons = [
             f"Squeeze fired but score too low (long={long_score}, short={short_score}, "

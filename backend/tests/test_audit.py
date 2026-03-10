@@ -343,10 +343,16 @@ class TestForwardEngine(unittest.IsolatedAsyncioTestCase):
         mock_db = AsyncMock()
         mock_db.add = MagicMock()
         mock_db.commit = AsyncMock()
-        # Ensure _daily_pnl returns a float, not a coroutine
-        _pnl_result = MagicMock()
-        _pnl_result.scalar_one = MagicMock(return_value=0.0)
-        mock_db.execute = AsyncMock(return_value=_pnl_result)
+        mock_db.flush = AsyncMock()
+        # All execute() calls must return a safe result:
+        #   scalar_one()          → 0.0  (_daily_pnl realised + unrealised, asset_class_exposure)
+        #   scalar_one_or_none()  → None (BrokerRiskSettings lookup → no override)
+        #   scalars().all()       → []   (any list query)
+        _db_result = MagicMock()
+        _db_result.scalar_one = MagicMock(return_value=0.0)
+        _db_result.scalar_one_or_none = MagicMock(return_value=None)
+        _db_result.scalars.return_value.all.return_value = []
+        mock_db.execute = AsyncMock(return_value=_db_result)
 
         with patch("core.engine.forward_engine.get_broker", return_value=mock_broker):
             result = await engine.process_signal(
@@ -355,11 +361,13 @@ class TestForwardEngine(unittest.IsolatedAsyncioTestCase):
         # process_signal returns the REJECTED Trade (not None) so callers can set signal_id
         self.assertIsNotNone(result)
         assert result is not None
-        from db.models import OrderStatus
+        from db.models import OrderStatus, Trade as _TradeModel
         self.assertEqual(result.status, OrderStatus.REJECTED)
-        mock_db.add.assert_called_once()
-        saved_trade = mock_db.add.call_args[0][0]
-        self.assertEqual(saved_trade.status, OrderStatus.REJECTED)
+        # add() is called for the REJECTED trade + possibly a notification record
+        self.assertGreaterEqual(mock_db.add.call_count, 1)
+        trade_adds = [c.args[0] for c in mock_db.add.call_args_list if isinstance(c.args[0], _TradeModel)]
+        self.assertEqual(len(trade_adds), 1)
+        self.assertEqual(trade_adds[0].status, OrderStatus.REJECTED)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

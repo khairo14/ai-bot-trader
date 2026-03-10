@@ -59,9 +59,11 @@ AI Bot Trader is a hybrid rule-based + ML trading bot that supports crypto, stoc
 
 ### 1. Data Engine
 - Fetches historical OHLCV data for backtesting
-- Streams real-time price data via WebSocket for live/paper trading
+- Streams real-time price data via WebSocket for live/paper trading — managed by `PriceStreamManager` (`core/engine/price_stream.py`)
 - Fetches options chains (expiry, strike, IV, Greeks) from IBKR
 - Normalizes data into a unified format regardless of broker
+
+**`PriceStreamManager`** maintains one persistent WebSocket stream per active broker. It refreshes subscriptions every 30s from the DB and auto-reconnects on failure. The SL/TP monitor reads from this cache first (`O(1)` dict lookup) before falling back to REST API calls, reducing stop-loss reaction latency from ~60s to sub-second.
 
 ### 2. Tool Library
 - **Basic:** RSI, MACD, Bollinger Bands, EMA, SMA, Volume analysis
@@ -93,9 +95,10 @@ AI Bot Trader is a hybrid rule-based + ML trading bot that supports crypto, stoc
 
 ### 7. Risk Manager
 - Position sizing based on account balance and risk percentage per trade
-- Hard stop loss enforcement
+- Hard stop loss enforcement (static SL checked independently of trailing stop)
 - Max daily drawdown circuit breaker (halts all trading if triggered)
 - Max open positions limit
+- State persisted to `runtime/risk_state.json` using async-safe I/O (offloaded to thread pool on the event loop; direct call in Celery context)
 
 ### 8. Portfolio Manager
 - Tracks all open and closed positions
@@ -227,9 +230,22 @@ See [setup.md](setup.md) for full setup instructions.
 | Trailing stops | ✅ Complete | DB field, outcome resolver updated, Strategies UI input |
 | Auth / login | ✅ Complete | JWT, bcrypt, all /api/* protected, login page |
 | Notification system | ✅ Complete | In-app bell + DB log + Gmail SMTP alerts |
+| Notification archival | ✅ Complete | `tasks/notification_cleanup.py` — 30-day TTL for read notifications, weekly Sunday |
 | Signal deduplication | ✅ Complete | Dedup window per timeframe in Forward Test |
-| Per-strategy confluence | ✅ Complete | mean_reversion_bb bypasses confluence; others default 0.5 |
+| Per-strategy confluence | ✅ Complete | Options strategies bypass confluence (0.0); mean_reversion_bb also bypasses; others default 0.5 |
+| Real-time price streaming | ✅ Complete | `PriceStreamManager` — per-broker WebSocket tasks; feeds monitor_sl_tp sub-second prices |
+| SL/TP concurrency guard | ✅ Complete | `_MONITOR_SL_TP_LOCK` — prevents duplicate in-process monitor runs |
+| DB indexes | ✅ Complete | `ix_trades_broker`, `ix_trades_strategy_name`, `ix_trades_status_is_paper` (Alembic p6q7r8s9t0u1) |
 
 ### Pending (Phase 2 remaining)
 - **OPS-01** VPS deployment guide (`docker-compose.prod.yml`, CI/CD, automated DB backup)
-- **EX-01** Options strategies via IBKR (Iron Condor, Covered Call, Bull Call Spread, IV Rank)
+
+---
+
+## Audit History
+
+| Audit | Date | Findings | Status |
+|---|---|---|---|
+| [Audit 1](audit.md) | Mar 7, 2026 | 60 findings across all modules | ✅ All fixed |
+| [Audit 2](audit2.md) | Jun 2025 | 8 bugs, 12 gaps, 9 improvements | ✅ All fixed |
+| [Audit 3](audit3.md) | Mar 10, 2026 | 5 bugs, 5 gaps, 5 improvements | ✅ All fixed |
