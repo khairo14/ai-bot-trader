@@ -339,7 +339,12 @@ async def get_candles(
                 vol = max(0.0, round(float(row.get("volume", 0)), 4))  # type: ignore[union-attr]
                 if any(_math.isnan(v) or _math.isinf(v) for v in (o, h, lo, c)):
                     continue
-                if o == 0.0 and h == 0.0 and lo == 0.0 and c == 0.0:
+                # Skip bars where any price field is zero or negative — IBKR
+                # returns 0.0 for unavailable prices (e.g. closed-session bars)
+                # and -1.0 as a sentinel.  A zero close fed through EMA/RSI
+                # produces NaN on the frontend, and a zero price rendered by
+                # lightweight-charts creates a visually broken candle.
+                if o <= 0 or h <= 0 or lo <= 0 or c <= 0:
                     continue
             except Exception:
                 continue

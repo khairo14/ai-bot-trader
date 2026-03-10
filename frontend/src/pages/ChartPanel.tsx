@@ -604,15 +604,35 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
         axios.get('/api/charts/trades',  { params: { symbol, broker, since, until }, signal }),
       ])
 
-      const candles: Candle[] = (candleRes.data.candles as Candle[]).sort((a, b) => a.time - b.time)
+      const rawCandles: Candle[] = (candleRes.data.candles as Candle[]).sort((a, b) => a.time - b.time)
+      // Strip any bar where OHLCV contains null/undefined/NaN/Infinity.
+      // FastAPI can serialise Python float('nan') as the literal token NaN (invalid
+      // JSON) or as null depending on the serialiser (orjson → null, stdlib → NaN).
+      // Either way lightweight-charts' ensureNotNull() throws "Value is null" if
+      // it receives a null for time/open/high/low/close.  Filter here so the
+      // candlestick series never receives bad data regardless of what the backend sends.
+      const candles = rawCandles.filter(c =>
+        c.time != null && isFinite(c.time) && c.time > 0 &&
+        c.open  != null && isFinite(c.open)  && c.open  > 0 &&
+        c.high  != null && isFinite(c.high)  && c.high  > 0 &&
+        c.low   != null && isFinite(c.low)   && c.low   > 0 &&
+        c.close != null && isFinite(c.close) && c.close > 0
+      )
       if (!candles.length) { toast.error('No candle data for this symbol.'); return }
 
-      candleRef.current!.setData(
-        candles.map(c => ({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close }))
-      )
-      volRef.current?.setData(
-        candles.map(c => ({ time: c.time as any, value: c.volume, color: c.close >= c.open ? '#22c55e33' : '#ef444433' }))
-      )
+      try {
+        candleRef.current!.setData(
+          candles.map(c => ({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close }))
+        )
+      } catch (seriesErr: any) {
+        toast.error(`Chart series error: ${seriesErr?.message ?? seriesErr}`)
+        return
+      }
+      try {
+        volRef.current?.setData(
+          candles.map(c => ({ time: c.time as any, value: c.volume ?? 0, color: c.close >= c.open ? '#22c55e33' : '#ef444433' }))
+        )
+      } catch {}
 
       // Sanitise closes: replace null/NaN/Infinity (IBKR sentinel values) with
       // the nearest previous valid close so EMA/RSI/MACD don't propagate NaN.
