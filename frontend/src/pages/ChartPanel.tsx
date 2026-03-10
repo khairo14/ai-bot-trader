@@ -571,6 +571,13 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     setLoadingMsg(broker === 'ibkr' ? 'Connecting to IBKR…' : 'Loading…')
     // Update paramsKey so in-flight live polls from the previous symbol abort
     paramsKeyRef.current = `${broker}/${symbol}/${timeframe}`
+    // CRITICAL: clear markers BEFORE setData — the createSeriesMarkers plugin
+    // fires synchronously inside setData and tries to anchor each marker to a
+    // bar by index.  If old markers from a previous symbol are still attached,
+    // findBar() returns null for non-matching timestamps and ensureNotNull()
+    // throws "Value is null", aborting the entire setData call.
+    markersPluginRef.current?.setMarkers([])
+    cachedMarkersRef.current = null
     // Clear all series immediately so the chart goes blank while the new
     // symbol loads — prevents the WS from appending new-symbol candles onto
     // old-symbol data (which creates a visible gap)
@@ -625,6 +632,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
           candles.map(c => ({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close }))
         )
       } catch (seriesErr: any) {
+        console.error('[Chart] setData error:', seriesErr, 'first candle:', candles[0], 'last candle:', candles[candles.length - 1])
         toast.error(`Chart series error: ${seriesErr?.message ?? seriesErr}`)
         return
       }
