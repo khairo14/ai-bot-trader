@@ -20,14 +20,13 @@ _VALID_BROKERS = {"binance", "alpaca", "ibkr"}
 async def _fetch_ohlcv(symbol: str, timeframe: str, broker_name: str) -> pd.DataFrame:
     """Fetch recent OHLCV data using the same broker clients as signal generation."""
     broker = get_broker(broker_name)
+    await broker.connect()
     try:
         data = await broker.get_ohlcv(symbol, timeframe, limit=200)
         return data
     except Exception as exc:
         logger.warning(f"[Regime] fetch_ohlcv({symbol}, {timeframe}, {broker_name}): {exc}")
         raise HTTPException(status_code=502, detail=f"Could not fetch market data: {exc}")
-    finally:
-        await broker.close()
 
 
 @router.get("")

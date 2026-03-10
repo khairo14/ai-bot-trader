@@ -41,27 +41,21 @@ async def run_tool(request: ToolRunRequest):
     from tools import get_tool
     from brokers import get_broker
 
-    broker = None
+    broker = get_broker(request.broker)
+    await broker.connect()
+    df = await broker.get_ohlcv(request.symbol, request.timeframe, request.limit)
+    tool = get_tool(request.tool_name)
+    params = request.parameters or {}
     try:
-        broker = get_broker(request.broker)
-        df = await broker.get_ohlcv(request.symbol, request.timeframe, request.limit)
-        tool = get_tool(request.tool_name)
-        params = request.parameters or {}
         output = tool.calculate(df, **params)
-        return {
-            "tool": output.tool,
-            "symbol": request.symbol,
-            "timeframe": request.timeframe,
-            "value": output.value,
-            "signal": output.signal,
-            "strength": output.strength,
-            "metadata": output.metadata,
-        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        if broker is not None:
-            try:
-                await broker.close()
-            except Exception:
-                pass
+    return {
+        "tool": output.tool,
+        "symbol": request.symbol,
+        "timeframe": request.timeframe,
+        "value": output.value,
+        "signal": output.signal,
+        "strength": output.strength,
+        "metadata": output.metadata,
+    }
