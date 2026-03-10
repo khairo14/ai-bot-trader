@@ -143,7 +143,8 @@ class HybridStrategy(BaseStrategy):
         # If no model is trained yet, ml_prob is None and we fall back to rule-only.
         ml_prob: Optional[float] = None
         try:
-            ml_prob = ml_scorer.predict_proba(data, symbol)
+            # G8: pass timeframe so scorer loads the TF-specific model
+            ml_prob = ml_scorer.predict_proba(data, symbol, timeframe=timeframe)
         except Exception as _ml_err:
             logger.debug(f"[{self.name}] ML scorer skipped: {_ml_err}")
 

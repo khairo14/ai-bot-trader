@@ -28,21 +28,13 @@ class Base(DeclarativeBase):
 
 
 async def init_db():
-    """Apply safe additive column migrations only — schema is managed by Alembic."""
+    """Verify DB connectivity on startup — schema is managed by Alembic.
+
+    G10: Raw ALTER TABLE statements removed; these columns are now tracked in
+    Alembic migration n4o5p6q7r8s9_audit2_schema_fixes.py. Run
+    `alembic upgrade head` to apply any pending migrations.
+    """
     from db import models  # noqa: F401 — ensure models are registered
-    from sqlalchemy import text
-    # NOTE: create_all() is intentionally removed — use `alembic upgrade head` for schema.
-    # Only idempotent ADD COLUMN IF NOT EXISTS statements are allowed here.
-    async with engine.begin() as conn:
-        safe_alters = [
-            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS notes VARCHAR(500)",
-            "ALTER TABLE signals ADD COLUMN IF NOT EXISTS dismissed BOOLEAN DEFAULT FALSE",
-        ]
-        for stmt in safe_alters:
-            try:
-                await conn.execute(text(stmt))
-            except Exception as e:
-                logger.warning(f"[DB] Column migration skipped ({stmt}): {e}")
     logger.info("Database schema verified (Alembic-managed).")
 
 

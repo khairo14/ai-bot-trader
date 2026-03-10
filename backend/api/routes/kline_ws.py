@@ -22,7 +22,9 @@ import math
 import time as _time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from jose import JWTError, jwt as _jwt
 from loguru import logger
+from config import settings as _cfg
 
 router = APIRouter()
 
@@ -39,7 +41,20 @@ async def kline_ws(
     symbol: str = Query(...),
     timeframe: str = Query(default="1m"),
     broker: str = Query(default="binance"),
+    token: str = Query(default=""),
 ):
+    # B6: JWT authentication before accepting the connection
+    _raw_token = token or websocket.cookies.get("access_token", "")
+    if not _raw_token:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+    try:
+        _payload = _jwt.decode(_raw_token, _cfg.secret_key, algorithms=["HS256"])
+        if not _payload.get("sub"):
+            raise JWTError()
+    except JWTError:
+        await websocket.close(code=4001, reason="Invalid or expired token")
+        return
     await websocket.accept()
     broker = broker.lower()
     tf_secs = _TF_SECS.get(timeframe, 60)

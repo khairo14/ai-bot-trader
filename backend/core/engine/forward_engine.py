@@ -8,8 +8,7 @@ from core.strategies.base import Signal
 from core.risk_manager import RiskManager
 from brokers import get_broker
 from db.models import Trade, OrderStatus, ExecutionMode
-
-PAPER_INITIAL_CAPITAL = 10_000.0  # kept for legacy DB migration reference only
+from config import settings as _cfg
 
 
 class ForwardEngine:
@@ -83,7 +82,7 @@ class ForwardEngine:
             )
             realised_pnl: float = pnl_q.scalar_one()
             key = broker_val.value if hasattr(broker_val, 'value') else str(broker_val)
-            self._paper_balance[key] = PAPER_INITIAL_CAPITAL + realised_pnl
+            self._paper_balance[key] = _cfg.paper_initial_balance + realised_pnl
 
         self._initialized = True
         logger.info(
@@ -165,7 +164,7 @@ class ForwardEngine:
         except Exception as _bal_err:
             logger.warning(f"[ForwardEngine] Could not fetch balance from {signal.broker}: {_bal_err} — using fallback")
             broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
-            balance = self._paper_balance.get(broker_key, PAPER_INITIAL_CAPITAL)
+            balance = self._paper_balance.get(broker_key, _cfg.paper_initial_balance)
         try:
             positions = await broker.get_positions()
             open_count = len(positions)
@@ -276,7 +275,8 @@ class ForwardEngine:
         # ── Close any existing opposing position before opening a new one ────────
         # Prevents holding simultaneous long + short on the same symbol.
         # e.g. open BUY + new SHORT signal → close the BUY first, then open SHORT.
-        _long_sides = {"buy", "cover"}
+        # NOTE: "long" is an alias for "buy" used by the DB rebuild script.
+        _long_sides = {"buy", "cover", "long"}
         _new_is_long = signal.signal.upper() in ("BUY", "COVER")
         if db_session is not None:
             _existing_q = await db_session.execute(
@@ -303,6 +303,13 @@ class ForwardEngine:
                             f"[ForwardEngine] Failed to close opposing position for "
                             f"{_existing.symbol} id={_existing.id}: {_rev_err}"
                         )
+                else:
+                    # G1: same-direction position already OPEN — block pyramiding
+                    logger.info(
+                        f"[ForwardEngine] G1: Same-direction duplicate blocked: "
+                        f"{signal.signal} {signal.symbol} — already {_existing.side.upper()} id={_existing.id}"
+                    )
+                    return None
         elif signal.symbol in self._paper_positions:
             _existing = self._paper_positions[signal.symbol]
             _existing_is_long = _existing.side in _long_sides
@@ -317,6 +324,24 @@ class ForwardEngine:
                     logger.error(
                         f"[ForwardEngine] Failed to close opposing position for {_existing.symbol}: {_rev_err}"
                     )
+            else:
+                # G1: same-direction in-memory position exists — block pyramiding
+                logger.info(
+                    f"[ForwardEngine] G1: Same-direction duplicate blocked (in-memory): "
+                    f"{signal.signal} {signal.symbol} — already {_existing.side.upper()}"
+                )
+                return None
+
+        # G5: IBKR forex minimum lot size pre-check (25,000 base currency units)
+        _IBKR_FOREX_MIN_LOT = 25_000.0
+        _broker_key_g5 = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
+        _asset_cls_g5 = getattr(signal.asset_class, 'value', str(signal.asset_class or '')).upper()
+        if _broker_key_g5 == 'ibkr' and _asset_cls_g5 == 'FOREX' and effective_size < _IBKR_FOREX_MIN_LOT:
+            logger.warning(
+                f"[ForwardEngine] G5: IBKR forex lot {effective_size:.0f} < minimum {_IBKR_FOREX_MIN_LOT:.0f} "
+                f"for {signal.symbol} — order rejected to avoid IBKR rejection"
+            )
+            return None
 
         trade = Trade(
             symbol=signal.symbol,
@@ -325,6 +350,7 @@ class ForwardEngine:
             entry_price=signal.entry_price,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
+            trailing_stop_pct=getattr(signal, "trailing_stop_pct", None),
             status=OrderStatus.PENDING,
             execution_mode=execution_mode,
             broker=signal.broker,
@@ -332,6 +358,7 @@ class ForwardEngine:
             is_paper=is_paper,
             strategy_name=signal.strategy_name,
             opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            user_id=getattr(signal, "user_id", None),  # I9: propagate user for audit trail
         )
 
         # ── Broker API order (paper OR live) ────────────────────────────────────
@@ -543,6 +570,34 @@ class ForwardEngine:
         except Exception as _conn_err:
             logger.warning(f"[ForwardEngine] Broker connect failed before close: {_conn_err}")
 
+        # ── F-103: Verify broker holds this position before sending a market close ──
+        # If the broker is already flat (qty=0 or symbol absent), a directional market
+        # order creates an unintended reverse position.  Skip the order and fall through
+        # to the PnL / FILLED marking below using the price snapshot.
+        _FX_BASE_CLOSE = {"USD","EUR","GBP","JPY","CHF","CAD","AUD","NZD","SEK","NOK",
+                          "DKK","HKD","SGD","MXN","ZAR","HUF","PLN","TRY","CZK","ILS"}
+        _broker_key = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+
+        def _norm_sym_close(sym: str) -> str:
+            clean = sym.replace("/", "").upper()
+            if _broker_key == "ibkr" and len(clean) == 6 and clean[:3] in _FX_BASE_CLOSE and clean[3:] in _FX_BASE_CLOSE:
+                return clean[:3]
+            return clean if _broker_key == "alpaca" else sym
+
+        _skip_market_order = False
+        try:
+            _bpos = await broker.get_positions()
+            _norm_sym = _norm_sym_close(trade.symbol)
+            _has_pos = any(abs(p.quantity) >= 1 and p.symbol == _norm_sym for p in _bpos)
+            if not _has_pos:
+                logger.warning(
+                    f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} qty=0 at {_broker_key} "
+                    f"— skipping market close order, marking FILLED at snapshot price"
+                )
+                _skip_market_order = True
+        except Exception as _f103_err:
+            logger.debug(f"[ForwardEngine] F-103 position check failed: {_f103_err} — proceeding with close order")
+
         # ── Fetch current market price (live and paper) ───────────────────
         exit_price: float = 0.0
         try:
@@ -556,34 +611,49 @@ class ForwardEngine:
         # F-071: COVER positions are buy-to-cover (long), so they close the same
         # way as BUY positions — by selling.  Using a simple "not buy" check was
         # wrong for "cover" (resolved to "buy" instead of "sell").
-        _long_sides = {"buy", "cover"}
+        # NOTE: "long" is an alias for "buy" used by the DB rebuild script.
+        _long_sides = {"buy", "cover", "long"}
         side = "sell" if trade.side in _long_sides else "buy"
-        try:
-            close_result = await broker.place_order(
-                symbol=trade.symbol,
-                side=side,
-                quantity=trade.quantity,
-                order_type="market",
-            )
-            # Use broker-confirmed fill price for PnL accuracy
-            if close_result.fill_price:
-                exit_price = close_result.fill_price
-                logger.info(f"[ForwardEngine] Close order filled @ {exit_price} (confirmed)")
-            elif exit_price:
-                logger.warning(
-                    f"[ForwardEngine] Close order {close_result.order_id} not confirmed filled — "
-                    f"using price snapshot ({exit_price}) for PnL"
+        if not _skip_market_order:
+            try:
+                close_result = await broker.place_order(
+                    symbol=trade.symbol,
+                    side=side,
+                    quantity=trade.quantity,
+                    order_type="market",
                 )
-            else:
-                raise RuntimeError("Close order unconfirmed and no price snapshot available")
-        except RuntimeError:
-            raise
-        except Exception as _close_err:
-            logger.error(
-                f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
-                "— trade left OPEN to avoid phantom fill"
-            )
-            raise
+                # Use broker-confirmed fill price for PnL accuracy
+                if close_result.fill_price:
+                    exit_price = close_result.fill_price
+                    logger.info(f"[ForwardEngine] Close order filled @ {exit_price} (confirmed)")
+                elif exit_price:
+                    logger.warning(
+                        f"[ForwardEngine] Close order {close_result.order_id} not confirmed filled — "
+                        f"using price snapshot ({exit_price}) for PnL"
+                    )
+                else:
+                    raise RuntimeError("Close order unconfirmed and no price snapshot available")
+            except RuntimeError:
+                raise
+            except Exception as _close_err:
+                # F-103b: revert the atomic guard (PENDING→OPEN) so the next scheduler tick
+                # can retry instead of leaving the trade permanently stuck as PENDING.
+                if db_session is not None and trade.id is not None:
+                    from sqlalchemy import update as _upd_revert
+                    try:
+                        await db_session.execute(
+                            _upd_revert(Trade)
+                            .where(Trade.id == trade.id, Trade.status == OrderStatus.PENDING)
+                            .values(status=OrderStatus.OPEN)
+                        )
+                        await db_session.flush()
+                    except Exception:
+                        pass
+                logger.error(
+                    f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
+                    "— guard reverted to OPEN for retry next tick"
+                )
+                raise
 
         # ── Compute realised PnL ──────────────────────────────────────────
         if exit_price and trade.entry_price:
@@ -672,12 +742,11 @@ class ForwardEngine:
         logger.warning("[ForwardEngine] ⚠️ EMERGENCY STOP ACTIVATED")
 
         if db_session is not None:
-            # DB-authoritative: close every open paper trade.
-            # Live trades are intentionally excluded — use the broker platform for live emergency stops.
+            # DB-authoritative: close ALL open trades (paper and live).
+            # G2: live trades are included so a single emergency stop covers everything.
             open_q = await db_session.execute(
                 select(Trade).where(
                     Trade.status == OrderStatus.OPEN,
-                    Trade.is_paper == True,
                 )
             )
             all_open = open_q.scalars().all()
@@ -732,7 +801,8 @@ class ForwardEngine:
         if not open_trades:
             return 0
 
-        _long_sides = {"buy", "cover"}
+        # NOTE: "long" is an alias for "buy" used by the DB rebuild script.
+        _long_sides = {"buy", "cover", "long"}
         closed_count = 0
         # F-082: cache prices per (broker, symbol) to avoid redundant API calls when
         # multiple trades share the same symbol on the same broker (e.g. scaled entries).
@@ -760,11 +830,59 @@ class ForwardEngine:
             # LONG exits sell at the bid → check bid against SL/TP.
             # SHORT exits buy at the ask → check ask against SL/TP.
             exit_price = bid_price if is_long else ask_price
-            reason: str | None = None
 
-            if trade.stop_loss is not None:
-                # For long: SL fires when bid falls at or below SL
-                # For short: SL fires when ask rises at or above SL
+            # ── Trailing stop: ratchet stop_loss with price movement ─────────
+            # Only moves the stop in the favourable direction (never widens it).
+            # Uses mid-high (bid for long, ask for short) as the reference price
+            # so the trail tracks the best price the position has seen.
+            if trade.trailing_stop_pct is not None and trade.entry_price is not None:
+                _trail_pct = trade.trailing_stop_pct / 100.0
+                if is_long:
+                    # Trail: SL = best_bid × (1 − pct) — only move UP
+                    _new_trail = bid_price * (1.0 - _trail_pct)
+                    if trade.stop_loss is None or _new_trail > trade.stop_loss:
+                        _old_sl = trade.stop_loss
+                        logger.info(
+                            f"[ForwardEngine] Trailing stop UP: {trade.symbol} id={trade.id} "
+                            f"sl {_old_sl} → {_new_trail:.6f}  (bid={bid_price}  trail={trade.trailing_stop_pct}%)"
+                        )
+                        trade.stop_loss = _new_trail
+                        db_session.add(trade)
+                        await db_session.flush()
+                        # G11: broadcast and notify trailing stop movement
+                        try:
+                            from api.websocket import manager as _ws_mgr
+                            await _ws_mgr.broadcast("trailing_stop_moved", {
+                                "trade_id": trade.id, "symbol": trade.symbol,
+                                "old_stop": round(_old_sl, 8) if _old_sl else None,
+                                "new_stop": round(_new_trail, 8),
+                                "direction": "up", "broker": trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker),
+                            })
+                        except Exception:
+                            pass
+                else:
+                    # Trail: SL = best_ask × (1 + pct) — only move DOWN
+                    _new_trail = ask_price * (1.0 + _trail_pct)
+                    if trade.stop_loss is None or _new_trail < trade.stop_loss:
+                        _old_sl = trade.stop_loss
+                        logger.info(
+                            f"[ForwardEngine] Trailing stop DOWN: {trade.symbol} id={trade.id} "
+                            f"sl {_old_sl} → {_new_trail:.6f}  (ask={ask_price}  trail={trade.trailing_stop_pct}%)"
+                        )
+                        trade.stop_loss = _new_trail
+                        db_session.add(trade)
+                        await db_session.flush()
+                        # G11: broadcast and notify trailing stop movement
+                        try:
+                            from api.websocket import manager as _ws_mgr
+                            await _ws_mgr.broadcast("trailing_stop_moved", {
+                                "trade_id": trade.id, "symbol": trade.symbol,
+                                "old_stop": round(_old_sl, 8) if _old_sl else None,
+                                "new_stop": round(_new_trail, 8),
+                                "direction": "down", "broker": trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker),
+                            })
+                        except Exception:
+                            pass
                 if is_long and exit_price <= trade.stop_loss:
                     reason = "stop_loss"
                 elif not is_long and exit_price >= trade.stop_loss:
@@ -834,7 +952,10 @@ class ForwardEngine:
             return symbol  # binance and others already match
 
         open_q = await db_session.execute(
-            _sel(Trade).where(Trade.status == OrderStatus.OPEN)
+            # F-105: also reconcile PENDING entry trades — fill may have arrived after
+            # the 30 s poll window, or the entry fill + broker SL/TP chain completed
+            # before we could check.  Ignoring PENDING left ghost positions permanently.
+            _sel(Trade).where(Trade.status.in_([OrderStatus.OPEN, OrderStatus.PENDING]))
         )
         open_trades: list = open_q.scalars().all()
         if not open_trades:
@@ -846,7 +967,8 @@ class ForwardEngine:
             by_broker[bk].append(t)
 
         ghost_count = 0
-        _long_sides = {"buy", "cover"}
+        # NOTE: "long" is an alias for "buy" used by the DB rebuild script.
+        _long_sides = {"buy", "cover", "long"}
 
         for broker_name, trades in by_broker.items():
             try:
@@ -859,8 +981,43 @@ class ForwardEngine:
                 continue
 
             for trade in trades:
-                if _normalize(trade.symbol, broker_name) in broker_symbols:
-                    continue  # still open at broker — skip
+                _norm_key = _normalize(trade.symbol, broker_name)
+                if _norm_key in broker_symbols:
+                    # F-105: PENDING entry trade confirmed filled at broker → upgrade to OPEN
+                    if trade.status == OrderStatus.PENDING:
+                        pos = next(
+                            (p for p in broker_positions if p.symbol == _norm_key), None
+                        )
+                        if pos and getattr(pos, "entry_price", None):
+                            trade.entry_price = round(pos.entry_price, 8)
+                        trade.status = OrderStatus.OPEN
+                        self._paper_positions[trade.symbol] = trade
+                        ghost_count += 1
+                        logger.info(
+                            f"[ForwardEngine] F-105: PENDING {trade.symbol} id={trade.id} "
+                            f"confirmed at broker → OPEN @ {trade.entry_price}"
+                        )
+                    continue  # position exists at broker — no further action needed
+
+                # Position is gone from broker.
+                # F-105: PENDING with no real orderId → order never reached broker → REJECTED
+                if trade.status == OrderStatus.PENDING:
+                    _oid = trade.broker_order_id or ""
+                    if _oid.startswith("rejected_") or not _oid:
+                        trade.status = OrderStatus.REJECTED
+                        ghost_count += 1
+                        logger.info(
+                            f"[ForwardEngine] F-105: PENDING {trade.symbol} id={trade.id} "
+                            f"no real orderId → REJECTED"
+                        )
+                        continue
+                    # Real orderId: order submitted, filled+closed at broker before reconcile
+                    # (e.g. entry filled + SL/TP bracket fired before next scheduler tick).
+                    # Fall through to the ghost-close logic to record FILLED in DB.
+                    logger.info(
+                        f"[ForwardEngine] F-105: PENDING {trade.symbol} id={trade.id} "
+                        f"orderId={_oid} filled+closed at broker — reconciling as FILLED"
+                    )
 
                 # Position is gone from broker → SL/TP fired (or manually closed via broker UI)
                 logger.info(

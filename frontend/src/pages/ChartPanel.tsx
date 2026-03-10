@@ -463,9 +463,10 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     const tradeMarkers: any[] = []
     if (showTradesRef.current && candleRef.current) {
       for (const t of trades) {
-        const isBuy      = t.side === 'buy' || t.side === 'cover'
+        const isBuy      = t.side === 'buy' || t.side === 'cover' || t.side === 'long'
         const entryColor = t.is_paper ? '#60a5fa' : '#f59e0b'
         const modeTag    = t.is_paper ? 'P' : 'L'
+        const sideLabel  = t.side === 'long' ? 'BUY' : t.side === 'short' ? 'SELL' : t.side.toUpperCase()
 
         if (t.entry_time && t.entry_price && t.entry_time >= minTime) {
           // Snap to the last candle when the trade was placed after the chart window
@@ -477,7 +478,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
             position: isBuy ? 'belowBar' : 'aboveBar',
             color:    entryColor,
             shape:    isBuy ? 'arrowUp' : 'arrowDown',
-            text:     `[${modeTag}] ${t.side.toUpperCase()}${pnlTag}`,
+            text:     `[${modeTag}] ${sideLabel}${pnlTag}`,
             size:     2,
           })
         }

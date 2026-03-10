@@ -107,7 +107,7 @@ class RegimeClassifier:
     ADX_TREND_THRESHOLD:   float = 25.0   # ADX above this → trending
     ATR_NORM_HIGH_VOL:     float = 0.035  # ATR/price above this → high volatility
     BB_WIDTH_LOW_VOL:      float = 0.02   # BB width ((upper-lower)/middle) below → squeeze
-    EMA_SLOPE_PERIODS:     int   = 3      # candles used to compute EMA slope
+    EMA_SLOPE_PERIODS:     int   = 15     # candles used to compute EMA slope
 
     def __init__(self):
         self._atr = ATR()

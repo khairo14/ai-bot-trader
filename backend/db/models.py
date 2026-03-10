@@ -94,7 +94,7 @@ class Signal(Base):
     reasons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)  # list of reason strings
     acted_on: Mapped[bool] = mapped_column(Boolean, default=False)
     dismissed: Mapped[bool] = mapped_column(Boolean, default=False)  # hidden from Recent Signals UI
-    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False, index=True)
     # ── Options-specific fields (NULL for equity / crypto signals) ───────────
     iv_rank: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # 0–100
     delta:   Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -156,6 +156,7 @@ class Trade(Base):
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stop_loss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     take_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trailing_stop_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # e.g. 1.5 → trail by 1.5%
     pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[OrderStatus] = mapped_column(SAEnum(OrderStatus), default=OrderStatus.PENDING)

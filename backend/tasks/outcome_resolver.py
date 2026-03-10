@@ -203,84 +203,105 @@ def _resolve_outcome(
     return {}
 
 
+# G4: Per-timeframe resolution horizon (candles)
+_HORIZON_BY_TF: dict[str, int] = {
+    "1m": 60, "5m": 36, "15m": 30, "30m": 24,
+    "1h": 24, "4h": 20, "1d": 10, "1w": 5,
+}
+
+
 # ─────────────────────────────────────────────────────────────
 # Async resolver
 # ─────────────────────────────────────────────────────────────
 async def resolve_pending_outcomes() -> dict:
     """Main async entry point. Returns summary dict."""
     from db.database import AsyncSessionLocal
-    from db.models import TradeOutcome, OutcomeResult
+    from db.models import TradeOutcome, OutcomeResult, Signal, Strategy
     from sqlalchemy import select
+    from collections import defaultdict
+    import pandas as pd
 
     now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     cutoff = now - datetime.timedelta(hours=MIN_AGE_HOURS)
 
+    # B5: Single session with FOR UPDATE SKIP LOCKED — concurrent resolvers
+    # claim disjoint row sets so each outcome is resolved exactly once.
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(TradeOutcome).where(
                 TradeOutcome.resolved == False,  # noqa: E712
                 TradeOutcome.created_at <= cutoff,
-            )
+            ).with_for_update(skip_locked=True)
         )
         pending = result.scalars().all()
 
-    if not pending:
-        logger.info("[resolver] No pending outcomes to resolve.")
-        return {"resolved": 0, "skipped": 0, "errors": 0}
+        if not pending:
+            logger.info("[resolver] No pending outcomes to resolve.")
+            return {"resolved": 0, "skipped": 0, "errors": 0}
 
-    logger.info(f"[resolver] Resolving {len(pending)} pending outcomes…")
+        logger.info(f"[resolver] Resolving {len(pending)} pending outcomes…")
 
-    resolved_count = 0
-    skipped_count = 0
-    error_count = 0
+        resolved_count = 0
+        skipped_count = 0
+        error_count = 0
 
-    # Group by (symbol, timeframe, broker) to minimise broker OHLCV calls.
-    # TradeOutcome has timeframe; broker comes from the linked Signal row.
-    from collections import defaultdict
-    from db.models import Signal
-    from sqlalchemy import select as sa_select
-
-    # Eagerly load broker for each outcome via its signal_id
-    async with AsyncSessionLocal() as session:
+        # Eagerly load signal broker for each outcome via its signal_id
         sig_ids = [o.signal_id for o in pending if o.signal_id is not None]
-        sig_rows = {}
+        sig_rows: dict = {}
         if sig_ids:
-            res = await session.execute(sa_select(Signal).where(Signal.id.in_(sig_ids)))
+            res = await session.execute(select(Signal).where(Signal.id.in_(sig_ids)))
             sig_rows = {s.id: s for s in res.scalars().all()}
 
-    # Build groups: key = (symbol, timeframe, broker_name)
-    by_group: dict[tuple, list] = defaultdict(list)
-    for o in pending:
-        sig = sig_rows.get(o.signal_id) if o.signal_id else None
-        if sig:
-            broker_name = sig.broker.value
-        else:
-            # Infer broker from symbol: crypto pairs contain '/' (e.g. BTC/USDT)
-            broker_name = "binance" if "/" in o.symbol else "alpaca"
-        key = (o.symbol, o.timeframe, broker_name)
-        by_group[key].append(o)
-
-    for (symbol, timeframe, broker_name), outcomes in by_group.items():
-        oldest = min(o.created_at for o in outcomes)
-        df = await _fetch_ohlcv_broker(broker_name, symbol, timeframe, oldest)
-        if df is None:
-            logger.warning(
-                f"[resolver] Could not fetch OHLCV for {symbol}/{timeframe} via {broker_name} "
-                f"— skipping {len(outcomes)} outcomes"
+        # G3: Pre-load strategy broker map for NULL-signal_id outcomes
+        strategy_names = {o.strategy_name for o in pending if o.signal_id is None and o.strategy_name}
+        strategy_broker_map: dict[str, str] = {}
+        if strategy_names:
+            strat_res = await session.execute(
+                select(Strategy).where(Strategy.name.in_(strategy_names))
             )
-            skipped_count += len(outcomes)
-            continue
+            for strat in strat_res.scalars().all():
+                strategy_broker_map[strat.name] = strat.broker.value
 
-        async with AsyncSessionLocal() as session:
+        def _infer_broker(o: TradeOutcome) -> str:
+            # G3: lookup chain — (1) strategy table, (2) symbol heuristic
+            if o.strategy_name and o.strategy_name in strategy_broker_map:
+                return strategy_broker_map[o.strategy_name]
+            # Crypto pairs use "/" (BTC/USDT), IBKR forex uses 6-char alpha (GBPUSD)
+            if "/" in o.symbol:
+                return "binance"
+            if len(o.symbol) == 6 and o.symbol.isalpha():
+                return "ibkr"
+            return "alpaca"
+
+        # Build groups: key = (symbol, timeframe, broker_name)
+        by_group: dict[tuple, list] = defaultdict(list)
+        for o in pending:
+            sig = sig_rows.get(o.signal_id) if o.signal_id else None
+            broker_name = sig.broker.value if sig else _infer_broker(o)
+            by_group[(o.symbol, o.timeframe, broker_name)].append(o)
+
+        # Fetch OHLCV once per group (I6: already grouped, no per-outcome re-fetch)
+        # and resolve all outcomes in the same locked session.
+        for (symbol, timeframe, broker_name), outcomes in by_group.items():
+            # G4: resolution horizon depends on timeframe
+            horizon = _HORIZON_BY_TF.get(timeframe, RESOLUTION_HORIZON)
+
+            oldest = min(o.created_at for o in outcomes)
+            df = await _fetch_ohlcv_broker(broker_name, symbol, timeframe, oldest)
+            if df is None:
+                logger.warning(
+                    f"[resolver] Could not fetch OHLCV for {symbol}/{timeframe} via {broker_name} "
+                    f"— skipping {len(outcomes)} outcomes"
+                )
+                skipped_count += len(outcomes)
+                continue
+
             for o in outcomes:
                 try:
-                    # Slice df from entry candle onwards
                     if o.created_at is None:
                         skipped_count += 1
                         continue
 
-                    # Find first candle on or after the signal timestamp
-                    import pandas as pd
                     entry_ts = pd.Timestamp(o.created_at).tz_localize(None)
                     future_df = df[df.index >= entry_ts]
 
@@ -294,7 +315,7 @@ async def resolve_pending_outcomes() -> dict:
                         take_profit=o.take_profit,
                         signal_type=o.signal_type,
                         df=future_df,
-                        horizon=RESOLUTION_HORIZON,
+                        horizon=horizon,
                         trailing_stop_pct=getattr(o, "trailing_stop_pct", None),
                     )
 
@@ -302,19 +323,14 @@ async def resolve_pending_outcomes() -> dict:
                         skipped_count += 1
                         continue
 
-                    # Refresh the row within this session
-                    db_outcome = await session.get(TradeOutcome, o.id)
-                    if db_outcome is None:
-                        skipped_count += 1
-                        continue
-
-                    db_outcome.outcome = OutcomeResult(result_dict["outcome"])
-                    db_outcome.pnl_pct = result_dict["pnl_pct"]
-                    db_outcome.exit_price = result_dict["exit_price"]
-                    db_outcome.candles_held = result_dict["candles_held"]
-                    db_outcome.ml_label = result_dict["ml_label"]
-                    db_outcome.resolved = True
-                    db_outcome.resolved_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                    # The row is already locked in this session — update directly
+                    o.outcome = OutcomeResult(result_dict["outcome"])
+                    o.pnl_pct = result_dict["pnl_pct"]
+                    o.exit_price = result_dict["exit_price"]
+                    o.candles_held = result_dict["candles_held"]
+                    o.ml_label = result_dict["ml_label"]
+                    o.resolved = True
+                    o.resolved_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
                     resolved_count += 1
                     logger.info(
@@ -327,7 +343,8 @@ async def resolve_pending_outcomes() -> dict:
                     logger.error(f"[resolver] Error resolving outcome id={o.id}: {exc}")
                     error_count += 1
 
-            await session.commit()
+        # Commit all resolutions atomically (also releases FOR UPDATE locks)
+        await session.commit()
 
     summary = {
         "resolved": resolved_count,

@@ -15,15 +15,51 @@ from loguru import logger
 from db.database import AsyncSessionLocal
 from db.models import User
 from core.auth import hash_password, verify_password, create_access_token, get_current_user, audit
+from config import settings as _cfg_auth
 
 router = APIRouter()
 
-# ── Simple in-process login rate limiter ─────────────────────────────────────
-# Limits each IP to _LOGIN_MAX_ATTEMPTS failed attempts within _LOGIN_WINDOW seconds.
-import collections, time as _time
+# ── Redis-backed login rate limiter (G6) ─────────────────────────────────────
+# Falls back to in-process dict if Redis is unavailable (single-worker dev mode).
+# Redis key:  login_fail:{ip}   (incremented counter, TTL = _LOGIN_WINDOW seconds)
 _LOGIN_WINDOW = 300       # 5-minute sliding window
 _LOGIN_MAX_ATTEMPTS = 10  # max failed attempts per IP in that window
-_login_attempts: dict[str, list[float]] = collections.defaultdict(list)
+import collections, time as _time
+_login_attempts_fallback: dict[str, list[float]] = collections.defaultdict(list)
+
+
+async def _is_rate_limited(client_ip: str) -> bool:
+    """Return True if the IP has exceeded the login failure threshold."""
+    try:
+        import redis.asyncio as _aioredis
+        _redis = _aioredis.from_url(_cfg_auth.redis_url, decode_responses=True)
+        _key = f"login_fail:{client_ip}"
+        count = await _redis.get(_key)
+        await _redis.aclose()
+        return int(count or 0) >= _LOGIN_MAX_ATTEMPTS
+    except Exception:
+        # Fallback: in-process sliding window
+        now = _time.monotonic()
+        pruned = [t for t in _login_attempts_fallback[client_ip] if now - t < _LOGIN_WINDOW]
+        if pruned:
+            _login_attempts_fallback[client_ip] = pruned
+        else:
+            _login_attempts_fallback.pop(client_ip, None)
+        return len(pruned) >= _LOGIN_MAX_ATTEMPTS
+
+
+async def _record_failure(client_ip: str) -> None:
+    """Record a failed login attempt (increments Redis counter with TTL)."""
+    try:
+        import redis.asyncio as _aioredis
+        _redis = _aioredis.from_url(_cfg_auth.redis_url, decode_responses=True)
+        _key = f"login_fail:{client_ip}"
+        await _redis.incr(_key)
+        await _redis.expire(_key, _LOGIN_WINDOW)
+        await _redis.aclose()
+    except Exception:
+        # Fallback: in-process
+        _login_attempts_fallback[client_ip].append(_time.monotonic())
 
 _JWT_COOKIE = "access_token"  # httpOnly cookie name (F-056)
 
@@ -106,15 +142,8 @@ async def login(payload: LoginRequest, request: Request, response: Response):
     """Authenticate with username + password; sets an httpOnly cookie (F-056)."""
     client_ip = request.client.host if request.client else "unknown"
 
-    # Rate-limit check — sliding window per source IP
-    now = _time.monotonic()
-    pruned = [t for t in _login_attempts[client_ip] if now - t < _LOGIN_WINDOW]
-    # Evict the IP entry entirely when its window is empty to prevent unbounded dict growth.
-    if pruned:
-        _login_attempts[client_ip] = pruned
-    else:
-        _login_attempts.pop(client_ip, None)
-    if len(pruned) >= _LOGIN_MAX_ATTEMPTS:
+    # Rate-limit check (G6: Redis-backed per IP, falls back to in-process)
+    if await _is_rate_limited(client_ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts. Please try again later.",
@@ -127,8 +156,8 @@ async def login(payload: LoginRequest, request: Request, response: Response):
         user = result.scalar_one_or_none()
 
     if not user or not verify_password(payload.password, user.hashed_password):
-        # Record failed attempt for rate limiting
-        _login_attempts[client_ip].append(_time.monotonic())
+        # Record failed attempt for rate limiting (G6: Redis-backed)
+        await _record_failure(client_ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -140,12 +169,11 @@ async def login(payload: LoginRequest, request: Request, response: Response):
     logger.info(f"[Auth] Login: {user.username}")
     audit("user.login", actor=user.username, ip=client_ip)
     # Set httpOnly, Secure, SameSite=Strict cookie (F-056)
-    from config import settings as _settings
     response.set_cookie(
         key=_JWT_COOKIE,
         value=token,
         httponly=True,
-        secure=_settings.cookie_secure,
+        secure=_cfg_auth.cookie_secure,
         samesite="strict",
         max_age=7 * 24 * 3600,
         path="/",

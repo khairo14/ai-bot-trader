@@ -13,9 +13,10 @@ import pathlib
 import datetime
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select, func
+from core.auth import require_admin
 
 router = APIRouter()
 
@@ -121,18 +122,18 @@ async def ml_status():
     )
 
 
-@router.post("/resolve")
+@router.post("/resolve", dependencies=[Depends(require_admin)])
 async def trigger_resolve():
-    """Manually trigger outcome resolution (useful for testing)."""
+    """Manually trigger outcome resolution (admin only)."""
     from tasks.outcome_resolver import resolve_pending_outcomes
     import asyncio
     result = await resolve_pending_outcomes()
     return {"status": "ok", "result": result}
 
 
-@router.post("/retrain")
+@router.post("/retrain", dependencies=[Depends(require_admin)])
 async def trigger_retrain():
-    """Manually trigger ML retraining via Celery (async, returns task ID)."""
+    """Manually trigger ML retraining via Celery (admin only, returns task ID)."""
     try:
         from tasks.ml_retrain import retrain_all
         task = retrain_all.delay()

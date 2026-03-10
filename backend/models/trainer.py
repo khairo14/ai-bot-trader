@@ -29,6 +29,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# B4: import shared feature computation — single source of truth with ml_scorer.py
+from core.features import compute_features as _compute_features_shared, FEATURE_COLS
+
 # ── optional heavy imports (gracefully degrade if not installed) ─────────────
 try:
     import yfinance as yf
@@ -52,6 +55,21 @@ _BASE_DIR = pathlib.Path(__file__).resolve().parent.parent  # backend/
 MODEL_DIR = _BASE_DIR / "data" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+# G8: per-timeframe yfinance fetch profile
+# timeframe → (yf_interval, history_days, label_horizon_candles, min_labelled_rows)
+_TF_PROFILE: dict[str, tuple[str, int, int, int]] = {
+    "1m":  ("1m",   7,    60, 200),
+    "5m":  ("5m",   60,   36, 200),
+    "15m": ("15m",  60,   30, 100),
+    "30m": ("30m",  60,   24,  80),
+    "1h":  ("60m",  730,  24,  60),
+    "2h":  ("60m",  730,  20,  60),   # fetch 1h then resample to 2h
+    "4h":  ("60m",  730,  20,  60),   # fetch 1h then resample to 4h
+    "1d":  ("1d",   365,  10,  50),
+    "1w":  ("1wk", 1825,   5,  30),
+}
+_DEFAULT_TF_PROFILE: tuple[str, int, int, int] = ("1d", 365, 10, 50)
+
 
 def _symbol_to_yf(symbol: str) -> str:
     """Convert exchange symbol format to yfinance ticker.
@@ -73,8 +91,17 @@ def _symbol_to_yf(symbol: str) -> str:
     return symbol
 
 
-def _fetch_ohlcv(symbol: str, days: int = 90) -> Optional[pd.DataFrame]:
-    """Download daily OHLCV from yfinance. Returns None on failure."""
+def _fetch_ohlcv(symbol: str, days: int = 365, interval: str = "1d",
+                 resample_to: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """Download OHLCV from yfinance at the requested interval.
+
+    Args:
+        symbol      : Trading symbol (e.g. BTC/USDT or AAPL).
+        days        : Number of calendar days of history to request.
+        interval    : yfinance interval string (1m/5m/15m/30m/60m/1d/1wk).
+        resample_to : Optional pandas offset alias to resample bar size after
+                      download (e.g. '2h' or '4h' — not natively in yfinance).
+    """
     if not _YF_AVAILABLE:
         return None
     ticker = _symbol_to_yf(symbol)
@@ -82,7 +109,7 @@ def _fetch_ohlcv(symbol: str, days: int = 90) -> Optional[pd.DataFrame]:
         end = datetime.date.today()
         start = end - datetime.timedelta(days=days)
         df = yf.download(ticker, start=str(start), end=str(end),
-                         interval="1d", progress=False, auto_adjust=True)
+                         interval=interval, progress=False, auto_adjust=True)
         if df.empty:
             logger.warning(f"[trainer] yfinance returned empty data for {ticker}")
             return None
@@ -91,62 +118,38 @@ def _fetch_ohlcv(symbol: str, days: int = 90) -> Optional[pd.DataFrame]:
         # Flatten MultiIndex columns that yfinance sometimes produces
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [c[0] for c in df.columns]
-        return df[["open", "high", "low", "close", "volume"]].dropna()
+        df = df[["open", "high", "low", "close", "volume"]].dropna()
+        # Resample to a wider bar size (e.g. 1h → 4h) when yfinance lacks native support
+        if resample_to and not df.empty:
+            df = df.resample(resample_to).agg({
+                "open":   "first",
+                "high":   "max",
+                "low":    "min",
+                "close":  "last",
+                "volume": "sum",
+            }).dropna()
+        return df
     except Exception as exc:
         logger.warning(f"[trainer] yfinance fetch failed for {ticker}: {exc}")
         return None
 
 
 def _compute_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Engineer features from OHLCV DataFrame."""
-    out = pd.DataFrame(index=df.index)
-
+    """Compute features using shared module + add labeling helpers (_atr14, _close)."""
+    # B4: use shared compute_features; add helpers needed by _label()
+    out = _compute_features_shared(df)
+    if out is None:
+        return pd.DataFrame()
     close = df["close"]
     high = df["high"]
     low = df["low"]
-    volume = df["volume"]
-
-    # ── RSI-14 ────────────────────────────────────────────────────────────────
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    out["rsi"] = 100 - (100 / (1 + rs))
-
-    # ── MACD histogram ───────────────────────────────────────────────────────
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    macd_line = ema12 - ema26
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    out["macd_hist"] = macd_line - signal_line
-
-    # ── ATR-14 (normalised by close) ─────────────────────────────────────────
     tr = pd.concat([
         high - low,
         (high - close.shift()).abs(),
         (low - close.shift()).abs(),
     ], axis=1).max(axis=1)
-    atr14 = tr.rolling(14).mean()
-    out["atr_norm"] = atr14 / close  # dimensionless
-
-    # ── Volume ratio (vs 20-period mean) ────────────────────────────────────
-    vol_ma = volume.rolling(20).mean()
-    out["vol_ratio"] = volume / vol_ma.replace(0, np.nan)
-
-    # ── Bollinger Band position (0=lower, 1=upper) ───────────────────────────
-    bb_sma = close.rolling(20).mean()
-    bb_std = close.rolling(20).std()
-    bb_upper = bb_sma + 2 * bb_std
-    bb_lower = bb_sma - 2 * bb_std
-    band_range = (bb_upper - bb_lower).replace(0, np.nan)
-    out["bb_pct"] = (close - bb_lower) / band_range
-
-    # ── 1-day log return ─────────────────────────────────────────────────────
-    out["log_ret"] = np.log(close / close.shift(1))
-
-    out["_atr14"] = atr14   # kept for labelling, dropped before fit
+    out["_atr14"] = tr.rolling(14).mean()
     out["_close"] = close
-
     return out
 
 
@@ -195,20 +198,22 @@ class ModelTrainer:
             for strat in strategies:
                 params = strat.parameters or {}
                 sym = params.get("symbol")
+                tf = params.get("timeframe", "1d")
                 broker = str(strat.broker.value) if hasattr(strat.broker, "value") else str(strat.broker)
                 if sym:
-                    symbols.append((sym, broker))
+                    symbols.append((sym, broker, tf))
 
         except Exception as exc:
             logger.error(f"[trainer] DB query failed: {exc}")
 
-        # Deduplicate by symbol
-        seen: set[str] = set()
-        unique: list[tuple[str, str]] = []
-        for sym, broker in symbols:
-            if sym not in seen:
-                seen.add(sym)
-                unique.append((sym, broker))
+        # G8: deduplicate by (symbol, timeframe) — same symbol on 1h and 4h trains separate models
+        seen: set[tuple[str, str]] = set()
+        unique: list[tuple[str, str, str]] = []
+        for sym, broker, tf in symbols:
+            key = (sym, tf)
+            if key not in seen:
+                seen.add(key)
+                unique.append((sym, broker, tf))
 
         if not unique:
             logger.info("[trainer] No active strategy symbols found — skipping training")
@@ -220,8 +225,8 @@ class ModelTrainer:
             }
 
         results = []
-        for sym, broker in unique:
-            res = await self.train_symbol(sym, broker)
+        for sym, broker, tf in unique:
+            res = await self.train_symbol(sym, broker, timeframe=tf)
             results.append(res)
 
         trained = sum(1 for r in results if r.get("status") == "trained")
@@ -296,24 +301,33 @@ class ModelTrainer:
             logger.warning(f"[trainer] Could not load live labels for {symbol}: {exc}")
             return None
 
-    async def train_symbol(self, symbol: str, broker: str) -> dict:
-        """Train or update model for a single symbol.
+    async def train_symbol(self, symbol: str, broker: str, timeframe: str = "1d") -> dict:
+        """Train or update model for a single symbol+timeframe.
 
-        Returns a result dict with keys: symbol, status, auc, model_path.
+        Returns a result dict with keys: symbol, timeframe, status, auc, model_path.
         """
         if not _ML_AVAILABLE:
-            return {"symbol": symbol, "status": "skipped", "reason": "ML packages not installed"}
+            return {"symbol": symbol, "timeframe": timeframe, "status": "skipped",
+                    "reason": "ML packages not installed"}
 
-        logger.info(f"[trainer] Training model for {symbol} …")
+        logger.info(f"[trainer] Training model for {symbol} @ {timeframe} …")
+
+        # G8: resolve fetch profile for this timeframe
+        yf_interval, history_days, label_horizon, tf_min_rows = _TF_PROFILE.get(
+            timeframe, _DEFAULT_TF_PROFILE
+        )
+        resample_to = {"2h": "2h", "4h": "4h"}.get(timeframe)  # 4h/2h: fetch 1h then resample
 
         # ── 1. Fetch OHLCV ───────────────────────────────────────────────────
-        df = _fetch_ohlcv(symbol, days=365)
-        if df is None or len(df) < 60:
-            return {"symbol": symbol, "status": "error", "reason": "insufficient OHLCV data", "auc": None}
+        df = _fetch_ohlcv(symbol, days=history_days, interval=yf_interval, resample_to=resample_to)
+        min_candles = max(label_horizon + 10, 30)
+        if df is None or len(df) < min_candles:
+            return {"symbol": symbol, "timeframe": timeframe, "status": "error",
+                    "reason": "insufficient OHLCV data", "auc": None}
 
         # ── 2. Feature engineering ───────────────────────────────────────────
         feat_df = _compute_features(df)
-        labels = _label(feat_df, horizon=min(24, max(5, len(feat_df) // 10)))
+        labels = _label(feat_df, horizon=label_horizon)
 
         # Combine and drop NaN rows
         feat_df["label"] = labels
@@ -328,10 +342,11 @@ class ModelTrainer:
             feat_df = pd.concat([base_df, live_df], ignore_index=True)
             logger.info(f"[trainer] {symbol}: combined {len(base_df)} historical + {len(live_df)} live rows")
 
-        if len(feat_df) < self.MIN_ROWS:
+        effective_min_rows = max(self.MIN_ROWS, tf_min_rows)
+        if len(feat_df) < effective_min_rows:
             return {
-                "symbol": symbol, "status": "error",
-                "reason": f"only {len(feat_df)} labelled rows (need {self.MIN_ROWS})",
+                "symbol": symbol, "timeframe": timeframe, "status": "error",
+                "reason": f"only {len(feat_df)} labelled rows (need {effective_min_rows})",
                 "auc": None,
             }
 
@@ -396,6 +411,39 @@ class ModelTrainer:
             logger.warning(
                 f"[trainer] {symbol}: holdout AUC {holdout_auc:.3f} < {self.MIN_AUC} — model NOT saved"
             )
+            # I7: dispatch in-app notification so operators know the model was rejected
+            try:
+                import asyncio as _asyncio
+                from db.database import AsyncSessionLocal
+                from notifications.notifier import dispatch as _dispatch
+
+                async def _notify_auc_fail():
+                    async with AsyncSessionLocal() as _ses:
+                        await _dispatch(
+                            _ses,
+                            title=f"⚠️ ML Model Rejected — {symbol}",
+                            message=(
+                                f"Retrain for {symbol}: holdout AUC {holdout_auc:.3f} "
+                                f"< threshold {self.MIN_AUC}.  Previous model kept."
+                            ),
+                            level="warning",
+                            category="ml",
+                            metadata={"symbol": symbol, "auc": holdout_auc, "threshold": self.MIN_AUC},
+                        )
+                        await _ses.commit()
+
+                _loop = None
+                try:
+                    _loop = _asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+                if _loop and _loop.is_running():
+                    _loop.create_task(_notify_auc_fail())
+                else:
+                    _asyncio.run(_notify_auc_fail())
+            except Exception as _n_err:
+                logger.debug(f"[trainer] AUC-fail notification error: {_n_err}")
+
             return {
                 "symbol": symbol, "status": "rejected",
                 "auc": round(holdout_auc, 4),
@@ -406,22 +454,36 @@ class ModelTrainer:
         # ── 6. Persist model ─────────────────────────────────────────────────
         today = datetime.date.today().isoformat()
         safe_sym = symbol.replace("/", "_").replace("-", "_")
-        model_path = self.MODEL_DIR / f"{safe_sym}_{today}.pkl"
-        joblib.dump({"model": model, "features": FEATURE_COLS, "symbol": symbol, "trained_at": today},
+        safe_tf  = timeframe.replace("/", "_")
+        # G8: filename encodes timeframe so same symbol can have separate models per TF
+        model_path = self.MODEL_DIR / f"{safe_sym}_{safe_tf}_{today}.pkl"
+        joblib.dump({"model": model, "features": FEATURE_COLS, "symbol": symbol,
+                     "timeframe": timeframe, "trained_at": today},
                     model_path)
         logger.info(f"[trainer] Model saved → {model_path}")
 
-        # Update latest.json registry
+        # G9: delete old .pkl files for this symbol+timeframe to prevent unbounded accumulation
+        for _old in self.MODEL_DIR.glob(f"{safe_sym}_{safe_tf}_*.pkl"):
+            if _old != model_path:
+                try:
+                    _old.unlink(missing_ok=True)
+                    logger.debug(f"[trainer] Removed old model: {_old.name}")
+                except Exception as _del_err:
+                    logger.debug(f"[trainer] Could not remove {_old.name}: {_del_err}")
+
+        # Update latest.json registry — key is "symbol:timeframe" for TF-aware lookup
         latest_path = self.MODEL_DIR / "latest.json"
         try:
             latest = json.loads(latest_path.read_text()) if latest_path.exists() else {}
         except json.JSONDecodeError:
             latest = {}
-        latest[symbol] = str(model_path)
+        registry_key = f"{symbol}:{timeframe}"
+        latest[registry_key] = str(model_path)
         latest_path.write_text(json.dumps(latest, indent=2))
 
         return {
             "symbol": symbol,
+            "timeframe": timeframe,
             "status": "trained",
             "auc": round(holdout_auc, 4),
             "cv_auc": round(mean_cv_auc, 4),

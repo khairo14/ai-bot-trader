@@ -498,11 +498,14 @@ async def trigger_run(
     }
 
 
-async def _run_one_strategy(strat) -> None:
+async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
     """
     Run signal engine + forward engine for a single strategy.
     Opens its own DB session so it can be called independently by the scheduler.
-    """
+
+    skip_monitor=True: skip reconcile+monitor (used by Run Now which does a
+    single shared reconcile pass before spawning concurrent strategy tasks).
+    """"
     from core.engine.signal_engine import SignalEngine
     from core.engine.forward_engine import ForwardEngine
     from db.database import AsyncSessionLocal
@@ -616,39 +619,37 @@ async def _run_one_strategy(strat) -> None:
             # Hydrate engine state from DB before processing (balance, open positions)
             await forward_engine.initialize(session)
 
-            # ── Reconcile broker positions FIRST: mark any DB OPEN trades as FILLED
-            # that the broker already closed via SL/TP bracket orders.  Must run
-            # before monitor_sl_tp so the software monitor doesn't place a duplicate
-            # close order for a position the broker already exited (which would create
-            # an unintended reverse position at the broker).
-            try:
-                _ghosts = await forward_engine.reconcile_positions(session)
-                if _ghosts:
-                    logger.info(f"[ForwardTest] Reconciled {_ghosts} ghost position(s) for {strat.name}")
-            except Exception as _rec_err:
-                logger.debug(f"[ForwardTest] Reconcile error (non-fatal): {_rec_err}")
+            # ── Reconcile + SL/TP monitor (B8: skipped when Run Now pre-runs these once) ──
+            if not skip_monitor:
+                # ── Reconcile broker positions FIRST
+                try:
+                    _ghosts = await forward_engine.reconcile_positions(session)
+                    if _ghosts:
+                        logger.info(f"[ForwardTest] Reconciled {_ghosts} ghost position(s) for {strat.name}")
+                except Exception as _rec_err:
+                    logger.debug(f"[ForwardTest] Reconcile error (non-fatal): {_rec_err}")
 
-            # ── Software SL/TP enforcement (safety net for broker bracket failures) ──
-            # Runs AFTER reconcile so it only sees positions that are genuinely
-            # still open at the broker (not ones the broker already closed above).
-            # The DB atomic guard in close_position() provides a second safety net
-            # against concurrent calls from multiple strategy instances.
-            try:
-                _sl_closed = await forward_engine.monitor_sl_tp(session)
-                if _sl_closed:
-                    logger.info(f"[ForwardTest] SL/TP monitor closed {_sl_closed} position(s) for {strat.name}")
-            except Exception as _mon_err:
-                logger.debug(f"[ForwardTest] SL/TP monitor error (non-fatal): {_mon_err}")
+                # ── Software SL/TP enforcement
+                try:
+                    _sl_closed = await forward_engine.monitor_sl_tp(session)
+                    if _sl_closed:
+                        logger.info(f"[ForwardTest] SL/TP monitor closed {_sl_closed} position(s) for {strat.name}")
+                except Exception as _mon_err:
+                    logger.debug(f"[ForwardTest] SL/TP monitor error (non-fatal): {_mon_err}")
 
-            # F-083: Commit monitor/reconcile changes before the deduplication check.
-            # An early `return` below (duplicate signal detected) closes the session
-            # without committing, which would roll back any SL/TP closures that
-            # already sent real market orders to the broker — leaving the DB out
-            # of sync (trades showing OPEN after the broker already closed them).
-            try:
-                await session.commit()
-            except Exception as _pre_commit_err:
-                logger.warning(f"[ForwardTest] Monitor/reconcile pre-commit failed: {_pre_commit_err}")
+                # F-083: Commit monitor/reconcile changes before the deduplication check.
+                try:
+                    await session.commit()
+                except Exception as _pre_commit_err:
+                    logger.warning(f"[ForwardTest] Monitor/reconcile pre-commit failed: {_pre_commit_err}")
+
+            # ── B3: Advisory lock prevents concurrent Run Now tasks from
+            # double-inserting the same signal for the same strategy/symbol/timeframe.
+            # pg_advisory_xact_lock is transaction-scoped; auto-released on commit.
+            from sqlalchemy import text as _sql_text
+            _lock_str = f"{strategy_type}:{sig.symbol}:{timeframe}"
+            _lock_int = abs(hash(_lock_str)) % (2 ** 31)
+            await session.execute(_sql_text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lock_int})
 
             # ── Deduplication: skip if an identical signal already exists within
             # one timeframe-period window to prevent double-saves on rapid Run Now
@@ -710,6 +711,10 @@ async def _run_one_strategy(strat) -> None:
                         _trailing = float(_t)
                     except (TypeError, ValueError):
                         pass
+                # Attach trailing_stop_pct to the signal so process_signal
+                # stores it on the Trade record for live monitoring.
+                if _trailing is not None:
+                    sig.trailing_stop_pct = _trailing
                 session.add(TradeOutcomeModel(
                     signal_id=db_signal.id,
                     symbol=sig.symbol,
@@ -799,9 +804,27 @@ async def _run_signals_background():
                 "strategies": len(strategies),
             })
 
-            for strat in strategies:
-                _exec_state["strategy"] = strat.name
-                await _run_one_strategy(strat)
+            # B8: Run reconcile+monitor once before all strategies (not per-strategy).
+            # Each _run_one_strategy will skip its own monitor pass (skip_monitor=True).
+            from core.engine.forward_engine import ForwardEngine as _FE
+            try:
+                async with AsyncSessionLocal() as _pre_session:
+                    _pre_engine = _FE()
+                    await _pre_engine.initialize(_pre_session)
+                    _g = await _pre_engine.reconcile_positions(_pre_session)
+                    _c = await _pre_engine.monitor_sl_tp(_pre_session)
+                    await _pre_session.commit()
+                    if _g:
+                        logger.info(f"[RunNow] Pre-run reconcile: {_g} ghost(s)")
+                    if _c:
+                        logger.info(f"[RunNow] Pre-run monitor: {_c} SL/TP close(s)")
+            except Exception as _pre_err:
+                logger.debug(f"[RunNow] Pre-run monitor/reconcile failed (non-fatal): {_pre_err}")
+
+            # I3: Run strategies concurrently instead of sequentially
+            _exec_state["strategy"] = f"{len(strategies)} strategies"
+            _tasks = [_run_one_strategy(strat, skip_monitor=True) for strat in strategies]
+            await _asyncio.gather(*_tasks, return_exceptions=True)
 
             await _ws_manager.broadcast("run_finished", {
                 "trigger": "manual",

@@ -1,0 +1,57 @@
+{
+  "_comment": "IBKR European equity routing map. Format: { \"TICKER\": [\"EXCHANGE\", \"CURRENCY\"] }",
+  "_comment2": "Add any EU/non-US stock here instead of editing ibkr_client.py code.",
+
+  "SAP":   ["XETRA", "EUR"],
+  "SIE":   ["XETRA", "EUR"],
+  "ALV":   ["XETRA", "EUR"],
+  "BMW":   ["XETRA", "EUR"],
+  "BAYN":  ["XETRA", "EUR"],
+  "DTE":   ["XETRA", "EUR"],
+  "DB1":   ["XETRA", "EUR"],
+  "MRK":   ["XETRA", "EUR"],
+  "VOW3":  ["XETRA", "EUR"],
+  "BAS":   ["XETRA", "EUR"],
+
+  "ASML":  ["AEB",   "EUR"],
+  "INGA":  ["AEB",   "EUR"],
+  "PHIA":  ["AEB",   "EUR"],
+  "HEIA":  ["AEB",   "EUR"],
+  "AD":    ["AEB",   "EUR"],
+
+  "AZN":   ["LSE",   "GBP"],
+  "SHEL":  ["LSE",   "GBP"],
+  "HSBA":  ["LSE",   "GBP"],
+  "ULVR":  ["LSE",   "GBP"],
+  "BP":    ["LSE",   "GBP"],
+  "GSK":   ["LSE",   "GBP"],
+  "LLOY":  ["LSE",   "GBP"],
+  "RKT":   ["LSE",   "GBP"],
+  "DGE":   ["LSE",   "GBP"],
+  "RIO":   ["LSE",   "GBP"],
+
+  "NESN":  ["SWX",   "CHF"],
+  "NOVN":  ["SWX",   "CHF"],
+  "ROG":   ["SWX",   "CHF"],
+  "ABBN":  ["SWX",   "CHF"],
+  "ZURN":  ["SWX",   "CHF"],
+
+  "OR":    ["SBF",   "EUR"],
+  "TTE":   ["SBF",   "EUR"],
+  "BNP":   ["SBF",   "EUR"],
+  "AIR":   ["SBF",   "EUR"],
+  "SAN":   ["SBF",   "EUR"],
+  "MC":    ["SBF",   "EUR"],
+  "CS":    ["SBF",   "EUR"],
+
+  "IBE":   ["BM",    "EUR"],
+  "ITX":   ["BM",    "EUR"],
+  "SAN.MC":["BM",    "EUR"],
+  "BBVA":  ["BM",    "EUR"],
+
+  "ENI":   ["MIL",   "EUR"],
+  "ENEL":  ["MIL",   "EUR"],
+  "ISP":   ["MIL",   "EUR"],
+  "UCG":   ["MIL",   "EUR"],
+  "RACE":  ["MIL",   "EUR"]
+}

@@ -212,6 +212,16 @@ def run_signals(self):
                         except ValueError:
                             asset_cls = strat.asset_class
 
+                        # ── B3: Advisory lock prevents concurrent Celery workers from
+                        # both passing the SELECT and double-inserting the same signal.
+                        # pg_advisory_xact_lock is transaction-scoped and auto-released.
+                        _lock_key_str = f"{strategy_type}:{sig.symbol}:{timeframe}"
+                        _lock_key_int = abs(hash(_lock_key_str)) % (2 ** 31)
+                        await session.execute(
+                            __import__("sqlalchemy").text("SELECT pg_advisory_xact_lock(:k)"),
+                            {"k": _lock_key_int},
+                        )
+
                         # ── Deduplication: skip if identical signal already exists
                         # within the current candle window (prevents duplicate orders
                         # when Celery fires the same task multiple times per candle).
@@ -280,6 +290,10 @@ def run_signals(self):
                                         _trailing = float(_t)
                                     except (TypeError, ValueError):
                                         pass
+                            # Attach trailing_stop_pct to the signal so execute_signal
+                            # stores it on the Trade record for live monitoring.
+                            if _trailing is not None:
+                                sig.trailing_stop_pct = _trailing
                             session.add(TradeOutcomeModel(
                                 signal_id=db_signal.id,
                                 symbol=sig.symbol,

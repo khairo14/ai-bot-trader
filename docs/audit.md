@@ -228,6 +228,60 @@ Legend: ✅ Fixed | 🔧 In Progress | ⏳ Pending | ❌ Skipped
 
 ---
 
+## Round 9 Audit (F-103) — Duplicate Order & Missing Trade Root-Cause Fix
+**Date:** June 2026
+**Scope:** Post-incident fix triggered by live paper session on 2026-03-09. Root-cause analysis of DB/broker reconciliation gaps found 3 systemic flaws that caused 31 duplicate AUD BOT orders (+$15,769 ghost profit), two trades permanently REJECTED in DB (id=9 EUR/GBP, id=13 AUD/USD) when they actually filled, and PENDING entry trades never being monitored or reconciled. All 3 fixed.
+
+| # | Status | Location | Issue / Fix |
+|---|--------|----------|-------------|
+| F-103 | ✅ | `core/engine/forward_engine.py` → `close_position()` | **`close_position()` placed a market order without checking if the broker already had a flat position — created unintended reverse positions.** When `monitor_sl_tp()` triggered while the broker had already closed the position (via bracket order or manual close), `close_position()` blindly sent a market order to the now-flat broker. With IBKR Forex this opens a new position in the opposite direction, compounding on each monitor tick (31 duplicate AUD BOT orders @ $427,900 each, net +$15,769 P&L after the position was force-closed by a mass SLD). **Fix:** After `broker.connect()`, query `broker.get_positions()` and normalise the symbol (IBKR Forex: 6-char pair → base currency code). If `abs(qty) < 1` for this symbol, set `_skip_market_order = True` and log a warning; the PnL/FILLED marking continues at snapshot price. On successful position check failure (network error), fall through to original behaviour so SL/TP closes still fire in degraded mode. Covers both SL and TP since both reach the same `close_position()` code path. |
+| F-103b | ✅ | `core/engine/forward_engine.py` → `close_position()` | **If `place_order()` raised an exception, the F-094 atomic guard left the trade stuck as PENDING — monitor_sl_tp never saw it again.** The `UPDATE status=PENDING` guard (F-094) was set before the `place_order()` call. On `place_order()` failure the guard was not reverted; `monitor_sl_tp()` only queries `status == OPEN` so the trade disappeared from monitoring permanently until manual intervention. **Fix:** Added a revert block in the `except Exception as _close_err` handler: `UPDATE trades SET status='OPEN' WHERE id=X AND status='PENDING'` → `flush()`. Wrapped in its own try/except so a DB error during revert doesn't mask the original close error. Guard revert is only attempted when `db_session is not None` (same condition as the guard itself). |
+| F-104 | ✅ | `brokers/ibkr_client.py` → `place_order()` fill-poll loop | **IBKR paper gateway sets order status `"Inactive"` while waiting for a price feed before submitting to the exchange — our code treated this as a fatal failure.** The 30-second poll in `place_order()` had a single branch `elif _st in ("Cancelled", "Inactive"): raise RuntimeError(...)`. On IBKR paper accounts `"Inactive"` is a transient pre-submission state that resolves to `"Submitted"` → `"Filled"` within seconds once market data arrives. Raising immediately caused the caller to catch the exception and mark the trade `REJECTED` — but the order was already live at the broker and would fill, creating the `"REJECTED"` DB record with a real `broker_order_id` (observed for id=9 EUR/GBP orderId=494, id=13 AUD/USD orderId=1042). **Fix:** Split the branch: `"Cancelled"` still raises `RuntimeError`; `"Inactive"` now logs a debug message and continues polling until the overall timeout. |
+| F-105 | ✅ | `core/engine/forward_engine.py` → `reconcile_positions()` | **`reconcile_positions()` only queried `status == OPEN` — PENDING entry trades were invisible to the reconciler forever.** Trades that timed out during the 30-second fill-poll (keeping `status = PENDING`) were never reconciled against broker positions. As a result: (a) if the entry fill actually arrived after the timeout, the trade stayed PENDING while the broker monitored it silently (SL/TP fired, position closed, DB never updated); (b) if the order was genuinely cancelled or failed, the trade stayed PENDING perpetually. **Fix:** Changed the query to `status.in_([OrderStatus.OPEN, OrderStatus.PENDING])`. Added a three-case branch at the top of the per-trade loop: (1) symbol IS in broker positions AND trade is PENDING → upgrade to OPEN (late-fill confirmed), optionally refresh `entry_price` from broker `avgCost`; (2) symbol NOT in broker positions AND PENDING with a fake/empty `broker_order_id` (prefix `"rejected_"` or empty) → mark REJECTED (never reached broker); (3) symbol NOT in broker positions AND PENDING with a real `broker_order_id` → log and fall through to the existing ghost-close logic (mark FILLED at snapshot price, compute PnL). |
+
+---
+
+## Round 10 Audit — Full Broker-Sourced DB Rebuild
+**Date:** March 2026
+**Scope:** Following the F-103 incident it was discovered that the DB trade history was materially inaccurate. Two findings drove a full wipe-and-rebuild:
+
+1. **id=16 ghost pnl (+$15,769.17) was fabricated.** The record was computed as `TotalCashValue − $1M − Σ(other_pnl)`, which is incorrect for IBKR FX paper accounts where `TotalCashValue` includes the mark-to-market value of all open currency positions (unrealized). The actual realised P&L from fill-based netting is **-$4,386.55**, not +$12,927.
+2. **IBKR `RealizedPnL` tag = 0** for paper FX accounts — IBKR does not separately track realised FX P&L; it is embedded in the currency cash balances.
+3. **`reqPositions()` returns stale data** for paper FX (427,900 AUD instead of 6,632,450). Fills are the authoritative position source.
+
+**Tools created this round:**
+
+| File | Purpose |
+|------|---------|
+| `backend/tools/pnl_from_fills.py` | Compute total realised P&L per symbol from all 57 IBKR fills using VWAP netting |
+| `backend/tools/check_broker_vs_db.py` | Compare IBKR account state (positions, TotalCashValue) against DB side-by-side |
+| `backend/tools/sync_from_broker.py` | Additive sync: update OPEN trade quantities from fill-based net position calculation |
+| `backend/tools/rebuild_from_broker.py` | Live-fill-based full wipe-and-rebuild (requires active IBKR session with same-day fills) |
+| `backend/tools/apply_rebuild.py` | Hardcoded rebuild using values computed from the 57 fills captured on 2026-03-09 |
+
+**DB state after rebuild (14 records):**
+
+| id | symbol | side | qty | status | entry | exit | pnl |
+|----|--------|------|-----|--------|-------|------|-----|
+| 18 | EUR/GBP | short | 173,178 | FILLED | 0.865890 | 0.867540 | -379.97 |
+| 19 | AUD/USD | short | 213,950 | FILLED | 0.697970 (VWAP) | 0.700210 | -479.33 |
+| 20 | AUD/USD | short | 211,187 | FILLED | 0.697970 (VWAP) | 0.700600 | -555.51 |
+| 21 | GBP/USD | short | 111,558 | FILLED | 1.330315 (VWAP) | 1.334480 | -464.67 |
+| 22 | GBP/USD | short | 111,462 | FILLED | 1.330315 (VWAP) | 1.334530 | -469.84 |
+| 23-29 | AUD/USD | long | 5,565,463 | FILLED | 0.700782 (VWAP) | 0.70042 avg | -2,036.82 total (F-103 ghost) |
+| 30 | AUD/USD | long | 6,632,450 | OPEN | 0.700994 | — | — |
+| 31 | GBP/USD | long | 223,020 | OPEN | 1.334490 | — | — |
+
+- **Total realised P&L: -$4,386.55** (accurate, broker-verified)
+- Open AUD/USD position SL/TP preserved: SL=0.69812, TP=0.70732
+- Open GBP/USD position SL/TP preserved: SL=1.33002, TP=1.34202
+- The 7 F-103 ghost LONG AUD records (ids 23-29) represent the unintended positions created by the duplicate-order bug. They were mass-liquidated on 2026-03-09 09:17 UTC at a net loss.
+- Entry prices for AUD/USD and GBP/USD shorts show VWAP of combined lots (strategy opened two separate shorts each; IBKR fill netting merges them into a single position before the first partial close).
+
+**Key finding about $5,570 "gap":** The difference between `TotalCashValue − $1M = $18,497` and `DB SUM(pnl) = -$4,387` is **not** missing trades. It equals the unrealized mark-to-market gain on open FX positions (6,632,450 AUD long at avg 0.700994 vs current market, plus 223,020 GBP long). For FX paper accounts `TotalCashValue = starting_USD + realized_PnL + unrealized_FX_positions` where unrealized is implicit in the multi-currency cash balances.
+
+---
+
 ## Known Design Trade-offs (Not Bugs)
 
 The following are documented conscious design decisions — not defects. They are recorded here so future maintainers understand the intent and the conditions under which they might warrant revisiting.

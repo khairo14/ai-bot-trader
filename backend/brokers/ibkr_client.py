@@ -16,21 +16,27 @@ from brokers.base import AbstractBroker, OrderResult, Position, Balance
 
 _FX_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD", "HKD", "SGD"}
 
-# European equity routing: ticker → (exchange, currency)
-_EU_STOCKS: dict[str, tuple[str, str]] = {
-    # Xetra (Frankfurt)
-    "SAP":  ("XETRA", "EUR"), "SIE":  ("XETRA", "EUR"), "ALV":  ("XETRA", "EUR"),
-    "BMW":  ("XETRA", "EUR"), "BAYN": ("XETRA", "EUR"), "DTE":  ("XETRA", "EUR"),
-    # Euronext Amsterdam
-    "ASML": ("AEB",   "EUR"), "INGA": ("AEB",   "EUR"), "PHIA": ("AEB",   "EUR"),
-    # LSE (London)
-    "AZN":  ("LSE",   "GBP"), "SHEL": ("LSE",   "GBP"), "HSBA": ("LSE",   "GBP"),
-    "ULVR": ("LSE",   "GBP"), "BP":   ("LSE",   "GBP"), "GSK":  ("LSE",   "GBP"),
-    # SWX (Switzerland)
-    "NESN": ("SWX",   "CHF"), "NOVN": ("SWX",   "CHF"), "ROG":  ("SWX",   "CHF"),
-    # Euronext Paris
-    "OR":   ("SBF",   "EUR"), "TTE":  ("SBF",   "EUR"), "BNP":  ("SBF",   "EUR"),
-}
+# G12: European equity routing loaded from config/ibkr_eu_stocks.json
+# Edit that file to add new EU tickers — no code change required.
+import json as _json
+import pathlib as _pathlib
+
+_EU_STOCKS_PATH = _pathlib.Path(__file__).resolve().parent.parent / "config" / "ibkr_eu_stocks.json"
+
+def _load_eu_stocks() -> dict[str, tuple[str, str]]:
+    """Load EU stock routing map from config file. Falls back to empty dict on error."""
+    try:
+        raw = _json.loads(_EU_STOCKS_PATH.read_text())
+        return {
+            k: (v[0], v[1])
+            for k, v in raw.items()
+            if not k.startswith("_comment") and isinstance(v, list) and len(v) == 2
+        }
+    except Exception as _e:
+        logger.warning(f"[IBKR] Could not load EU stocks config ({_EU_STOCKS_PATH}): {_e}")
+        return {}
+
+_EU_STOCKS: dict[str, tuple[str, str]] = _load_eu_stocks()
 
 def _ibkr_contract(symbol: str):
     """
@@ -971,8 +977,13 @@ class IBKRClient(AbstractBroker):
                         fill_price = float(trade.orderStatus.lastFillPrice or 0) or None
                         logger.info(f"[IBKR] Order {order_id} filled (lastFillPrice={fill_price})")
                         break
-                    elif _st in ("Cancelled", "Inactive"):
-                        raise RuntimeError(f"IBKR order {order_id} ended with status '{_st}' — not filled")
+                    elif _st == "Cancelled":
+                        raise RuntimeError(f"IBKR order {order_id} cancelled by broker")
+                    elif _st == "Inactive":
+                        # F-104: IBKR paper sets Inactive while waiting for a price feed
+                        # before submitting to the exchange.  The order is live and will
+                        # fill once data arrives — do NOT raise; continue polling.
+                        logger.debug(f"[IBKR] Order {order_id} Inactive — awaiting price feed, continuing poll")
                 except RuntimeError:
                     raise
                 except Exception as _pe:

@@ -12,6 +12,51 @@ from api.websocket import ws_endpoint
 from core.auth import get_current_user
 
 
+async def _sl_tp_heartbeat():
+    """
+    Continuous SL/TP monitor — runs every 60 s regardless of strategy candle-close
+    boundaries. This closes the gap where monitor_sl_tp only fires at candle-close
+    boundaries inside _run_one_strategy: if IBKR bracket orders silently fail and
+    no strategy candle has closed recently, positions would drift past their SL/TP
+    for up to one full candle period.
+
+    Sequence each tick:
+      1. reconcile_positions — detect positions the broker already closed via
+         bracket orders (position gone from IBKR → mark FILLED, compute PnL).
+      2. monitor_sl_tp — price-check remaining OPEN trades against SL/TP and
+         close them via market order if breached (software safety net).
+    """
+    from db.database import AsyncSessionLocal
+    from core.engine.forward_engine import ForwardEngine
+
+    _engine = ForwardEngine()
+    logger.info("[SL/TP Heartbeat] Continuous 60s monitor started.")
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            async with AsyncSessionLocal() as session:
+                await _engine.initialize(session)
+                try:
+                    ghosts = await _engine.reconcile_positions(session)
+                    if ghosts:
+                        logger.info(f"[SL/TP Heartbeat] Reconciled {ghosts} broker-closed position(s)")
+                except Exception as _re:
+                    logger.debug(f"[SL/TP Heartbeat] Reconcile error: {_re}")
+                try:
+                    closed = await _engine.monitor_sl_tp(session)
+                    if closed:
+                        logger.info(f"[SL/TP Heartbeat] Software SL/TP closed {closed} position(s)")
+                except Exception as _me:
+                    logger.debug(f"[SL/TP Heartbeat] Monitor error: {_me}")
+                try:
+                    await session.commit()
+                except Exception as _ce:
+                    logger.debug(f"[SL/TP Heartbeat] Commit error: {_ce}")
+        except Exception as exc:
+            logger.error(f"[SL/TP Heartbeat] Tick error: {exc}", exc_info=True)
+
+
 async def _forward_test_scheduler():
     """
     Wall-clock-aligned, market-hours-aware scheduler.
@@ -211,6 +256,7 @@ async def lifespan(app: FastAPI):
 
     # Start auto-scheduler (skip if interval set to 0 — manual-only mode)
     scheduler_task = None
+    heartbeat_task = asyncio.create_task(_sl_tp_heartbeat())
     if settings.forward_test_interval_minutes > 0:
         scheduler_task = asyncio.create_task(_forward_test_scheduler())
     else:
@@ -218,6 +264,11 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    heartbeat_task.cancel()
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
     if scheduler_task:
         scheduler_task.cancel()
         try:

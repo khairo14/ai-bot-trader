@@ -25,6 +25,9 @@ import pandas as pd
 _BASE_DIR = pathlib.Path(__file__).resolve().parent.parent  # backend/
 _LATEST_JSON = _BASE_DIR / "data" / "models" / "latest.json"
 
+# B4: shared feature computation — single source of truth with trainer.py
+from core.features import compute_features as _compute_features, FEATURE_COLS
+
 # ── optional heavy imports ───────────────────────────────────────────────────
 try:
     import joblib
@@ -33,63 +36,8 @@ except ImportError:
     _JOBLIB_OK = False
 
 
-def _compute_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """
-    Compute the same 6-feature vector used during training.
-    Returns None if the DataFrame is too short.
-    """
-    if len(df) < 30:
-        return None
-
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-    volume = df["volume"]
-
-    # RSI-14
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-
-    # MACD histogram (12/26/9)
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    macd_hist = (ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()
-
-    # ATR-14 normalised by close
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    atr_norm = tr.rolling(14).mean() / close.replace(0, np.nan)
-
-    # Volume ratio vs 20-period mean
-    vol_ratio = volume / volume.rolling(20).mean().replace(0, np.nan)
-
-    # Bollinger Band position (0 = lower, 1 = upper)
-    bb_sma = close.rolling(20).mean()
-    bb_std = close.rolling(20).std()
-    bb_range = (bb_sma + 2 * bb_std) - (bb_sma - 2 * bb_std)
-    bb_pct = (close - (bb_sma - 2 * bb_std)) / bb_range.replace(0, np.nan)
-
-    # 1-period log return
-    log_ret = np.log(close / close.shift(1))
-
-    out = pd.DataFrame({
-        "rsi": rsi,
-        "macd_hist": macd_hist,
-        "atr_norm": atr_norm,
-        "vol_ratio": vol_ratio,
-        "bb_pct": bb_pct,
-        "log_ret": log_ret,
-    })
-    return out
-
-
-FEATURE_COLS = ["rsi", "macd_hist", "atr_norm", "vol_ratio", "bb_pct", "log_ret"]
+# FEATURE_COLS and _compute_features imported from core.features above
+# (B4: removed local duplicate)
 
 
 class MLScorer:
@@ -99,17 +47,25 @@ class MLScorer:
     One shared instance is used across all strategies (imported as singleton).
     Models are loaded on first use and cached until the process restarts.
     Call `reload()` after a retrain to pick up the latest model.
+
+    G8: Models are stored per (symbol, timeframe) in latest.json under the key
+    "symbol:timeframe" (e.g. "BTC/USDT:1h"). The scorer falls back to a symbol-only
+    key for backward compatibility with models trained before this change.
     """
 
     def __init__(self):
-        self._models: dict = {}        # symbol → loaded model dict
-        # Use a reentrant threading lock (safe from both sync and async contexts
-        # since _get_model is called synchronously within predict_proba).
+        self._models: dict = {}        # "symbol:timeframe" → loaded model dict
         import threading
         self._lock = threading.Lock()
 
-    def _load_model(self, symbol: str) -> Optional[dict]:
-        """Load the model for `symbol` from latest.json registry."""
+    def _load_model(self, symbol: str, timeframe: str = "1d") -> Optional[dict]:
+        """Load the model for `symbol:timeframe` from latest.json registry.
+
+        Lookup order:
+        1. Exact key  "symbol:timeframe"  (new TF-aware format, G8)
+        2. Legacy key  "symbol"            (models trained before G8 fix)
+        3. Normalised symbol variants (BTC/USDT → BTC_USDT)
+        """
         if not _JOBLIB_OK:
             return None
         if not _LATEST_JSON.exists():
@@ -119,16 +75,21 @@ class MLScorer:
         except (json.JSONDecodeError, OSError):
             return None
 
-        # Try exact symbol first, then normalised (BTC/USDT → BTC_USDT)
-        model_path = registry.get(symbol) or registry.get(symbol.replace("/", "_"))
+        # 1. TF-aware key (new format: "BTC/USDT:1h")
+        model_path = registry.get(f"{symbol}:{timeframe}")
+
+        # 2. Legacy symbol-only key (old format: "BTC/USDT" or "BTC_USDT")
         if not model_path:
-            # Tighter fallback: only match if base AND quote both match.
-            # e.g. 'BTC/USDT' matches 'BTC_USDT' but NOT 'BTC/BUSD' or 'BTC/BTC'.
+            model_path = registry.get(symbol) or registry.get(symbol.replace("/", "_"))
+
+        # 3. Partial-match fallback: base+quote normalised (BTC/USDT ↔ BTC_USDT)
+        if not model_path:
             parts = symbol.split("/")
             if len(parts) == 2:
                 base, quote = parts
                 for k, v in registry.items():
-                    k_norm = k.replace("/", "_")
+                    k_sym = k.split(":")[0] if ":" in k else k
+                    k_norm = k_sym.replace("/", "_")
                     if k_norm == f"{base}_{quote}":
                         model_path = v
                         break
@@ -144,12 +105,13 @@ class MLScorer:
             logger.warning(f"[MLScorer] Failed to load model for {symbol}: {exc}")
             return None
 
-    def _get_model(self, symbol: str) -> Optional[dict]:
+    def _get_model(self, symbol: str, timeframe: str = "1d") -> Optional[dict]:
         """Return cached model or load it."""
+        cache_key = f"{symbol}:{timeframe}"
         with self._lock:
-            if symbol not in self._models:
-                self._models[symbol] = self._load_model(symbol)
-            return self._models[symbol]
+            if cache_key not in self._models:
+                self._models[cache_key] = self._load_model(symbol, timeframe)
+            return self._models[cache_key]
 
     def reload(self):
         """Clear model cache so next call re-reads from disk."""
@@ -157,17 +119,19 @@ class MLScorer:
             self._models.clear()
         logger.info("[MLScorer] Model cache cleared — will reload on next prediction")
 
-    def predict_proba(self, df: pd.DataFrame, symbol: str) -> Optional[float]:
+    def predict_proba(self, df: pd.DataFrame, symbol: str,
+                      timeframe: str = "1d") -> Optional[float]:
         """
         Return P(BUY) ∈ [0, 1] using the trained XGBoost model.
         Returns None if no model is available (safe — strategy falls back to rule score).
 
         Parameters
         ----------
-        df     : OHLCV DataFrame (columns: open/high/low/close/volume)
-        symbol : Trading symbol, used to find the right model file
+        df        : OHLCV DataFrame (columns: open/high/low/close/volume)
+        symbol    : Trading symbol, used to find the right model file
+        timeframe : G8 — selects the TF-specific model (e.g. '1h', '4h', '1d')
         """
-        model_data = self._get_model(symbol)
+        model_data = self._get_model(symbol, timeframe)
         if model_data is None:
             return None
 

@@ -630,8 +630,10 @@ export default function Dashboard() {
                 {openPositions.map(pos => (
                   <tr key={pos.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
                     <td className="px-3 py-2 font-medium text-white">{pos.symbol}</td>
-                    <td className={`px-3 py-2 font-bold ${pos.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
-                      {pos.side.toUpperCase()}
+                    <td className={`px-3 py-2 font-bold ${
+                      pos.side === 'buy' || pos.side === 'long' || pos.side === 'cover' ? 'text-green-400' : 'text-red-400'
+                    }`}>
+                      {pos.side === 'long' ? 'BUY' : pos.side === 'short' ? 'SELL' : pos.side.toUpperCase()}
                     </td>
                     <td className="px-3 py-2 text-gray-300">{pos.quantity.toFixed(4)}</td>
                     <td className="px-3 py-2 text-gray-300">{fmtPrice(pos.entry_price)}</td>
@@ -718,8 +720,8 @@ export default function Dashboard() {
                   <tr key={t.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
                     <td className="px-3 py-2 font-medium text-white">{t.symbol}</td>
                     <td className={`px-3 py-2 font-bold ${
-                      t.side === 'buy' || t.side === 'cover' ? 'text-green-400' : 'text-red-400'
-                    }`}>{t.side.toUpperCase()}</td>
+                      t.side === 'buy' || t.side === 'long' || t.side === 'cover' ? 'text-green-400' : 'text-red-400'
+                    }`}>{t.side === 'long' ? 'BUY' : t.side === 'short' ? 'SELL' : t.side.toUpperCase()}</td>
                     <td className="px-3 py-2 text-gray-300">{fmtPrice(t.entry_price)}</td>
                     <td className="px-3 py-2 text-gray-300">{fmtPrice(t.exit_price)}</td>
                     <td className="px-3 py-2 text-red-400">{fmtPrice(t.stop_loss)}</td>

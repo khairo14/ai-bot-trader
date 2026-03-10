@@ -20,6 +20,9 @@ class Signal:
     broker: str
     regime: Optional[str] = None
     reasons: List[str] = field(default_factory=list)
+    # Trailing stop — if set (e.g. 1.5 = 1.5%), monitor_sl_tp ratchets stop_loss
+    # up (long) or down (short) each tick to lock in profit.
+    trailing_stop_pct: Optional[float] = None
     # Options-specific fields (None for equity/crypto signals)
     iv_rank: Optional[float] = None          # 0–100: IV Rank from historical volatility
     delta:   Optional[float] = None          # net delta of the position
