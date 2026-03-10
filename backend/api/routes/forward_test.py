@@ -505,7 +505,7 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
 
     skip_monitor=True: skip reconcile+monitor (used by Run Now which does a
     single shared reconcile pass before spawning concurrent strategy tasks).
-    """"
+    """
     from core.engine.signal_engine import SignalEngine
     from core.engine.forward_engine import ForwardEngine
     from db.database import AsyncSessionLocal
