@@ -191,8 +191,10 @@ const TF_TO_MS: Record<string, number> = {
   '1d': 86_400_000, '3d': 259_200_000, '1w': 604_800_000,
 }
 // How often (seconds) to poll for the live candle update per timeframe
+// Generous intervals — 4-panel grid uses 4 × these rates, so keep them low.
+// WS connection skips REST polling entirely while it's live.
 const TF_POLL_SECS: Record<string, number> = {
-  '1m': 10, '5m': 20, '15m': 30, '1h': 60, '4h': 120, '1d': 300, '3d': 1800, '1w': 3600,
+  '1m': 30, '5m': 60, '15m': 90, '1h': 120, '4h': 300, '1d': 600, '3d': 1800, '1w': 3600,
 }
 
 // ─── Strategy → indicator mapping ─────────────────────────────────────────────

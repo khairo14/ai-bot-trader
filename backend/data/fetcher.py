@@ -46,12 +46,16 @@ class DataFetcher:
         timeframe: str = "1h",
         limit: int = 200,
     ) -> dict[str, pd.DataFrame]:
-        """Fetch OHLCV for multiple symbols, return dict keyed by symbol."""
-        result = {}
-        for sym in symbols:
+        """Fetch OHLCV for multiple symbols concurrently, return dict keyed by symbol."""
+        import asyncio
+        import logging
+
+        async def _fetch_one(sym: str) -> tuple[str, pd.DataFrame | None]:
             try:
-                result[sym] = await self.get_ohlcv(sym, timeframe, limit)
+                return sym, await self.get_ohlcv(sym, timeframe, limit)
             except Exception as e:
-                import logging
                 logging.getLogger(__name__).warning(f"Failed to fetch {sym}: {e}")
-        return result
+                return sym, None
+
+        results = await asyncio.gather(*(_fetch_one(s) for s in symbols))
+        return {sym: df for sym, df in results if df is not None}

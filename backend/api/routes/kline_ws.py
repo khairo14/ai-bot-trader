@@ -283,6 +283,13 @@ async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int)
     Stops streaming and closes the WebSocket (so the frontend falls back to
     REST polling) if no valid price is received for 60 consecutive seconds.
     """
+    # Throttle WS sends to the browser based on timeframe — no point pushing
+    # a new message every second when the chart is showing daily bars.
+    _IBKR_SEND_THROTTLE: dict[str, float] = {
+        "1m": 1.0, "5m": 5.0, "15m": 10.0,
+        "1h": 30.0, "4h": 60.0, "1d": 300.0, "3d": 600.0, "1w": 900.0,
+    }
+    send_throttle_secs = _IBKR_SEND_THROTTLE.get(timeframe, 5.0)
     from brokers.ibkr_client import get_ibkr_manager, _ibkr_contract
 
     loop = asyncio.get_running_loop()
@@ -307,6 +314,7 @@ async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int)
     period_start = (now_sec // tf_secs) * tf_secs
     o = h = l = c_price = 0.0
     last_valid_ts = _time.monotonic()
+    last_ws_sent  = 0.0   # monotonic timestamp of last WS send (for throttle)
     # F-090: track the last known valid price across all periods so we can emit
     # flat "heartbeat" candles during thin-liquidity gaps instead of leaving
     # the chart blank.  This ensures SL/TP lines and candle series stay
@@ -356,6 +364,13 @@ async def _stream_ibkr(ws: WebSocket, symbol: str, timeframe: str, tf_secs: int)
                 h = max(h, price)
                 l = min(l, price)
             c_price = price
+
+            # Throttle sends to the browser — no need to push every tick for
+            # slow timeframes (1h, 4h send once per 30-60 s is plenty).
+            now_mono = _time.monotonic()
+            if now_mono - last_ws_sent < send_throttle_secs:
+                continue
+            last_ws_sent = now_mono
 
             if not await _send(ws, {
                 "time": period_start,

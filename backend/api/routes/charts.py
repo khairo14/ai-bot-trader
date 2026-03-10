@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import time
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, Any
 from fastapi import APIRouter, Query, HTTPException, Request
 from sqlalchemy import select, desc
 from loguru import logger
@@ -12,9 +12,9 @@ from db.models import Signal, Trade, OrderStatus
 router = APIRouter()
 
 # ── Simple per-user rate limiter for the charts candles endpoint ─────────────
-# Max 10 requests per minute per user (identified by JWT sub claim).
+# 60 requests per minute per user — enough for a 4-panel grid with live polls.
 _RATE_LIMIT_WINDOW = 60   # seconds
-_RATE_LIMIT_MAX    = 10   # requests per window
+_RATE_LIMIT_MAX    = 60   # requests per window (was 10 — too low for multi-panel)
 _rate_hits: dict[str, list[float]] = defaultdict(list)
 
 def _check_chart_rate_limit(request: Request) -> None:
@@ -32,8 +32,41 @@ def _check_chart_rate_limit(request: Request) -> None:
         _rate_hits.pop(key, None)
         fresh = []
     if len(fresh) >= _RATE_LIMIT_MAX:
-        raise HTTPException(status_code=429, detail="Chart rate limit exceeded — max 10 requests/min")
+        raise HTTPException(status_code=429, detail="Chart rate limit exceeded — please wait a moment")
     _rate_hits[key] = fresh + [now]
+
+# ── In-memory candle response cache ──────────────────────────────────────────
+# Prevents the same symbol/timeframe/range from hitting the broker API multiple
+# times when several panels mount simultaneously or the live-poll fires rapidly.
+_candle_cache: dict[str, tuple[float, Any]] = {}   # key → (expires_mono, payload)
+
+def _cache_key(symbol: str, timeframe: str, broker: str, since: int, until: int, tf_ms: int) -> str:
+    """Round since/until to tf_ms granularity so near-identical requests share a cache slot."""
+    s = (since // tf_ms) * tf_ms
+    u = (until // tf_ms) * tf_ms
+    return f"{broker}:{symbol}:{timeframe}:{s}:{u}"
+
+def _cache_ttl(tf_ms: int) -> float:
+    """Cache lifetime = quarter of the timeframe, clamped to [10 s, 120 s]."""
+    return max(10.0, min(120.0, tf_ms / 1000 / 4))
+
+def _cache_get(key: str) -> Optional[Any]:
+    entry = _candle_cache.get(key)
+    if entry is None:
+        return None
+    expires, payload = entry
+    if time.monotonic() > expires:
+        _candle_cache.pop(key, None)
+        return None
+    return payload
+
+def _cache_set(key: str, payload: Any, ttl: float) -> None:
+    # Prune stale entries before inserting to prevent unbounded growth
+    now = time.monotonic()
+    stale = [k for k, (exp, _) in _candle_cache.items() if now > exp]
+    for k in stale:
+        _candle_cache.pop(k, None)
+    _candle_cache[key] = (now + ttl, payload)
 
 # Popular Alpaca/IBKR stocks — fallback when broker can't enumerate assets
 _ALPACA_DEFAULTS = [
@@ -163,6 +196,12 @@ async def get_candles(
     if since is None:
         since = until - 200 * tf_ms  # default: last 200 candles
 
+    # Cache check — return immediately for duplicate/recent requests
+    ck = _cache_key(symbol.upper(), timeframe, broker.lower(), since, until, tf_ms)
+    cached = _cache_get(ck)
+    if cached is not None:
+        logger.debug(f"[Charts] cache hit {symbol}/{timeframe}")
+        return cached
     try:
         # Always use production Binance for OHLCV — testnet has <30 days history
         if broker.lower() == "binance":
@@ -272,13 +311,16 @@ async def get_candles(
                         cur_t += tf_secs
             candles = filled
 
-        return {
+        result = {
             "candles": candles,
             "symbol": symbol.upper(),
             "timeframe": timeframe,
             "broker": broker.lower(),
             "candle_count": len(candles),
         }
+
+        _cache_set(ck, result, _cache_ttl(tf_ms))
+        return result
 
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
