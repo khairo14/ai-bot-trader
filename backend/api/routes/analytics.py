@@ -14,12 +14,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
-from db.models import TradeOutcome, Trade, OrderStatus
+from db.models import TradeOutcome, OrderStatus
 
 router = APIRouter()
 
@@ -48,7 +48,10 @@ def _sharpe(pnl_list: list[float], window: int = 30) -> list[dict]:
 # ── Main endpoint ─────────────────────────────────────────────────────────────
 
 @router.get("/summary")
-async def get_analytics_summary(db: AsyncSession = Depends(get_db)):
+async def get_analytics_summary(
+    mode: str = Query(default="all", description="Filter outcomes: paper | live | all"),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Returns all analytics data needed for the Analytics Dashboard in one call.
 
@@ -65,10 +68,17 @@ async def get_analytics_summary(db: AsyncSession = Depends(get_db)):
     }
     """
 
+    # Build filters — always require resolved==True, optionally filter by is_paper
+    filters = [TradeOutcome.resolved == True]
+    if mode == "paper":
+        filters.append(TradeOutcome.is_paper == True)
+    elif mode == "live":
+        filters.append(TradeOutcome.is_paper == False)
+
     # Fetch resolved outcomes ordered by creation time — limit to last 5000 to prevent memory blowup
     q = await db.execute(
         select(TradeOutcome)
-        .where(TradeOutcome.resolved == True)
+        .where(*filters)
         .order_by(TradeOutcome.resolved_at)
         .limit(5000)
     )

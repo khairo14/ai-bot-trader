@@ -519,7 +519,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
             position: isBuy ? 'belowBar' : 'aboveBar',
             color:    entryColor,
             shape:    isBuy ? 'arrowUp' : 'arrowDown',
-            text:     `[${modeTag}] ${sideLabel}${pnlTag}`,
+            text:     `[${modeTag}] ${sideLabel} #${t.id}${pnlTag}`,
             size:     2,
           })
         }
@@ -533,7 +533,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
             position: isBuy ? 'aboveBar' : 'belowBar',
             color:    exitColor,
             shape:    'circle',
-            text:     `EXIT${pnlTag}`,
+            text:     `EXIT #${t.id}${pnlTag}`,
             size:     1,
           })
         }
@@ -626,7 +626,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
 
       const [candleRes, signalRes, tradeRes] = await Promise.all([
         axios.get('/api/charts/candles', { params: { symbol, timeframe, broker, since, until }, signal }),
-        axios.get('/api/charts/signals', { params: { symbol, timeframe, broker, limit: 500 }, signal }),
+        axios.get('/api/charts/signals', { params: { symbol, timeframe, broker, limit: 500, since, until }, signal }),
         axios.get('/api/charts/trades',  { params: { symbol, broker, since, until }, signal }),
       ])
 

@@ -1056,6 +1056,8 @@ class IBKRClient(AbstractBroker):
             status="filled" if fill_price is not None else trade.orderStatus.status,
             raw={"order_id": trade.order.orderId, "status": trade.orderStatus.status},
             fill_price=fill_price,
+            effective_stop_price=stop_price,
+            effective_take_profit=take_profit_price,
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

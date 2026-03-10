@@ -104,6 +104,7 @@ class Signal(Base):
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # owner (F-059)
 
     trade: Mapped[Optional[Trade]] = relationship("Trade", back_populates="signal", uselist=False)
+    live_trade: Mapped[Optional["LiveTrade"]] = relationship("LiveTrade", back_populates="signal", uselist=False)
     outcome: Mapped[Optional[TradeOutcome]] = relationship("TradeOutcome", back_populates="signal", uselist=False)
 
 
@@ -138,6 +139,7 @@ class TradeOutcome(Base):
     candles_held: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ml_label: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)   # 1=win, 0=loss (for retraining)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_paper: Mapped[bool] = mapped_column(Boolean, default=True)   # False = live trade outcome
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow, index=True)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
@@ -176,6 +178,43 @@ class Trade(Base):
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # owner (F-059)
 
     signal: Mapped[Optional[Signal]] = relationship("Signal", back_populates="trade")
+
+
+# ─────────────────────────────────────────────────────────
+# Live Trades  (separate table — real-money execution)
+# ─────────────────────────────────────────────────────────
+class LiveTrade(Base):
+    """Real-money trades.  Mirrors Trade columns exactly; stored in a separate
+    table so paper and live records are never mixed, and each can have different
+    retention/archival policies in the future."""
+    __tablename__ = "live_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    signal_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("signals.id"), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)      # buy | sell | short | cover
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stop_loss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    take_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trailing_stop_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    status: Mapped[OrderStatus] = mapped_column(SAEnum(OrderStatus), default=OrderStatus.PENDING)
+    execution_mode: Mapped[ExecutionMode] = mapped_column(SAEnum(ExecutionMode), nullable=False)
+    broker: Mapped[BrokerName] = mapped_column(SAEnum(BrokerName), nullable=False, index=True)
+    asset_class: Mapped[AssetClass] = mapped_column(SAEnum(AssetClass), nullable=False)
+    is_paper: Mapped[bool] = mapped_column(Boolean, default=False)
+    broker_order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    strategy_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+
+    signal: Mapped[Optional[Signal]] = relationship("Signal", back_populates="live_trade")
 
 
 # ─────────────────────────────────────────────────────────

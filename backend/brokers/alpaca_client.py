@@ -234,6 +234,9 @@ class AlpacaClient(AbstractBroker):
                 )
 
         req = _build_req(stop_price, take_profit_price)
+        # Track effective SL/TP actually submitted (may be reanchored on retry)
+        _effective_sl: Optional[float] = stop_price
+        _effective_tp: Optional[float] = take_profit_price
         try:
             raw_result: Any = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
         except Exception as _bracket_err:
@@ -244,22 +247,40 @@ class AlpacaClient(AbstractBroker):
             # (current market) and rejects with:
             #   stop_loss.stop_price must be >= base_price + 0.01  (SHORT)
             #   stop_loss.stop_price must be <= base_price - 0.01  (BUY)
-            # Fix: extract base_price from the error JSON, reanchor the
-            # SL/TP using the same ATR distance from the original signal's
-            # entry_price, and retry.  If that also fails, fall back to a
-            # plain market order so the trade is never fully lost.
-            import json as _json, re as _re
-            _err_str = str(_bracket_err)
-            _code_match = _re.search(r'"code"\s*:\s*42210000', _err_str)
-            if _code_match and (stop_price or take_profit_price):
+            # Fix: extract base_price from the error, reanchor SL/TP using the
+            # same ATR distance from the original signal's entry_price, and retry.
+            # If that also fails, fall back to a plain market order.
+            import json as _json
+            _is_42210000 = False
+            _base_price: Optional[float] = None
+
+            # Primary: use the typed APIError.code — avoids brittle regex on str()
+            try:
+                from alpaca.common.exceptions import APIError as _AlpacaAPIError
+                if isinstance(_bracket_err, _AlpacaAPIError) and _bracket_err.code == 42210000:
+                    _is_42210000 = True
+                    _err_body = _json.loads(_bracket_err._error)
+                    bp = _err_body.get("base_price")
+                    if bp:
+                        _base_price = float(bp)
+            except Exception:
+                pass
+
+            # Fallback: regex on str() in case of future SDK changes
+            if not _is_42210000:
+                import re as _re
+                _err_str = str(_bracket_err)
+                if _re.search(r'"code"\s*:\s*42210000', _err_str):
+                    _is_42210000 = True
+                    _bp_match = _re.search(r'"base_price"\s*:\s*"?([\d.]+)"?', _err_str)
+                    if _bp_match:
+                        try:
+                            _base_price = float(_bp_match.group(1))
+                        except ValueError:
+                            pass
+
+            if _is_42210000 and (stop_price or take_profit_price):
                 # Extract base_price from the Alpaca error JSON payload
-                _base_price: Optional[float] = None
-                _bp_match = _re.search(r'"base_price"\s*:\s*"?([\d.]+)"?', _err_str)
-                if _bp_match:
-                    try:
-                        _base_price = float(_bp_match.group(1))
-                    except ValueError:
-                        pass
                 if _base_price and entry_price:
                     # Preserve the ATR distance from the original signal
                     _is_short = order_side == OrderSide.SELL
@@ -288,6 +309,9 @@ class AlpacaClient(AbstractBroker):
                     req = _build_req(new_sl, new_tp)
                     try:
                         raw_result = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+                        # Record the actually-placed SL/TP so ForwardEngine can persist them
+                        _effective_sl = new_sl
+                        _effective_tp = new_tp
                     except Exception as _retry_err:
                         # Adjusted bracket also failed — fall back to plain market order
                         logger.warning(
@@ -296,6 +320,8 @@ class AlpacaClient(AbstractBroker):
                         )
                         req = _build_req(None, None)
                         raw_result = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+                        _effective_sl = None
+                        _effective_tp = None
                 else:
                     # No base_price or entry_price — fall back to plain market order
                     logger.warning(
@@ -305,6 +331,8 @@ class AlpacaClient(AbstractBroker):
                     )
                     req = _build_req(None, None)
                     raw_result = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+                    _effective_sl = None
+                    _effective_tp = None
             else:
                 raise  # unrelated error — propagate normally
         order_id = str(raw_result.id)
@@ -347,6 +375,8 @@ class AlpacaClient(AbstractBroker):
             status="filled" if fill_price is not None else str(raw_result.status),
             raw=raw_result.model_dump(),
             fill_price=fill_price,
+            effective_stop_price=_effective_sl,
+            effective_take_profit=_effective_tp,
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

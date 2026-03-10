@@ -7,7 +7,12 @@ from sqlalchemy import select, func
 from core.strategies.base import Signal
 from core.risk_manager import RiskManager
 from brokers import get_broker
-from db.models import Trade, OrderStatus, ExecutionMode
+from db.models import Trade, LiveTrade, OrderStatus, ExecutionMode
+
+
+def _trade_model(is_paper: bool):
+    """Return the ORM class for the correct trades table."""
+    return Trade if is_paper else LiveTrade
 from config import settings as _cfg
 
 # Convenience alias used by tests and external code
@@ -119,22 +124,45 @@ class ForwardEngine:
             except ValueError:
                 pass
 
-        q_realised = await db_session.execute(
+        # Build equivalent broker filter for LiveTrade
+        live_broker_filter: list = []
+        if broker:
+            try:
+                from db.models import BrokerName as _BN2
+                live_broker_filter = [LiveTrade.broker == _BN2(broker)]
+            except ValueError:
+                pass
+
+        q_realised_paper = await db_session.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
                 Trade.status == OrderStatus.FILLED,
                 Trade.closed_at >= today_start,
                 *broker_filter,
             )
         )
-        realised: float = q_realised.scalar_one()
-        q_open = await db_session.execute(
+        q_realised_live = await db_session.execute(
+            select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
+                LiveTrade.status == OrderStatus.FILLED,
+                LiveTrade.closed_at >= today_start,
+                *live_broker_filter,
+            )
+        )
+        realised: float = q_realised_paper.scalar_one() + q_realised_live.scalar_one()
+        q_open_paper = await db_session.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
                 Trade.status == OrderStatus.OPEN,
                 Trade.pnl.isnot(None),
                 *broker_filter,
             )
         )
-        unrealized: float = q_open.scalar_one()
+        q_open_live = await db_session.execute(
+            select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
+                LiveTrade.status == OrderStatus.OPEN,
+                LiveTrade.pnl.isnot(None),
+                *live_broker_filter,
+            )
+        )
+        unrealized: float = q_open_paper.scalar_one() + q_open_live.scalar_one()
         return realised + unrealized
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -162,7 +190,11 @@ class ForwardEngine:
             return None
 
         # ── Get broker ───────────────────────────────────
-        broker = get_broker(signal.broker)
+        # force_paper ensures paper strategies use paper/testnet credentials and
+        # live strategies use live credentials, regardless of the global _BROKER_MODES
+        # setting derived from .env.  Without this, flipping a strategy to is_paper=False
+        # would still trade against the paper endpoint if that's what .env points to.
+        broker = get_broker(signal.broker, force_paper=is_paper)
         await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
 
         # ── Get balance + open count ──────────────────────
@@ -172,8 +204,17 @@ class ForwardEngine:
             bal = await broker.get_balance()
             balance = bal.available
         except Exception as _bal_err:
-            logger.warning(f"[ForwardEngine] Could not fetch balance from {signal.broker}: {_bal_err} — using fallback")
             broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
+            if not is_paper:
+                # Never guess balance for a live strategy — incorrect sizing can mean
+                # a significantly oversized position with real money.  Refuse the trade.
+                logger.error(
+                    f"[ForwardEngine] LIVE balance unavailable for {broker_key}: {_bal_err}. "
+                    f"Refusing signal — cannot size safely without confirmed account balance."
+                )
+                return None
+            # Paper fallback: reconstruct from realised P&L stored in memory
+            logger.warning(f"[ForwardEngine] Could not fetch balance from {broker_key}: {_bal_err} — using paper fallback")
             balance = self._paper_balance.get(broker_key, _cfg.paper_initial_balance)
         # Count open positions for this broker from the DB (authoritative source).
         # broker.get_positions() returns ALL non-zero exchange balances which
@@ -183,13 +224,19 @@ class ForwardEngine:
         broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
         if db_session is not None:
             try:
-                _open_q = await db_session.execute(
+                _oq_paper = await db_session.execute(
                     select(func.count()).where(
                         Trade.status == OrderStatus.OPEN,
                         Trade.broker == signal.broker,
                     )
                 )
-                open_count = int(_open_q.scalar_one() or 0)
+                _oq_live = await db_session.execute(
+                    select(func.count()).where(
+                        LiveTrade.status == OrderStatus.OPEN,
+                        LiveTrade.broker == signal.broker,
+                    )
+                )
+                open_count = int(_oq_paper.scalar_one() or 0) + int(_oq_live.scalar_one() or 0)
             except Exception as _cnt_err:
                 logger.debug(f"[ForwardEngine] Could not count open positions from DB: {_cnt_err}")
                 open_count = sum(
@@ -204,17 +251,27 @@ class ForwardEngine:
 
         # F-083: Compute asset-class exposure so RiskManager Level 3
         # (max_exposure_per_class_pct) actually fires.  Previously always 0.0.
+        # Include BOTH paper (Trade) and live (LiveTrade) open positions so that
+        # live real-money positions count against the exposure cap — critical for
+        # accurate risk enforcement when real capital is at stake.
         asset_class_exposure = 0.0
         if db_session is not None:
             try:
-                _exp_q = await db_session.execute(
+                _exp_paper = await db_session.execute(
                     select(func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0)).where(
                         Trade.status == OrderStatus.OPEN,
                         Trade.asset_class == signal.asset_class,
                         Trade.broker == signal.broker,
                     )
                 )
-                asset_class_exposure = float(_exp_q.scalar_one() or 0.0)
+                _exp_live = await db_session.execute(
+                    select(func.coalesce(func.sum(LiveTrade.quantity * LiveTrade.entry_price), 0.0)).where(
+                        LiveTrade.status == OrderStatus.OPEN,
+                        LiveTrade.asset_class == signal.asset_class,
+                        LiveTrade.broker == signal.broker,
+                    )
+                )
+                asset_class_exposure = float(_exp_paper.scalar_one() or 0.0) + float(_exp_live.scalar_one() or 0.0)
             except Exception as _exp_err:
                 logger.debug(f"[ForwardEngine] Could not compute asset_class_exposure: {_exp_err}")
 
@@ -308,12 +365,12 @@ class ForwardEngine:
         _long_sides = {"buy", "cover", "long"}
         _new_is_long = signal.signal.upper() in ("BUY", "COVER")
         if db_session is not None:
+            _TradeModel = _trade_model(is_paper)
             _existing_q = await db_session.execute(
-                select(Trade).where(
-                    Trade.symbol == signal.symbol,
-                    Trade.broker == signal.broker,
-                    Trade.is_paper == is_paper,
-                    Trade.status == OrderStatus.OPEN,
+                select(_TradeModel).where(
+                    _TradeModel.symbol == signal.symbol,
+                    _TradeModel.broker == signal.broker,
+                    _TradeModel.status == OrderStatus.OPEN,
                 )
             )
             _existing_trades = _existing_q.scalars().all()
@@ -411,7 +468,8 @@ class ForwardEngine:
             )
             return None
 
-        trade = Trade(
+        TradeModel = _trade_model(is_paper)
+        trade = TradeModel(
             symbol=signal.symbol,
             side=signal.signal.lower(),
             quantity=effective_size,
@@ -477,6 +535,12 @@ class ForwardEngine:
             )
             # Use broker-confirmed fill price if available, fall back to signal price
             confirmed_entry = result.fill_price or result.price or signal.entry_price
+            # If broker reanchored SL/TP (e.g. Alpaca code 42210000), update the trade
+            # record so monitor_sl_tp enforces the same levels the broker bracket uses.
+            if result.effective_stop_price is not None:
+                trade.stop_loss = result.effective_stop_price
+            if result.effective_take_profit is not None:
+                trade.take_profit = result.effective_take_profit
             if result.fill_price:
                 logger.info(
                     f"[ForwardEngine] ✅ {mode_tag} ORDER FILLED: {result.order_id} | "
@@ -619,9 +683,10 @@ class ForwardEngine:
         # This prevents the observed 4-5 duplicate MKT close orders per second.
         if db_session is not None and trade.id is not None:
             from sqlalchemy import update as _upd
+            _TradeModel = type(trade)
             _guard = await db_session.execute(
-                _upd(Trade)
-                .where(Trade.id == trade.id, Trade.status == OrderStatus.OPEN)
+                _upd(_TradeModel)
+                .where(_TradeModel.id == trade.id, _TradeModel.status == OrderStatus.OPEN)
                 .values(status=OrderStatus.PENDING)
                 .execution_options(synchronize_session="fetch")
             )
@@ -633,7 +698,8 @@ class ForwardEngine:
                 )
                 return
 
-        broker = get_broker(trade.broker)
+        _close_broker_key = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+        broker = get_broker(_close_broker_key, force_paper=trade.is_paper)
         try:
             await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
         except Exception as _conn_err:
@@ -709,10 +775,11 @@ class ForwardEngine:
                 # can retry instead of leaving the trade permanently stuck as PENDING.
                 if db_session is not None and trade.id is not None:
                     from sqlalchemy import update as _upd_revert
+                    _TradeModelRevert = type(trade)
                     try:
                         await db_session.execute(
-                            _upd_revert(Trade)
-                            .where(Trade.id == trade.id, Trade.status == OrderStatus.PENDING)
+                            _upd_revert(_TradeModelRevert)
+                            .where(_TradeModelRevert.id == trade.id, _TradeModelRevert.status == OrderStatus.PENDING)
                             .values(status=OrderStatus.OPEN)
                         )
                         await db_session.flush()
@@ -813,12 +880,13 @@ class ForwardEngine:
         if db_session is not None:
             # DB-authoritative: close ALL open trades (paper and live).
             # G2: live trades are included so a single emergency stop covers everything.
-            open_q = await db_session.execute(
-                select(Trade).where(
-                    Trade.status == OrderStatus.OPEN,
-                )
+            paper_q = await db_session.execute(
+                select(Trade).where(Trade.status == OrderStatus.OPEN)
             )
-            all_open = open_q.scalars().all()
+            live_q = await db_session.execute(
+                select(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN)
+            )
+            all_open = paper_q.scalars().all() + live_q.scalars().all()
             for trade in all_open:
                 try:
                     await self.close_position(trade, reason="emergency_stop", db_session=db_session)
@@ -871,11 +939,14 @@ class ForwardEngine:
         from sqlalchemy import select as _sel
         from db.models import Strategy as _StratModel
 
-        # Fetch ALL open trades — we need trades without SL/TP too for time-based exits.
-        open_q = await db_session.execute(
+        # Fetch ALL open trades (paper + live) — we need trades without SL/TP too for time-based exits.
+        _paper_q = await db_session.execute(
             _sel(Trade).where(Trade.status == OrderStatus.OPEN)
         )
-        open_trades: list = open_q.scalars().all()
+        _live_q = await db_session.execute(
+            _sel(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN)
+        )
+        open_trades: list = _paper_q.scalars().all() + _live_q.scalars().all()
         if not open_trades:
             return 0
 
@@ -925,11 +996,11 @@ class ForwardEngine:
 
             try:
                 broker_name = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
-                _cache_key = (broker_name, trade.symbol)
-                # Always resolve the broker object (factory is cheap; it returns a singleton/cached
-                # client). This ensures update_stop_loss is called on the correct broker even when
-                # the bid/ask price comes from the cache (cache-hit path skips the else branch).
-                broker = get_broker(broker_name)
+                _cache_key = (broker_name, trade.is_paper, trade.symbol)
+                # Always resolve the broker object with the correct paper/live credentials.
+                # force_paper=trade.is_paper ensures live trades sync SL/TP to the live
+                # broker endpoint (not the paper one from _BROKER_MODES default).
+                broker = get_broker(broker_name, force_paper=trade.is_paper)
 
                 streamed = _psm.get_price(trade.symbol)
                 if streamed is not None:
@@ -1164,28 +1235,35 @@ class ForwardEngine:
                 return clean
             return symbol  # binance and others already match
 
-        open_q = await db_session.execute(
+        paper_q = await db_session.execute(
             # F-105: also reconcile PENDING entry trades — fill may have arrived after
             # the 30 s poll window, or the entry fill + broker SL/TP chain completed
             # before we could check.  Ignoring PENDING left ghost positions permanently.
             _sel(Trade).where(Trade.status.in_([OrderStatus.OPEN, OrderStatus.PENDING]))
         )
-        open_trades: list = open_q.scalars().all()
+        live_q = await db_session.execute(
+            _sel(LiveTrade).where(LiveTrade.status.in_([OrderStatus.OPEN, OrderStatus.PENDING]))
+        )
+        open_trades: list = paper_q.scalars().all() + live_q.scalars().all()
         if not open_trades:
             return 0
 
+        # Group by (broker_name, is_paper) so paper trades are reconciled against
+        # the paper endpoint and live trades against the live endpoint.  Without
+        # this split, a live trade could be compared to paper account positions
+        # (which it would never appear in) and be incorrectly ghost-closed.
         by_broker: dict = defaultdict(list)
         for t in open_trades:
             bk = t.broker.value if hasattr(t.broker, "value") else str(t.broker)
-            by_broker[bk].append(t)
+            by_broker[(bk, t.is_paper)].append(t)
 
         ghost_count = 0
         # NOTE: "long" is an alias for "buy" used by the DB rebuild script.
         _long_sides = {"buy", "cover", "long"}
 
-        for broker_name, trades in by_broker.items():
+        for (broker_name, _is_paper), trades in by_broker.items():
             try:
-                broker = get_broker(broker_name)
+                broker = get_broker(broker_name, force_paper=_is_paper)
                 await broker.connect()
                 broker_positions = await broker.get_positions()
                 broker_symbols = {p.symbol for p in broker_positions}

@@ -17,6 +17,7 @@ from db.database import get_db
 from db.models import (
     Strategy as StrategyModel,
     Trade,
+    LiveTrade,
     Signal as SignalModel,
     OrderStatus,
     ExecutionMode,
@@ -233,7 +234,7 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         if bd["connected"] and bd["is_active"]
     ) or sum(bd["total"] for bd in broker_breakdown if bd["connected"])
 
-    # Days running — from earliest trade
+    # Days running — from earliest paper trade
     first_q = await db.execute(
         select(func.min(Trade.opened_at)).where(Trade.is_paper == True)
     )
@@ -386,10 +387,78 @@ async def list_paper_trades(
     q = select(Trade).order_by(desc(Trade.opened_at)).limit(limit)
 
     if mode == "paper":
-        q = q.where(Trade.is_paper == True)
+        pass  # Trade table is paper-only
     elif mode == "live":
-        q = q.where(Trade.is_paper == False)
-    # mode == "all" → no is_paper filter
+        # Live trades are in a separate table
+        q_live = select(LiveTrade).order_by(desc(LiveTrade.opened_at)).limit(limit)
+        if status:
+            try:
+                q_live = q_live.where(LiveTrade.status == OrderStatus(status))
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+        live_result = await db.execute(q_live)
+        trades = live_result.scalars().all()
+        return {
+            "trades": [
+                {
+                    "id": t.id,
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "quantity": t.quantity,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "stop_loss": t.stop_loss,
+                    "take_profit": t.take_profit,
+                    "pnl": t.pnl,
+                    "pnl_pct": t.pnl_pct,
+                    "status": t.status.value if hasattr(t.status, "value") else t.status,
+                    "execution_mode": t.execution_mode.value if hasattr(t.execution_mode, "value") else t.execution_mode,
+                    "broker": t.broker.value if hasattr(t.broker, "value") else t.broker,
+                    "asset_class": t.asset_class.value if hasattr(t.asset_class, "value") else t.asset_class,
+                    "strategy_name": t.strategy_name,
+                    "broker_order_id": t.broker_order_id,
+                    "is_paper": t.is_paper,
+                    "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+                    "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+                }
+                for t in trades
+            ]
+        }
+    elif mode == "all":
+        # Combine paper (Trade) + live (LiveTrade)
+        paper_result = await db.execute(select(Trade).order_by(desc(Trade.opened_at)).limit(limit))
+        live_result  = await db.execute(select(LiveTrade).order_by(desc(LiveTrade.opened_at)).limit(limit))
+        all_trades = sorted(
+            paper_result.scalars().all() + live_result.scalars().all(),
+            key=lambda t: t.opened_at or datetime.min,
+            reverse=True,
+        )[:limit]
+        return {
+            "trades": [
+                {
+                    "id": t.id,
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "quantity": t.quantity,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "stop_loss": t.stop_loss,
+                    "take_profit": t.take_profit,
+                    "pnl": t.pnl,
+                    "pnl_pct": t.pnl_pct,
+                    "status": t.status.value if hasattr(t.status, "value") else t.status,
+                    "execution_mode": t.execution_mode.value if hasattr(t.execution_mode, "value") else t.execution_mode,
+                    "broker": t.broker.value if hasattr(t.broker, "value") else t.broker,
+                    "asset_class": t.asset_class.value if hasattr(t.asset_class, "value") else t.asset_class,
+                    "strategy_name": t.strategy_name,
+                    "broker_order_id": t.broker_order_id,
+                    "is_paper": t.is_paper,
+                    "opened_at": t.opened_at.isoformat() if t.opened_at else None,
+                    "closed_at": t.closed_at.isoformat() if t.closed_at else None,
+                }
+                for t in all_trades
+            ]
+        }
 
     if status:
         try:
@@ -433,7 +502,6 @@ async def export_paper_trades(db: AsyncSession = Depends(get_db)):
     """Download all paper trades as CSV."""
     result = await db.execute(
         select(Trade)
-        .where(Trade.is_paper == True)
         .order_by(desc(Trade.opened_at))
     )
     trades = result.scalars().all()
@@ -726,6 +794,7 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
                     take_profit=sig.take_profit,
                     trailing_stop_pct=_trailing,
                     resolved=False,
+                    is_paper=strat.is_paper,
                 ))
 
             # ── Pipe through ForwardEngine ────────────────────────────────
@@ -850,7 +919,7 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
     await engine.initialize(db)
 
     q = await db.execute(
-        select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.OPEN)
+        select(Trade).where(Trade.status == OrderStatus.OPEN)
     )
     open_trades = q.scalars().all()
 

@@ -15,7 +15,9 @@ class OrderResult:
     price: float          # submitted/limit price
     status: str
     raw: dict
-    fill_price: Optional[float] = None   # actual fill price once confirmed
+    fill_price: Optional[float] = None            # actual fill price once confirmed
+    effective_stop_price: Optional[float] = None  # SL actually placed at broker (may differ from signal if reanchored)
+    effective_take_profit: Optional[float] = None # TP actually placed at broker (may differ from signal if reanchored)
 
 
 @dataclass

@@ -361,11 +361,13 @@ class TestForwardEngine(unittest.IsolatedAsyncioTestCase):
         # process_signal returns the REJECTED Trade (not None) so callers can set signal_id
         self.assertIsNotNone(result)
         assert result is not None
-        from db.models import OrderStatus, Trade as _TradeModel
+        from db.models import OrderStatus, Trade as _TradeModel, LiveTrade as _LiveTradeModel
         self.assertEqual(result.status, OrderStatus.REJECTED)
         # add() is called for the REJECTED trade + possibly a notification record
         self.assertGreaterEqual(mock_db.add.call_count, 1)
-        trade_adds = [c.args[0] for c in mock_db.add.call_args_list if isinstance(c.args[0], _TradeModel)]
+        # is_paper=False → process_signal creates a LiveTrade, not a Trade
+        trade_adds = [c.args[0] for c in mock_db.add.call_args_list
+                      if isinstance(c.args[0], (_TradeModel, _LiveTradeModel))]
         self.assertEqual(len(trade_adds), 1)
         self.assertEqual(trade_adds[0].status, OrderStatus.REJECTED)
 

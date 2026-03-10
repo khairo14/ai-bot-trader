@@ -72,16 +72,21 @@ class PriceStreamManager:
 
     async def _refresh_subscriptions(self, db_session_factory) -> None:
         """Query open trades and update stream tasks accordingly."""
-        from db.models import Trade, OrderStatus
+        from db.models import Trade, LiveTrade, OrderStatus
         from sqlalchemy import select
 
         async with db_session_factory() as session:
-            q = await session.execute(
+            paper_q = await session.execute(
                 select(Trade.broker, Trade.symbol).where(
                     Trade.status == OrderStatus.OPEN
                 ).distinct()
             )
-            rows = q.all()
+            live_q = await session.execute(
+                select(LiveTrade.broker, LiveTrade.symbol).where(
+                    LiveTrade.status == OrderStatus.OPEN
+                ).distinct()
+            )
+            rows = list(paper_q.all()) + list(live_q.all())
 
         # Group symbols by broker
         _raw: dict[str, set[str]] = {}

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from db.database import get_db
-from db.models import Trade, OrderStatus, BrokerName
+from db.models import Trade, LiveTrade, OrderStatus, BrokerName
 from config import settings
 from core.risk_manager import RiskManager as _RiskManager
 
@@ -96,10 +96,13 @@ async def portfolio_summary(db: AsyncSession = Depends(get_db)):
         broker_balances.append(b)
 
     # Open positions count
-    open_result = await db.execute(
+    open_result_paper = await db.execute(
         select(func.count(Trade.id)).where(Trade.status == OrderStatus.OPEN)
     )
-    open_count = int(open_result.scalar() or 0)
+    open_result_live = await db.execute(
+        select(func.count(LiveTrade.id)).where(LiveTrade.status == OrderStatus.OPEN)
+    )
+    open_count = int(open_result_paper.scalar() or 0) + int(open_result_live.scalar() or 0)
 
     # Today's realised P&L (all trades closed since midnight UTC)
     from datetime import timezone as _tz_mod
@@ -107,31 +110,47 @@ async def portfolio_summary(db: AsyncSession = Depends(get_db)):
         datetime.now(_tz_mod.utc).date(),
         datetime.min.time(),
     )
-    pnl_result = await db.execute(
+    pnl_paper = await db.execute(
         select(func.coalesce(func.sum(Trade.pnl), 0.0))
         .where(Trade.status == OrderStatus.FILLED)
         .where(Trade.closed_at >= today_start)
     )
-    today_pnl = round(float(pnl_result.scalar() or 0.0), 2)
+    pnl_live = await db.execute(
+        select(func.coalesce(func.sum(LiveTrade.pnl), 0.0))
+        .where(LiveTrade.status == OrderStatus.FILLED)
+        .where(LiveTrade.closed_at >= today_start)
+    )
+    today_pnl = round(float(pnl_paper.scalar() or 0.0) + float(pnl_live.scalar() or 0.0), 2)
 
     # Per-broker daily P&L + per-broker open position count (same today window)
     today_pnl_by_broker: dict[str, float] = {}
     open_positions_by_broker: dict[str, int] = {}
     for _broker in [BrokerName.BINANCE, BrokerName.ALPACA, BrokerName.IBKR]:
-        _pnl_q = await db.execute(
+        _pnl_p = await db.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0))
             .where(Trade.status == OrderStatus.FILLED)
             .where(Trade.closed_at >= today_start)
             .where(Trade.broker == _broker)
         )
-        today_pnl_by_broker[_broker.value] = round(float(_pnl_q.scalar() or 0.0), 2)
+        _pnl_l = await db.execute(
+            select(func.coalesce(func.sum(LiveTrade.pnl), 0.0))
+            .where(LiveTrade.status == OrderStatus.FILLED)
+            .where(LiveTrade.closed_at >= today_start)
+            .where(LiveTrade.broker == _broker)
+        )
+        today_pnl_by_broker[_broker.value] = round(float(_pnl_p.scalar() or 0.0) + float(_pnl_l.scalar() or 0.0), 2)
 
-        _open_q = await db.execute(
+        _cnt_p = await db.execute(
             select(func.count(Trade.id))
             .where(Trade.status == OrderStatus.OPEN)
             .where(Trade.broker == _broker)
         )
-        _cnt = int(_open_q.scalar() or 0)
+        _cnt_l = await db.execute(
+            select(func.count(LiveTrade.id))
+            .where(LiveTrade.status == OrderStatus.OPEN)
+            .where(LiveTrade.broker == _broker)
+        )
+        _cnt = int((_cnt_p.scalar() or 0) + (_cnt_l.scalar() or 0))
         if _cnt > 0:
             open_positions_by_broker[_broker.value] = _cnt
 

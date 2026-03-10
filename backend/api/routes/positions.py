@@ -1,5 +1,6 @@
 import csv
 import io
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -9,7 +10,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from db.database import get_db
-from db.models import Trade, OrderStatus
+from db.models import Trade, LiveTrade, OrderStatus
 
 router = APIRouter()
 
@@ -38,11 +39,9 @@ def _trade_dict(t: Trade) -> dict:
 @router.get("/open")
 async def get_open_positions(db: AsyncSession = Depends(get_db)):
     """Get all currently open (paper or live) positions."""
-    result = await db.execute(
-        select(Trade).where(Trade.status == OrderStatus.OPEN)
-    )
-    trades = result.scalars().all()
-    return {"positions": [_trade_dict(t) for t in trades]}
+    paper = (await db.execute(select(Trade).where(Trade.status == OrderStatus.OPEN))).scalars().all()
+    live  = (await db.execute(select(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN))).scalars().all()
+    return {"positions": [_trade_dict(t) for t in paper + live]}
 
 
 @router.get("/history")
@@ -52,26 +51,28 @@ async def get_trade_history(
     db: AsyncSession = Depends(get_db),
 ):
     """Get completed trades, newest first. Defaults to last 200; use offset for pagination."""
-    result = await db.execute(
-        select(Trade)
-        .where(Trade.status == OrderStatus.FILLED)
-        .order_by(desc(Trade.closed_at))
-        .limit(min(limit, 1000))   # hard cap at 1000 rows per call
-        .offset(offset)
-    )
-    trades = result.scalars().all()
-    return {"trades": [_trade_dict(t) for t in trades]}
+    paper = (await db.execute(
+        select(Trade).where(Trade.status == OrderStatus.FILLED)
+        .order_by(desc(Trade.closed_at)).limit(min(limit, 1000)).offset(offset)
+    )).scalars().all()
+    live  = (await db.execute(
+        select(LiveTrade).where(LiveTrade.status == OrderStatus.FILLED)
+        .order_by(desc(LiveTrade.closed_at)).limit(min(limit, 1000)).offset(offset)
+    )).scalars().all()
+    all_trades = sorted(paper + live, key=lambda t: t.closed_at or t.opened_at or datetime.min, reverse=True)[:min(limit, 1000)]
+    return {"trades": [_trade_dict(t) for t in all_trades]}
 
 
 @router.get("/history/export")
 async def export_trade_history(db: AsyncSession = Depends(get_db)):
     """Download all completed trades as CSV."""
-    result = await db.execute(
-        select(Trade)
-        .where(Trade.status == OrderStatus.FILLED)
-        .order_by(desc(Trade.closed_at))
-    )
-    trades = result.scalars().all()
+    paper = (await db.execute(
+        select(Trade).where(Trade.status == OrderStatus.FILLED).order_by(desc(Trade.closed_at))
+    )).scalars().all()
+    live  = (await db.execute(
+        select(LiveTrade).where(LiveTrade.status == OrderStatus.FILLED).order_by(desc(LiveTrade.closed_at))
+    )).scalars().all()
+    trades = sorted(paper + live, key=lambda t: t.closed_at or t.opened_at or datetime.min, reverse=True)
 
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -103,12 +104,19 @@ class ClosePositionRequest(BaseModel):
 @router.post("/close")
 async def close_position(request: ClosePositionRequest, db: AsyncSession = Depends(get_db)):
     """Manually close an open position at market price."""
-    result = await db.execute(select(Trade).where(Trade.id == request.trade_id))
-    trade = result.scalar_one_or_none()
+    # Filter by OPEN status in both queries to avoid the ID-collision case:
+    # if Trade.id=N exists (status=FILLED) and LiveTrade.id=N also exists
+    # (status=OPEN), looking up by id alone would find the closed paper trade
+    # first and error with "Trade is not open", never reaching the live table.
+    trade = (await db.execute(
+        select(Trade).where(Trade.id == request.trade_id, Trade.status == OrderStatus.OPEN)
+    )).scalar_one_or_none()
+    if trade is None:
+        trade = (await db.execute(
+            select(LiveTrade).where(LiveTrade.id == request.trade_id, LiveTrade.status == OrderStatus.OPEN)
+        )).scalar_one_or_none()
     if not trade:
-        raise HTTPException(status_code=404, detail="Trade not found")
-    if trade.status != OrderStatus.OPEN:
-        raise HTTPException(status_code=400, detail="Trade is not open")
+        raise HTTPException(status_code=404, detail="Open trade not found")
 
     from core.engine.forward_engine import ForwardEngine
     engine = ForwardEngine()

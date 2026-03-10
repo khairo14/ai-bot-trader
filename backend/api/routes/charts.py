@@ -8,7 +8,7 @@ from sqlalchemy import select, desc
 from loguru import logger
 
 from db.database import AsyncSessionLocal
-from db.models import Signal, Trade, OrderStatus
+from db.models import Signal, Trade, LiveTrade, OrderStatus
 
 router = APIRouter()
 
@@ -406,17 +406,27 @@ async def get_chart_signals(
     timeframe: str = Query(default="1h"),
     broker: str = Query(default="binance"),
     limit: int = Query(default=500, le=1000),
+    since: Optional[int] = Query(default=None, description="Start unix ms"),
+    until: Optional[int] = Query(default=None, description="End unix ms"),
 ):
     """Return non-HOLD signals for a symbol/timeframe as chart markers."""
+    filters = [
+        Signal.symbol == symbol.upper(),
+        Signal.timeframe == timeframe,
+        Signal.broker == broker.lower(),
+        Signal.signal != "HOLD",
+    ]
+    if since is not None:
+        since_dt = datetime.fromtimestamp(since / 1000, tz=timezone.utc).replace(tzinfo=None)
+        filters.append(Signal.created_at >= since_dt)
+    if until is not None:
+        until_dt = datetime.fromtimestamp(until / 1000, tz=timezone.utc).replace(tzinfo=None)
+        filters.append(Signal.created_at <= until_dt)
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(Signal)
-            .where(
-                Signal.symbol == symbol.upper(),
-                Signal.timeframe == timeframe,
-                Signal.broker == broker.lower(),
-                Signal.signal != "HOLD",
-            )
+            .where(*filters)
             .order_by(desc(Signal.created_at))
             .limit(limit)
         )
@@ -468,20 +478,31 @@ async def get_chart_trades(
     until_dt = datetime.fromtimestamp(until / 1000, tz=timezone.utc).replace(tzinfo=None)
 
     async with AsyncSessionLocal() as session:
-        q = (
-            select(Trade)
-            .where(
-                Trade.symbol == symbol.upper(),
-                Trade.broker == broker.lower(),
-                Trade.status.in_([OrderStatus.OPEN, OrderStatus.FILLED]),
-                Trade.opened_at >= since_dt,
-                Trade.opened_at <= until_dt,
-            )
-            .order_by(desc(Trade.opened_at))
-            .limit(limit)
+        base_filters_paper = [
+            Trade.symbol == symbol.upper(),
+            Trade.broker == broker.lower(),
+            Trade.status.in_([OrderStatus.OPEN, OrderStatus.FILLED]),
+            Trade.opened_at >= since_dt,
+            Trade.opened_at <= until_dt,
+        ]
+        base_filters_live = [
+            LiveTrade.symbol == symbol.upper(),
+            LiveTrade.broker == broker.lower(),
+            LiveTrade.status.in_([OrderStatus.OPEN, OrderStatus.FILLED]),
+            LiveTrade.opened_at >= since_dt,
+            LiveTrade.opened_at <= until_dt,
+        ]
+        paper_result = await session.execute(
+            select(Trade).where(*base_filters_paper).order_by(desc(Trade.opened_at)).limit(limit)
         )
-        result = await session.execute(q)
-        trades = result.scalars().all()
+        live_result = await session.execute(
+            select(LiveTrade).where(*base_filters_live).order_by(desc(LiveTrade.opened_at)).limit(limit)
+        )
+        trades = sorted(
+            paper_result.scalars().all() + live_result.scalars().all(),
+            key=lambda t: t.opened_at or datetime.min,
+            reverse=True,
+        )[:limit]
 
     out = []
     for t in trades:

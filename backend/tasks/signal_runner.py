@@ -313,6 +313,7 @@ def run_signals(self):
                                 take_profit=sig.take_profit,
                                 trailing_stop_pct=sig.trailing_stop_pct,
                                 resolved=False,
+                                is_paper=strat.is_paper,
                             ))
 
                         # ── Broadcast signal to WebSocket clients ─────────────

@@ -376,6 +376,8 @@ class BinanceClient(AbstractBroker):
             status="filled" if fill_price else str(result.get("status") or "open"),
             raw=dict(result),  # type: ignore[arg-type]
             fill_price=fill_price,
+            effective_stop_price=stop_price,
+            effective_take_profit=take_profit_price,
         )
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:

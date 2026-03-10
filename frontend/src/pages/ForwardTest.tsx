@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Play, StopCircle, Activity, RefreshCw, Zap, Download, Clock, Loader2, X, TrendingUp, BarChart2 } from 'lucide-react'
+import { Play, StopCircle, Activity, RefreshCw, Zap, Download, Clock, Loader2, X, TrendingUp, BarChart2, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import toast from 'react-hot-toast'
 import { SkeletonLine } from '../components/Skeleton'
@@ -8,6 +8,7 @@ import axios from 'axios'
 import MarketClock from '../components/MarketClock'
 
 const API = ''   // relative — proxied by Vite to http://localhost:8000
+const TRADES_PAGE_SIZE = 10   // rows per page in the trade history table
 const WS_URL = (() => {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${window.location.host}/ws`
@@ -142,6 +143,7 @@ export default function ForwardTest() {
   const [status, setStatus] = useState<ForwardStatus | null>(null)
   const [trades, setTrades] = useState<PaperTrade[]>([])
   const [tradeMode, setTradeMode] = useState<'paper' | 'live' | 'all'>('paper')
+  const [tradePage, setTradePage] = useState(0)
   const [pendingSignals, setPendingSignals] = useState<PendingSignal[]>([])
   const [executingSignal, setExecutingSignal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
@@ -215,7 +217,7 @@ export default function ForwardTest() {
       const effectiveMode = mode ?? tradeMode
       const [statusRes, tradesRes, pendingRes, positionsRes, signalsRes] = await Promise.allSettled([
         axios.get(`${API}/api/forward-test/status`),
-        axios.get(`${API}/api/forward-test/trades?limit=50&mode=${effectiveMode}`),
+        axios.get(`${API}/api/forward-test/trades?limit=200&mode=${effectiveMode}`),
         axios.get(`${API}/api/forward-test/pending-signals`),
         axios.get(`${API}/api/positions/open`),
         axios.get(`${API}/api/signals?limit=25`),
@@ -541,23 +543,32 @@ export default function ForwardTest() {
             <p className="text-gray-600 text-sm">No open positions</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
+          <div className="overflow-hidden">
+            <table className="w-full text-xs table-fixed">
               <thead>
                 <tr className="text-gray-500 border-b border-dark-600">
-                  {['Symbol', 'Side', 'Qty', 'Entry', 'Stop Loss', 'Take Profit', 'Unrealized P&L', 'Broker', 'Strategy', 'Mode', 'Opened', ''].map((h) => (
-                    <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
-                  ))}
+                  <th className="text-left px-3 py-2 font-medium w-10">#</th>
+                  <th className="text-left px-3 py-2 font-medium w-20">Symbol</th>
+                  <th className="text-left px-3 py-2 font-medium w-14">Side</th>
+                  <th className="text-left px-3 py-2 font-medium w-24">Entry</th>
+                  <th className="text-left px-3 py-2 font-medium w-20">Stop Loss</th>
+                  <th className="text-left px-3 py-2 font-medium w-20">Take Profit</th>
+                  <th className="text-left px-3 py-2 font-medium w-32">Unrealized P&L</th>
+                  <th className="text-left px-3 py-2 font-medium w-16">Broker</th>
+                  <th className="text-left px-3 py-2 font-medium w-14">Mode</th>
+                  <th className="text-left px-3 py-2 font-medium w-36">Strategy</th>
+                  <th className="text-left px-3 py-2 font-medium w-24">Opened</th>
+                  <th className="text-left px-3 py-2 font-medium w-32"></th>
                 </tr>
               </thead>
               <tbody>
                 {openPositions.map((pos) => (
                   <tr key={pos.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
-                    <td className="px-3 py-2 font-medium text-white">{pos.symbol}</td>
+                    <td className="px-3 py-2 text-gray-600 font-mono">#{pos.id}</td>
+                    <td className="px-3 py-2 font-medium text-white truncate">{pos.symbol}</td>
                     <td className={`px-3 py-2 font-bold ${pos.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
                       {pos.side.toUpperCase()}
                     </td>
-                    <td className="px-3 py-2 text-gray-300">{pos.quantity.toFixed(4)}</td>
                     <td className="px-3 py-2 text-gray-300">{fmtPrice(pos.entry_price)}</td>
                     <td className="px-3 py-2 text-red-400">{fmtPrice(pos.stop_loss)}</td>
                     <td className="px-3 py-2 text-green-400">{fmtPrice(pos.take_profit)}</td>
@@ -565,13 +576,13 @@ export default function ForwardTest() {
                       {pos.pnl != null ? `${pos.pnl > 0 ? '+' : ''}${fmtUSD(pos.pnl)}` : '—'}
                       {pos.pnl_pct != null && <span className="text-gray-500 ml-1">({fmtPct(pos.pnl_pct)})</span>}
                     </td>
-                    <td className="px-3 py-2 text-gray-400 capitalize">{pos.broker}</td>
-                    <td className="px-3 py-2 text-gray-400 max-w-[90px] truncate">{pos.strategy_name ?? '—'}</td>
+                    <td className="px-3 py-2 text-gray-400 capitalize truncate">{pos.broker}</td>
                     <td className="px-3 py-2">
-                      <span className={`px-1.5 py-0.5 rounded text-xs ${pos.is_paper ? 'bg-yellow-900/20 text-yellow-400' : 'bg-red-900/20 text-red-300 font-bold'}`}>
-                        {pos.is_paper ? 'paper' : 'LIVE'}
-                      </span>
+                      <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                        pos.is_paper ? 'bg-blue-900/20 text-blue-400' : 'bg-red-900/30 text-red-400'
+                      }`}>{pos.is_paper ? 'paper' : 'LIVE'}</span>
                     </td>
+                    <td className="px-3 py-2 text-gray-400 truncate">{pos.strategy_name ?? '—'}</td>
                     <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
                       {pos.opened_at ? new Date(pos.opened_at).toLocaleTimeString() : '—'}
                     </td>
@@ -680,7 +691,7 @@ export default function ForwardTest() {
                 {(['paper', 'live', 'all'] as const).map((m) => (
                   <button
                     key={m}
-                    onClick={() => setTradeMode(m)}
+                    onClick={() => { setTradeMode(m); setTradePage(0) }}
                     className={`px-2.5 py-1 capitalize transition-colors ${
                       tradeMode === m ? 'bg-dark-600 text-white' : 'text-gray-500 hover:text-gray-300'
                     }`}
@@ -714,56 +725,104 @@ export default function ForwardTest() {
               </p>
               {tradeMode === 'paper' && <p className="text-gray-600 text-xs mt-1">Enable a strategy in paper mode and click "Run Now".</p>}
             </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="text-gray-500 border-b border-dark-600">
-                    {['Symbol', 'Side', 'Qty', 'Entry', 'Exit', 'P&L', 'Status', 'Mode', 'Strategy', 'Opened'].map((h) => (
-                      <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {trades.map((t) => (
-                    <tr key={t.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
-                      <td className="px-3 py-2 font-medium text-white">{t.symbol}</td>
-                      <td className={`px-3 py-2 font-medium ${t.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
-                        {t.side.toUpperCase()}
-                      </td>
-                      <td className="px-3 py-2 text-gray-300">{t.quantity.toFixed(4)}</td>
-                      <td className="px-3 py-2 text-gray-300">{fmtPrice(t.entry_price)}</td>
-                      <td className="px-3 py-2 text-gray-300">{fmtPrice(t.exit_price)}</td>
-                      <td className={`px-3 py-2 font-medium ${(t.pnl ?? 0) > 0 ? 'text-green-400' : (t.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'}`}>
-                        {t.pnl != null ? fmtUSD(t.pnl) : '—'}
-                        {t.pnl_pct != null && <span className="text-gray-500 ml-1">({fmtPct(t.pnl_pct)})</span>}
-                      </td>
-                      <td className="px-3 py-2">
-                        <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                          t.status === 'open'     ? 'bg-blue-500/15 text-blue-400' :
-                          t.status === 'filled'   ? 'bg-green-500/15 text-green-400' :
-                          t.status === 'pending'  ? 'bg-yellow-500/15 text-yellow-400' :
-                          t.status === 'rejected' ? 'bg-red-500/15 text-red-400' :
-                          'bg-gray-700 text-gray-400'
-                        }`}>
-                          {t.status}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-gray-400 max-w-[100px] truncate">{t.strategy_name ?? '—'}</td>
-                      <td className="px-3 py-2">
-                        <span className={`px-1.5 py-0.5 rounded text-xs ${t.is_paper ? 'bg-yellow-900/20 text-yellow-400' : 'bg-red-900/20 text-red-300 font-bold'}`}>
-                          {t.is_paper ? 'paper' : 'LIVE'}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2 text-gray-500">
-                        {t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          ) : (() => {
+            const totalPages = Math.ceil(trades.length / TRADES_PAGE_SIZE)
+            const page = Math.min(tradePage, totalPages - 1)
+            const pageRows = trades.slice(page * TRADES_PAGE_SIZE, (page + 1) * TRADES_PAGE_SIZE)
+            return (
+              <>
+                <div className="overflow-hidden">
+                  <table className="w-full text-xs table-fixed">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-dark-600">
+                        <th className="text-left px-2 py-2 font-medium w-10">#</th>
+                        <th className="text-left px-2 py-2 font-medium w-20">Symbol</th>
+                        <th className="text-left px-2 py-2 font-medium w-14">Side</th>
+                        <th className="text-left px-2 py-2 font-medium w-20">Entry</th>
+                        <th className="text-left px-2 py-2 font-medium w-20">Exit</th>
+                        <th className="text-left px-2 py-2 font-medium w-28">P&L</th>
+                        <th className="text-left px-2 py-2 font-medium w-20">Status</th>
+                        <th className="text-left px-2 py-2 font-medium">Strategy</th>
+                        <th className="text-left px-2 py-2 font-medium w-32">Opened</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pageRows.map((t) => (
+                        <tr key={t.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
+                          <td className="px-2 py-2 text-gray-600 font-mono">#{t.id}</td>
+                          <td className="px-2 py-2 font-medium text-white truncate">{t.symbol}</td>
+                          <td className={`px-2 py-2 font-medium ${t.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
+                            {t.side.toUpperCase()}
+                          </td>
+                          <td className="px-2 py-2 text-gray-300">{fmtPrice(t.entry_price)}</td>
+                          <td className="px-2 py-2 text-gray-300">{fmtPrice(t.exit_price)}</td>
+                          <td className={`px-2 py-2 font-medium ${(t.pnl ?? 0) > 0 ? 'text-green-400' : (t.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'}`}>
+                            {t.pnl != null ? fmtUSD(t.pnl) : '—'}
+                            {t.pnl_pct != null && <span className="text-gray-500 ml-1">({fmtPct(t.pnl_pct)})</span>}
+                          </td>
+                          <td className="px-2 py-2">
+                            <div className="flex flex-col gap-0.5">
+                              <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+                                t.status === 'open'     ? 'bg-blue-500/15 text-blue-400' :
+                                t.status === 'filled'   ? 'bg-green-500/15 text-green-400' :
+                                t.status === 'pending'  ? 'bg-yellow-500/15 text-yellow-400' :
+                                t.status === 'rejected' ? 'bg-red-500/15 text-red-400' :
+                                'bg-gray-700 text-gray-400'
+                              }`}>
+                                {t.status}
+                              </span>
+                              <span className={`px-1 py-0.5 rounded text-xs ${
+                                t.is_paper ? 'bg-blue-900/20 text-blue-400' : 'bg-red-900/30 text-red-400 font-bold'
+                              }`}>{t.is_paper ? 'paper' : 'LIVE'}</span>
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 text-gray-400 truncate">{t.strategy_name ?? '—'}</td>
+                          <td className="px-2 py-2 text-gray-500 whitespace-nowrap">
+                            {t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {/* Pagination footer */}
+                <div className="px-4 py-2.5 border-t border-dark-600 flex items-center justify-between">
+                  <span className="text-xs text-gray-500">
+                    {page * TRADES_PAGE_SIZE + 1}–{Math.min((page + 1) * TRADES_PAGE_SIZE, trades.length)} of {trades.length} trade{trades.length !== 1 ? 's' : ''}
+                  </span>
+                  {totalPages > 1 && (
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => setTradePage(p => Math.max(0, p - 1))}
+                        disabled={page === 0}
+                        className="p-1 rounded hover:bg-dark-600 text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <ChevronLeft size={14} />
+                      </button>
+                      {Array.from({ length: totalPages }, (_, i) => (
+                        <button
+                          key={i}
+                          onClick={() => setTradePage(i)}
+                          className={`w-6 h-6 rounded text-xs font-medium transition-colors ${
+                            i === page ? 'bg-brand-500 text-white' : 'text-gray-500 hover:text-white hover:bg-dark-600'
+                          }`}
+                        >
+                          {i + 1}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setTradePage(p => Math.min(totalPages - 1, p + 1))}
+                        disabled={page === totalPages - 1}
+                        className="p-1 rounded hover:bg-dark-600 text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <ChevronRight size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </>
+            )
+          })()}
         </div>
 
         {/* Activity Feed — Live WS Events + Persistent Signal Log */}

@@ -70,11 +70,12 @@ export default function Analytics() {
   const [data, setData] = useState<AnalyticsData | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [mode, setMode] = useState<'all' | 'paper' | 'live'>('all')
 
-  const fetchAnalytics = async (spinner = false) => {
+  const fetchAnalytics = async (spinner = false, m = mode) => {
     if (spinner) setRefreshing(true)
     try {
-      const r = await axios.get('/api/analytics/summary')
+      const r = await axios.get('/api/analytics/summary', { params: { mode: m } })
       setData(r.data)
     } catch (_) {}
     setLoading(false)
@@ -82,6 +83,12 @@ export default function Analytics() {
   }
 
   useEffect(() => { fetchAnalytics() }, [])
+
+  const handleMode = (m: 'all' | 'paper' | 'live') => {
+    setMode(m)
+    setLoading(true)
+    fetchAnalytics(false, m)
+  }
 
   const s = data?.summary
 
@@ -93,14 +100,32 @@ export default function Analytics() {
           <h1 className="text-lg font-bold text-white">Performance Analytics</h1>
           <p className="text-xs text-gray-500 mt-0.5">Historical signal outcomes · rolling statistics</p>
         </div>
-        <button
-          onClick={() => fetchAnalytics(true)}
-          disabled={refreshing}
-          className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors"
-        >
-          <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          {/* Paper / Live / All tabs */}
+          <div className="flex items-center bg-dark-800 border border-dark-600 rounded-lg p-0.5 text-xs">
+            {(['all', 'paper', 'live'] as const).map(m => (
+              <button
+                key={m}
+                onClick={() => handleMode(m)}
+                className={`px-3 py-1 rounded-md capitalize transition-colors ${
+                  mode === m
+                    ? 'bg-blue-600 text-white font-medium'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => fetchAnalytics(true)}
+            disabled={refreshing}
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition-colors"
+          >
+            <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {loading ? (
