@@ -74,18 +74,30 @@ _DEFAULT_TF_PROFILE: tuple[str, int, int, int] = ("1d", 365, 10, 50)
 def _symbol_to_yf(symbol: str) -> str:
     """Convert exchange symbol format to yfinance ticker.
 
-    BTC/USDT  →  BTC-USD
-    ETH/BTC   →  ETH-BTC
-    AAPL      →  AAPL        (stocks pass through)
+    BTC/USDT  →  BTC-USD      (crypto: base-quote)
+    GBP/USD   →  GBPUSD=X     (forex: both legs are real FX currencies)
+    AAPL      →  AAPL          (stocks pass through)
     """
     # Base token aliases: exchange ticker → yfinance ticker
     _BASE_ALIASES: dict[str, str] = {
-        "POL": "MATIC",   # Polygon rebranded POL → still listed as MATIC on yfinance
+        # POL (formerly MATIC / Polygon) — MATIC-USD was delisted on Yahoo Finance
+        # when Polygon rebranded in 2023. The new POL-USD ticker is also not yet
+        # coverage. Map to a known unavailable stub; the fetch will return "no data"
+        # which is handled downstream as "insufficient OHLCV data" (acceptable).
+    }
+    # Real fiat currencies — if BOTH legs are in this set it's a forex pair
+    _REAL_FX = {
+        "USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
+        "HKD", "SGD", "MXN", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF",
     }
     if "/" in symbol:
         base, quote = symbol.split("/", 1)
-        base = _BASE_ALIASES.get(base.upper(), base)
-        # Normalise stablecoins USDT/USDC → USD for yfinance
+        base  = _BASE_ALIASES.get(base.upper(), base.upper())
+        quote = quote.upper()
+        # Forex pair: both legs are real currencies → yfinance uses BASEQUOTE=X
+        if base in _REAL_FX and quote in _REAL_FX:
+            return f"{base}{quote}=X"
+        # Crypto: normalise stablecoins USDT/USDC → USD for yfinance
         quote_yf = "USD" if quote in ("USDT", "USDC", "BUSD") else quote
         return f"{base}-{quote_yf}"
     return symbol
@@ -106,9 +118,9 @@ def _fetch_ohlcv(symbol: str, days: int = 365, interval: str = "1d",
         return None
     ticker = _symbol_to_yf(symbol)
     try:
-        end = datetime.date.today()
-        start = end - datetime.timedelta(days=days)
-        df = yf.download(ticker, start=str(start), end=str(end),
+        # Use period= instead of start/end so Yahoo Finance's 730-day rolling
+        # window for intraday intervals works correctly regardless of wall-clock.
+        df = yf.download(ticker, period=f"{days}d",
                          interval=interval, progress=False, auto_adjust=True)
         if df.empty:
             logger.warning(f"[trainer] yfinance returned empty data for {ticker}")

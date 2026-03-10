@@ -55,7 +55,11 @@ def compute_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     atr_norm = tr.rolling(14).mean() / close.replace(0, np.nan)
 
     # Volume ratio vs 20-period mean
-    vol_ratio = volume / volume.rolling(20).mean().replace(0, np.nan)
+    # Forex pairs from yfinance have volume=0 — fill ratio with 1.0 (neutral)
+    # to avoid all-NaN column that would wipe out every row in dropna().
+    vol_sma = volume.rolling(20).mean()
+    vol_ratio = volume / vol_sma.replace(0, np.nan)
+    vol_ratio = vol_ratio.fillna(1.0)
 
     # Bollinger Band position (0 = lower band, 1 = upper band)
     bb_sma = close.rolling(20).mean()
