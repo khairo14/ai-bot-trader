@@ -196,12 +196,15 @@ async def get_candles(
     if since is None:
         since = until - 200 * tf_ms  # default: last 200 candles
 
-    # Cache check — return immediately for duplicate/recent requests
+    # Cache check — return immediately for duplicate/recent requests.
+    # IBKR is excluded: pacing delays and connection warmup mean the first
+    # request often returns empty; we must always let it retry the broker.
     ck = _cache_key(symbol.upper(), timeframe, broker.lower(), since, until, tf_ms)
-    cached = _cache_get(ck)
-    if cached is not None:
-        logger.debug(f"[Charts] cache hit {symbol}/{timeframe}")
-        return cached
+    if broker.lower() != "ibkr":
+        cached = _cache_get(ck)
+        if cached is not None:
+            logger.debug(f"[Charts] cache hit {symbol}/{timeframe}")
+            return cached
     try:
         # Always use production Binance for OHLCV — testnet has <30 days history
         if broker.lower() == "binance":
@@ -319,7 +322,13 @@ async def get_candles(
             "candle_count": len(candles),
         }
 
-        _cache_set(ck, result, _cache_ttl(tf_ms))
+        # Only cache non-empty results — empty responses from IBKR during
+        # connection warmup or pacing delays must not be stored, otherwise
+        # Refresh within the TTL window also returns a blank chart.
+        # Also skip caching for IBKR entirely: its pacing restrictions and
+        # connection warmup mean repeated retries are expected and desirable.
+        if candles and broker.lower() != "ibkr":
+            _cache_set(ck, result, _cache_ttl(tf_ms))
         return result
 
     except ValueError as ve:
