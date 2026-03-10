@@ -890,18 +890,13 @@ class IBKRClient(AbstractBroker):
     # ── Account ──────────────────────────────────────────
 
     async def get_balance(self) -> Balance:
-        self._ensure_connected()
-        account_values = self.ib.accountValues()
-        total = 0.0
-        available = 0.0
-        for v in account_values:
-            # Accept both "USD" and "BASE" (multi-currency accounts report BASE
-            # as the account's base currency equivalent)
-            if v.tag == "NetLiquidation" and v.currency in ("USD", "BASE"):
-                total = float(v.value)
-            if v.tag == "AvailableFunds" and v.currency in ("USD", "BASE"):
-                available = float(v.value)
-        return Balance(total=total, available=available, currency="USD")
+        # Delegate to the singleton manager which uses a polled/cached balance.
+        # Reading self.ib.accountValues() directly returns stale or empty data
+        # immediately after a connect — the manager's _fetch_async waits up to
+        # 20 s for the Gateway to push account values, preventing balance=0
+        # from propagating through the risk manager and zeroing position sizes.
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _get_manager().get_balance)
 
     async def get_positions(self) -> List[Position]:
         loop = asyncio.get_running_loop()
