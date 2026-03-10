@@ -663,7 +663,7 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
       }
     } catch (err: any) {
       if (!axios.isCancel(err))
-        toast.error(err?.response?.data?.detail ?? 'Failed to load chart data.')
+        toast.error(err?.response?.data?.detail ?? err?.message ?? 'Failed to load chart data.')
     } finally {
       // Only release the loading lock if THIS fetch is still the active one.
       // If it was aborted, a newer fetchAndRender already owns the lock.

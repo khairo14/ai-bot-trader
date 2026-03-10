@@ -304,6 +304,19 @@ async def get_candles(
                 except Exception:
                     pass
 
+        # Sort by timestamp and deduplicate — IBKR can return out-of-order or
+        # duplicate bars (e.g. DST transitions, reconnect overlaps).  A single
+        # duplicate timestamp makes lightweight-charts setData() throw, which the
+        # frontend catch block reports as the generic 'Failed to load chart data.'.
+        all_rows.sort(key=lambda x: x[0])
+        seen_times: set[int] = set()
+        deduped: list[tuple[int, object]] = []
+        for t_ms, row in all_rows:
+            if t_ms not in seen_times:
+                seen_times.add(t_ms)
+                deduped.append((t_ms, row))
+        all_rows = deduped
+
         candles = [
             {
                 "time": t_ms // 1000,
@@ -311,7 +324,9 @@ async def get_candles(
                 "high":   round(float(row["high"]),  8),  # type: ignore[index]
                 "low":    round(float(row["low"]),   8),  # type: ignore[index]
                 "close":  round(float(row["close"]), 8),  # type: ignore[index]
-                "volume": round(float(row.get("volume", 0)), 4),  # type: ignore[union-attr]
+                # IBKR MIDPOINT bars report -1 volume when real volume is unavailable;
+                # clamp to 0 so the histogram series never renders negative bars.
+                "volume": max(0.0, round(float(row.get("volume", 0)), 4)),  # type: ignore[union-attr]
             }
             for t_ms, row in all_rows[:MAX_CANDLES]
         ]
@@ -344,6 +359,7 @@ async def get_candles(
                         cur_t += tf_secs
             candles = filled
 
+        logger.info(f"[Charts] {broker.lower()}/{symbol.upper()}/{timeframe}: {len(candles)} candles (since={since}, until={until})")
         result = {
             "candles": candles,
             "symbol": symbol.upper(),
