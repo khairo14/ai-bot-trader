@@ -436,11 +436,17 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
     let syncing = false
     mc.timeScale().subscribeVisibleTimeRangeChange(range => {
       if (syncing || !range || !subChart.current) return
-      syncing = true; subChart.current.timeScale().setVisibleRange(range); syncing = false
+      // Guard: setVisibleRange on an empty chart calls logicalRangeForTimeRange
+      // which calls ensureNotNull(firstIndex()) — firstIndex is null when the
+      // sub-chart has no data, throwing "Value is null" synchronously inside
+      // the main chart's setData() call (because setData fires this event).
+      if (subChart.current.timeScale().getVisibleLogicalRange() === null) return
+      syncing = true; try { subChart.current.timeScale().setVisibleRange(range) } catch {} ; syncing = false
     })
     sc.timeScale().subscribeVisibleTimeRangeChange(range => {
       if (syncing || !range || !mainChart.current) return
-      syncing = true; mainChart.current.timeScale().setVisibleRange(range); syncing = false
+      if (mainChart.current.timeScale().getVisibleLogicalRange() === null) return
+      syncing = true; try { mainChart.current.timeScale().setVisibleRange(range) } catch {} ; syncing = false
     })
 
     // ResizeObserver — responds to grid cell size changes (not just window resize)
