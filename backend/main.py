@@ -8,6 +8,7 @@ from config import settings
 from db.database import init_db
 from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications, ml, charts, auth as auth_routes, regime, analytics, strategy_code, confluence, portfolio_optimizer, risk, scanner
 from api.routes import kline_ws
+from api.routes import regime_settings
 from api.websocket import ws_endpoint
 from core.auth import get_current_user
 
@@ -317,6 +318,7 @@ app.include_router(confluence.router, prefix="/api/confluence", tags=["Confluenc
 app.include_router(portfolio_optimizer.router, prefix="/api/portfolio-optimizer", tags=["PortfolioOptimizer"], dependencies=_auth)
 app.include_router(risk.router, prefix="/api/risk", tags=["Risk"], dependencies=_auth)
 app.include_router(scanner.router, prefix="/api/scanner", tags=["Scanner"], dependencies=_auth)
+app.include_router(regime_settings.router, prefix="/api/settings/regime", tags=["Settings"], dependencies=_auth)
 
 # ── Internal endpoints (Celery workers → FastAPI server, no public auth) ────
 # These are intentionally excluded from the API docs (include_in_schema=False).

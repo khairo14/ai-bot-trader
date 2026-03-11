@@ -1,7 +1,9 @@
 """Tasks: automated signal runner via Celery."""
 from celery_app import celery_app
+import json
 import logging
 import math
+import pathlib
 import time as _time
 
 logger = logging.getLogger(__name__)
@@ -11,6 +13,62 @@ logger = logging.getLogger(__name__)
 # changed since the last Celery tick.  In-memory is fine for a single worker;
 # the DB deduplication (F-039) is the safety net for multi-worker deployments.
 _last_candle_fired: dict[int, float] = {}  # strategy_id → last_close epoch
+
+# ── Regime Router ────────────────────────────────────────────────────────────
+# Maps each market regime to the strategy types that are appropriate for it.
+# When a strategy has regime_mode="auto_switch", only regime-matched strategies
+# run. When regime_mode="fixed" (default), the configured strategy always runs
+# and emits a HOLD signal with a reason if the regime doesn't match.
+REGIME_STRATEGY_MAP: dict[str, list[str]] = {
+    "trending_up":     ["momentum_breakout", "hybrid_macd_rsi", "bull_call_spread"],
+    "trending_down":   ["momentum_breakout", "hybrid_macd_rsi"],
+    "ranging":         ["mean_reversion_bb", "iron_condor", "covered_call"],
+    "high_volatility": ["volatility_squeeze", "iron_condor"],
+    "low_volatility":  ["volatility_squeeze", "mean_reversion_bb"],
+}
+
+# Per-symbol regime history for hysteresis: symbol → deque of last N regime labels
+# Regime switch only happens when the same regime appears N candles in a row.
+_regime_history: dict[str, list[str]] = {}   # symbol → [regime, regime, ...]
+
+# Per-symbol current stable regime (only updated after hysteresis confirmed)
+_stable_regime: dict[str, str] = {}  # symbol → confirmed stable regime
+
+_REGIME_SETTINGS_PATH = pathlib.Path(__file__).resolve().parent.parent / "runtime" / "regime_settings.json"
+
+
+def _load_regime_settings() -> dict:
+    """Load global regime router settings from disk."""
+    defaults = {"enabled": True, "hysteresis_candles": 3}
+    try:
+        if _REGIME_SETTINGS_PATH.exists():
+            data = json.loads(_REGIME_SETTINGS_PATH.read_text())
+            return {**defaults, **data}
+    except (json.JSONDecodeError, OSError):
+        pass
+    return defaults
+
+
+def _update_regime_hysteresis(symbol: str, new_regime: str, n: int) -> str:
+    """Track regime history and return the stable regime after hysteresis.
+
+    Returns the confirmed stable regime if the last N observations are all
+    the same, otherwise returns the previous stable regime (no switch yet).
+    If no stable regime has been confirmed yet, uses the new_regime directly
+    (cold start — first N candles use whatever regime is observed).
+    """
+    history = _regime_history.setdefault(symbol, [])
+    history.append(new_regime)
+    # Keep only last N entries
+    if len(history) > n:
+        history[:] = history[-n:]
+
+    if len(history) >= n and len(set(history[-n:])) == 1:
+        # Regime has been stable for N candles — confirm the switch
+        _stable_regime[symbol] = new_regime
+
+    # Return confirmed stable regime, or fall back to new_regime on cold start
+    return _stable_regime.get(symbol, new_regime)
 
 # Signal types that are worth tracking for ML feedback
 _TRACKABLE_SIGNALS = {"BUY", "SELL", "SHORT", "COVER"}
@@ -200,15 +258,141 @@ def run_signals(self):
                         continue
 
                     try:
+                        # ── Regime Router (Phase 1 + 2) ──────────────────────────
+                        # Step 1: load global settings
+                        _regime_cfg = _load_regime_settings()
+                        _regime_enabled = _regime_cfg.get("enabled", True)
+                        _hysteresis_n   = int(_regime_cfg.get("hysteresis_candles", 3))
+
+                        # Step 2: per-strategy regime mode — default "fixed"
+                        _regime_mode = str(params.get("regime_mode", "fixed")).lower()
+                        # Per-strategy override: list of allowed regimes
+                        _regime_filter: list[str] | None = params.get("regime_filter")
+
+                        # Step 3: classify market regime (only when routing is enabled)
+                        _active_strategy_type = strategy_type  # may be swapped for auto_switch
+                        if _regime_enabled:
+                            try:
+                                from brokers import get_broker as _get_broker
+                                from core.regime_classifier import regime_classifier as _rc
+                                _broker_obj = _get_broker(strat.broker.value)
+                                await _broker_obj.connect()
+                                _ohlcv = await _broker_obj.get_ohlcv(symbol, timeframe, limit=200)
+                                _regime_result = _rc.classify(_ohlcv)
+                                _raw_regime = _regime_result.regime
+                                # Apply hysteresis — only switch after N stable candles
+                                _symbol_key = f"{symbol}:{timeframe}"
+                                _confirmed_regime = _update_regime_hysteresis(
+                                    _symbol_key, _raw_regime, _hysteresis_n
+                                )
+
+                                # Determine which strategies are allowed for this regime
+                                _allowed = (
+                                    _regime_filter
+                                    if _regime_filter
+                                    else REGIME_STRATEGY_MAP.get(_confirmed_regime, [])
+                                )
+
+                                if _regime_mode == "auto_switch":
+                                    # Pick best strategy for this regime
+                                    if strategy_type not in _allowed:
+                                        # Find first allowed strategy available in the engine
+                                        _candidate = next(
+                                            (s for s in _allowed
+                                             if s in signal_engine._strategies or True),
+                                            None,
+                                        )
+                                        if _candidate and _candidate != strategy_type:
+                                            logger.info(
+                                                f"[RegimeRouter] {strat.name} | {symbol} | "
+                                                f"regime={_confirmed_regime} → "
+                                                f"auto-switch {strategy_type} → {_candidate}"
+                                            )
+                                            _active_strategy_type = _candidate
+                                        else:
+                                            logger.info(
+                                                f"[RegimeRouter] {strat.name} | {symbol} | "
+                                                f"regime={_confirmed_regime} → "
+                                                f"no suitable strategy found, holding"
+                                            )
+                                else:
+                                    # fixed mode: if mismatch, save HOLD and skip execution
+                                    if strategy_type not in _allowed:
+                                        logger.info(
+                                            f"[RegimeRouter] {strat.name} | {symbol} | "
+                                            f"regime={_confirmed_regime} → "
+                                            f"{strategy_type} not suitable (fixed mode), HOLD"
+                                        )
+                                        # Record a HOLD signal so dashboard shows the reason
+                                        _price = float(_ohlcv["close"].iloc[-1])
+                                        from core.strategies.base import Signal as _Sig
+                                        _hold_sig = _Sig(
+                                            symbol=symbol, signal="HOLD",
+                                            entry_price=float(_price),
+                                            stop_loss=None, take_profit=None,
+                                            confidence=0.0, timeframe=timeframe,
+                                            strategy_name=strategy_type,
+                                            asset_class=getattr(strat.asset_class, "value", "crypto"),
+                                            broker=strat.broker.value,
+                                            regime=_confirmed_regime,
+                                            reasons=[
+                                                f"regime-filtered: {strategy_type} not suitable "
+                                                f"for {_confirmed_regime} market (fixed mode)"
+                                            ],
+                                        )
+                                        _last_candle_fired[strat.id] = _last_close_ts
+                                        # Persist HOLD to DB for dashboard visibility
+                                        try:
+                                            _hold_sig_type = SignalType.HOLD
+                                            try:
+                                                _hold_asset = AssetClass(getattr(strat.asset_class, "value", "crypto"))
+                                            except ValueError:
+                                                _hold_asset = strat.asset_class
+                                            from db.models import Signal as _SignalModel
+                                            _hold_db = _SignalModel(
+                                                symbol=symbol, signal=_hold_sig_type,
+                                                entry_price=float(_price),
+                                                stop_loss=None, take_profit=None,
+                                                confidence=0.0, timeframe=timeframe,
+                                                strategy_name=strategy_type,
+                                                regime=_confirmed_regime,
+                                                asset_class=_hold_asset,
+                                                broker=strat.broker,
+                                                execution_mode=strat.execution_mode.value,
+                                                reasons=_hold_sig.reasons,
+                                                acted_on=False,
+                                            )
+                                            session.add(_hold_db)
+                                            await session.commit()
+                                        except Exception as _hdb_err:
+                                            logger.debug(f"[RegimeRouter] HOLD persist error: {_hdb_err}")
+                                            await session.rollback()
+                                        continue
+
+                            except Exception as _re_err:
+                                logger.warning(
+                                    f"[RegimeRouter] Regime classification failed for "
+                                    f"{strat.name} ({symbol}): {_re_err} — running strategy as-is"
+                                )
+                                _confirmed_regime = None
+
                         # ── Generate signal ──────────────────────────────────────
                         sig = await signal_engine.run(
-                            strategy_name=strategy_type,
+                            strategy_name=_active_strategy_type,
                             symbol=symbol,
                             broker_name=strat.broker.value,
                             timeframe=timeframe,
                             limit=limit,
                             asset_class=getattr(strat.asset_class, "value", None),
                         )
+                        # Tag the signal with the original configured strategy name
+                        # so the DB always reflects what the user configured,
+                        # even if auto-switch ran a different strategy.
+                        if _active_strategy_type != strategy_type:
+                            sig.reasons = (sig.reasons or []) + [
+                                f"auto-switched from {strategy_type} "
+                                f"(regime: {_confirmed_regime if _regime_enabled else 'n/a'})"
+                            ]
 
                         # ── Persist signal to DB ─────────────────────────────────
                         # Coerce enums safely

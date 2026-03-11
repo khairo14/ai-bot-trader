@@ -66,6 +66,7 @@ const defaultForm = {
   execution_mode: 'suggestion',
   is_paper: true,
   trailing_stop_pct: '',
+  regime_mode: 'fixed',
 }
 
 export default function Strategies() {
@@ -164,6 +165,7 @@ export default function Strategies() {
       execution_mode: s.execution_mode,
       is_paper: s.is_paper,
       trailing_stop_pct: s.parameters?.trailing_stop_pct != null ? String(s.parameters.trailing_stop_pct) : '',
+      regime_mode: (s.parameters?.regime_mode as string) || 'fixed',
     })
     setFormErrors({})
     setShowModal(true)
@@ -197,6 +199,7 @@ export default function Strategies() {
           symbol: form.symbol.trim().toUpperCase(),
           timeframe: form.timeframe,
           limit: 200,
+          regime_mode: form.regime_mode,
           ...(form.trailing_stop_pct !== '' && !isNaN(parseFloat(form.trailing_stop_pct))
             ? { trailing_stop_pct: parseFloat(form.trailing_stop_pct) }
             : {}),
@@ -233,6 +236,7 @@ export default function Strategies() {
           symbol: form.symbol.trim().toUpperCase(),
           timeframe: form.timeframe,
           limit: 200,
+          regime_mode: form.regime_mode,
           ...(form.trailing_stop_pct !== '' && !isNaN(parseFloat(form.trailing_stop_pct))
             ? { trailing_stop_pct: parseFloat(form.trailing_stop_pct) }
             : {}),
@@ -335,6 +339,13 @@ export default function Strategies() {
                 </div>
               </div>
               <div className="flex items-center gap-4">
+                {/* Regime Mode pill */}
+                {s.parameters?.regime_mode === 'auto_switch' && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-purple-900/30 text-purple-400 border border-purple-900/50" title="Auto-Switch: strategy swaps based on market regime">
+                    Auto-Switch
+                  </span>
+                )}
+
                 {/* Paper / Live toggle switch */}
                 <div className="flex items-center gap-1.5" title={s.is_paper ? 'Paper trading — click to switch to Live' : 'Live trading — click to switch to Paper'}>
                   <span className={`text-xs font-medium ${s.is_paper ? 'text-blue-400' : 'text-yellow-400'}`}>
@@ -509,6 +520,22 @@ export default function Strategies() {
                 </div>
                 <span className="text-xs text-gray-500">{form.is_paper ? 'Paper' : 'Live'}</span>
               </label>
+
+              {/* Regime Mode */}
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Regime Mode</label>
+                <select
+                  value={form.regime_mode}
+                  onChange={e => setForm(f => ({ ...f, regime_mode: e.target.value }))}
+                  className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+                >
+                  <option value="fixed">Fixed (Hold on Mismatch)</option>
+                  <option value="auto_switch">Auto-Switch</option>
+                </select>
+                <p className="text-xs text-gray-600 mt-1">
+                  Auto-Switch swaps to a compatible strategy when the market regime changes. Fixed holds the signal instead.
+                </p>
+              </div>
 
               {/* Trailing Stop */}
               <div>

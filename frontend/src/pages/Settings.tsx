@@ -119,6 +119,9 @@ export default function Settings() {
   const [expandedBroker, setExpandedBroker] = useState<string | null>('binance')
   const [mlStatus, setMlStatus] = useState<MLStatus | null>(null)
   const [retraining, setRetraining] = useState(false)
+  const [regimeEnabled, setRegimeEnabled] = useState(true)
+  const [regimeHysteresis, setRegimeHysteresis] = useState('3')
+  const [savingRegime, setSavingRegime] = useState(false)
 
   const loadAll = () => {
     axios.get('/api/portfolio/summary')
@@ -160,6 +163,13 @@ export default function Settings() {
     axios.get('/api/ml/status')
       .then(res => setMlStatus(res.data))
       .catch(() => {})
+    // Load regime router settings
+    axios.get('/api/settings/regime')
+      .then(res => {
+        setRegimeEnabled(res.data.enabled ?? true)
+        setRegimeHysteresis(String(res.data.hysteresis_candles ?? 3))
+      })
+      .catch(() => {})
   }
 
   const retrainNow = async () => {
@@ -179,6 +189,23 @@ export default function Settings() {
   }
 
   useEffect(() => { loadAll() }, [])
+
+  const saveRegimeSettings = async () => {
+    const n = parseInt(regimeHysteresis)
+    if (isNaN(n) || n < 1 || n > 20) {
+      toast.error('Hysteresis must be between 1 and 20 candles')
+      return
+    }
+    setSavingRegime(true)
+    try {
+      await axios.put('/api/settings/regime', { enabled: regimeEnabled, hysteresis_candles: n })
+      toast.success('Regime router settings saved')
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Save failed')
+    } finally {
+      setSavingRegime(false)
+    }
+  }
 
   const toggleBrokerMode = (broker: string, currentlyPaper: boolean) => {
     const nextMode = currentlyPaper ? 'live' : 'paper'
@@ -508,6 +535,56 @@ export default function Settings() {
         ) : (
           <div className="text-xs text-gray-600 text-center py-3">Loading ML status…</div>
         )}
+      </section>
+
+      {/* Regime Router */}
+      <section className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ShieldAlert size={14} className="text-purple-400" />
+            <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Regime Router</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">{regimeEnabled ? 'Enabled' : 'Disabled'}</span>
+            <Toggle checked={regimeEnabled} onChange={() => setRegimeEnabled(v => !v)} />
+          </div>
+        </div>
+
+        <p className="text-xs text-gray-500 leading-relaxed">
+          When enabled, each candle the system classifies the current market regime (trending, ranging, volatile)
+          and applies each strategy's <span className="text-gray-300">Regime Mode</span> setting.
+          Strategies set to <span className="text-gray-300">Auto-Switch</span> will swap to a compatible algorithm;
+          strategies set to <span className="text-gray-300">Fixed</span> will hold until the regime matches.
+        </p>
+
+        <div className="flex items-end gap-4">
+          <div className="flex-1">
+            <label className="text-xs text-gray-400 block mb-1">
+              Hysteresis Candles <span className="text-gray-600">(1–20 — regime must be stable this many candles before switching)</span>
+            </label>
+            <input
+              type="number"
+              min="1"
+              max="20"
+              step="1"
+              value={regimeHysteresis}
+              onChange={e => setRegimeHysteresis(e.target.value)}
+              className="w-full bg-dark-700 border border-dark-500 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-brand-500"
+            />
+          </div>
+          <button
+            onClick={saveRegimeSettings}
+            disabled={savingRegime}
+            className="px-4 py-2 bg-brand-500 hover:bg-green-400 disabled:opacity-50 text-black text-sm font-semibold rounded-lg transition-all whitespace-nowrap"
+          >
+            {savingRegime ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+
+        <div className="text-xs text-gray-600">
+          Per-strategy Regime Mode is configured on the{' '}
+          <span className="text-purple-400">Strategies</span> page — edit any strategy to set Auto-Switch or Fixed.
+        </div>
       </section>
 
       {/* System Info */}
