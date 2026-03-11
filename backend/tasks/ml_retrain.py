@@ -48,6 +48,24 @@ def retrain_all(self):
                         f"[ml_retrain] FastAPI MLScorer cache flush FAILED: HTTP {resp.status_code} "
                         "— FastAPI process may still be using the old model until next restart or retrain"
                     )
+                    try:
+                        from db.database import AsyncSessionLocal
+                        from notifications.notifier import dispatch as _notif_dispatch
+                        async with AsyncSessionLocal() as _db:
+                            await _notif_dispatch(
+                                _db,
+                                title="ML Model Cache Out of Sync",
+                                message=(
+                                    f"FastAPI cache flush returned HTTP {resp.status_code}. "
+                                    "FastAPI may still be scoring signals with the old ML model. "
+                                    "Retrain again or restart the backend to fix."
+                                ),
+                                level="warning",
+                                category="ml",
+                            )
+                            await _db.commit()
+                    except Exception as _notif_err:
+                        logger.debug(f"[ml_retrain] Notification dispatch failed: {_notif_err}")
                 else:
                     logger.info(
                         f"[ml_retrain] FastAPI MLScorer cache flush: HTTP {resp.status_code}"
@@ -57,6 +75,24 @@ def retrain_all(self):
                     f"[ml_retrain] FastAPI cache flush skipped "
                     f"(server may not be running): {_http_err}"
                 )
+                try:
+                    from db.database import AsyncSessionLocal
+                    from notifications.notifier import dispatch as _notif_dispatch
+                    async with AsyncSessionLocal() as _db:
+                        await _notif_dispatch(
+                            _db,
+                            title="ML Cache Flush Failed — Backend Unreachable",
+                            message=(
+                                f"Could not reach FastAPI to flush the ML model cache: {_http_err}. "
+                                "FastAPI may still be scoring with the old ML model until next "
+                                "restart or retrain."
+                            ),
+                            level="warning",
+                            category="ml",
+                        )
+                        await _db.commit()
+                except Exception as _notif_err:
+                    logger.debug(f"[ml_retrain] Notification dispatch failed: {_notif_err}")
 
             return report
 

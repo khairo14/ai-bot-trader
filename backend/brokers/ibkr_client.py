@@ -67,6 +67,18 @@ def _ibkr_contract(symbol: str):
     return Stock(clean, "SMART", "USD")
 
 
+async def _dispatch_ibkr_notif(title: str, message: str, level: str = "error") -> None:
+    """Persist an in-app notification from within the IBKR background event loop."""
+    try:
+        from db.database import AsyncSessionLocal
+        from notifications.notifier import dispatch as _notif_dispatch
+        async with AsyncSessionLocal() as _db:
+            await _notif_dispatch(_db, title=title, message=message, level=level, category="system")
+            await _db.commit()
+    except Exception as _e:
+        logger.debug(f"[IBKR] In-app notification dispatch failed: {_e}")
+
+
 # ── Persistent singleton IBKR connection ─────────────────────────────────────
 #
 # Problem: ib_insync requires its own asyncio event loop.  Calling
@@ -177,7 +189,16 @@ class _IBKRManager:
                     reconnected = await self._ensure_connected()
 
                     if reconnected and self._ib:
-                        # Success — reset counters and re-subscribe
+                        # Success — notify if we had prior failures so the operator
+                        # knows trading has resumed.
+                        if self._reconnect_consec_fails > 0:
+                            await _dispatch_ibkr_notif(
+                                "IBKR Connection Restored",
+                                f"IBKR reconnected successfully after {self._reconnect_consec_fails} "
+                                "failed attempt(s). Trading has resumed.",
+                                level="success",
+                            )
+                        # Reset counters and re-subscribe
                         self._reconnect_consec_fails = 0
                         self._reconnect_backoff = _BACKOFF_MIN
                         try:
@@ -206,6 +227,11 @@ class _IBKRManager:
                             logger.critical(
                                 f"[IBKR] {_MAX_CONSEC_FAILS} consecutive reconnect failures — "
                                 "background reconnect loop stopped. Restart the container to recover."
+                            )
+                            await _dispatch_ibkr_notif(
+                                "IBKR Trading Stopped — Reconnect Failed",
+                                f"IBKR failed to reconnect after {_MAX_CONSEC_FAILS} consecutive "
+                                "attempts. All IBKR trading is stopped. Restart the container to recover.",
                             )
                             return  # stop spinning; container restart will revive this
                 else:
@@ -262,6 +288,18 @@ class _IBKRManager:
                         "— backing off 120s for stale TWS socket to release"
                     )
                     _self_ref._hard_rejected_until = time.time() + 120.0
+                    # Push an in-app notification so the operator knows trading is suspended.
+                    # Scheduled on the IBKR background loop (this callback is synchronous).
+                    if _self_ref._loop and not _self_ref._loop.is_closed():
+                        asyncio.run_coroutine_threadsafe(
+                            _dispatch_ibkr_notif(
+                                "IBKR Trading Suspended — clientId Conflict",
+                                f"Error 326: clientId {_self_ref._client_id} is already in use by "
+                                "another TWS/Gateway session. IBKR trading is suspended for ~120s "
+                                "while the stale socket times out.",
+                            ),
+                            _self_ref._loop,
+                        )
             self._ib.errorEvent += _on_ib_error
 
             # Retry loop: Gateway may still be initialising when Docker starts.
