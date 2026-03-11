@@ -139,8 +139,10 @@ class MLScorer:
         if feats is None:
             return None
 
-        # Drop rows with NaN and take only the LAST row for inference
-        row = feats.dropna().tail(1)
+        # Take the last row for inference — do NOT dropna here.
+        # XGBoost handles NaN natively via its missing-value split direction,
+        # so passing NaN (e.g. vol_ratio=NaN for forex) is correct and safe.
+        row = feats.tail(1)
         if row.empty:
             return None
 

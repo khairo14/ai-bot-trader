@@ -117,6 +117,11 @@ class Settings(BaseSettings):
                 "and set it in your .env file."
             )
 
+        if not (0 <= self.daily_reset_hour_utc <= 23):
+            raise ValueError(
+                f"DAILY_RESET_HOUR_UTC must be 0–23, got {self.daily_reset_hour_utc}."
+            )
+
         # ── Live-mode broker key enforcement ────────────────────────────────
         # Raise (not just warn) if a broker is in LIVE mode without real credentials.
         if not self.binance_testnet:

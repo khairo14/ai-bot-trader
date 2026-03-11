@@ -131,13 +131,13 @@ class RegimeClassifier:
         """
         if len(data) < 30:
             logger.debug("[Regime] Insufficient data — defaulting to 'ranging'")
-            return RegimeResult(regime=REGIME_RANGING, features={}, confidence=0.5)
+            return RegimeResult(regime=REGIME_RANGING, features={}, confidence=0.0)
 
         try:
             return self._classify(data)
         except Exception as exc:
             logger.warning(f"[Regime] Classification error — defaulting to 'ranging': {exc}")
-            return RegimeResult(regime=REGIME_RANGING, features={}, confidence=0.5)
+            return RegimeResult(regime=REGIME_RANGING, features={}, confidence=0.0)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 

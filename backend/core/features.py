@@ -54,12 +54,14 @@ def compute_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     ], axis=1).max(axis=1)
     atr_norm = tr.rolling(14).mean() / close.replace(0, np.nan)
 
-    # Volume ratio vs 20-period mean
-    # Forex pairs from yfinance have volume=0 — fill ratio with 1.0 (neutral)
-    # to avoid all-NaN column that would wipe out every row in dropna().
+    # Volume ratio vs 20-period mean.
+    # Forex/CFD pairs have volume=0 — keep as NaN rather than filling with 1.0.
+    # XGBoost handles NaN natively via its missing-value split logic, so this is
+    # the correct approach. Filling with 1.0 would teach the model that "forex
+    # always has normal volume", which is a spurious feature correlation.
     vol_sma = volume.rolling(20).mean()
     vol_ratio = volume / vol_sma.replace(0, np.nan)
-    vol_ratio = vol_ratio.fillna(1.0)
+    # Do NOT fillna here — let NaN propagate so XGBoost uses its missing-value path.
 
     # Bollinger Band position (0 = lower band, 1 = upper band)
     bb_sma = close.rolling(20).mean()

@@ -224,7 +224,14 @@ def run_signals(self):
                 try:
                     await session.commit()
                 except Exception as _pre_commit_err:
-                    logger.warning(f"[signal_runner] Monitor/reconcile pre-commit failed: {_pre_commit_err}")
+                    # This is a critical failure: SL/TP monitor changes won't be
+                    # persisted, positions may be unprotected. Raise so the Celery
+                    # task retries rather than continuing with a dirty session.
+                    logger.error(
+                        f"[signal_runner] Monitor/reconcile pre-commit failed — "
+                        f"aborting this run to avoid ghost positions: {_pre_commit_err}"
+                    )
+                    raise
 
                 for strat in active_strategies:
                     params = strat.parameters or {}
@@ -286,6 +293,15 @@ def run_signals(self):
                                     _symbol_key, _raw_regime, _hysteresis_n
                                 )
 
+                                # If classifier had no data / errored, confidence=0.0
+                                # means we can't trust the classification — skip filtering
+                                if _regime_result.confidence == 0.0:
+                                    logger.debug(
+                                        f"[RegimeRouter] {strat.name} | {symbol} | "
+                                        "regime confidence=0.0 — skipping regime filter"
+                                    )
+                                    raise ValueError("low-confidence regime — skip")
+
                                 # Determine which strategies are allowed for this regime
                                 _allowed = (
                                     _regime_filter
@@ -299,9 +315,13 @@ def run_signals(self):
                                         # Find first allowed strategy available in the engine
                                         _candidate = next(
                                             (s for s in _allowed
-                                             if s in signal_engine._strategies or True),
+                                             if s in signal_engine._strategies),
                                             None,
                                         )
+                                        # If none are loaded yet, fall back to any name in the map
+                                        # (signal_engine will lazy-load it on first run)
+                                        if _candidate is None:
+                                            _candidate = next(iter(_allowed), None)
                                         if _candidate and _candidate != strategy_type:
                                             logger.info(
                                                 f"[RegimeRouter] {strat.name} | {symbol} | "

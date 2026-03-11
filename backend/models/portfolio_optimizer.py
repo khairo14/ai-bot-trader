@@ -40,10 +40,10 @@ def _mean(vals: list[float]) -> float:
 
 def _std(vals: list[float]) -> float:
     if len(vals) < 2:
-        return 1e-9
+        return 0.0
     m = _mean(vals)
     variance = sum((v - m) ** 2 for v in vals) / (len(vals) - 1)
-    return math.sqrt(variance) if variance > 0 else 1e-9
+    return math.sqrt(variance) if variance > 0 else 0.0
 
 
 def _pearson(a: list[float], b: list[float]) -> float:
@@ -53,9 +53,14 @@ def _pearson(a: list[float], b: list[float]) -> float:
         return 0.0
     a = a[:n]
     b = b[:n]
+    std_a, std_b = _std(a), _std(b)
+    # If either series is constant (zero variance), correlation is undefined.
+    # Treat as uncorrelated (0.0) — don't apply a spurious correlation penalty.
+    if std_a == 0.0 or std_b == 0.0:
+        return 0.0
     ma, mb = _mean(a), _mean(b)
     num = sum((a[i] - ma) * (b[i] - mb) for i in range(n))
-    den = _std(a) * _std(b) * n
+    den = std_a * std_b * n
     return num / den if den > 1e-12 else 0.0
 
 
@@ -73,7 +78,9 @@ def _compute_weights(strategy_returns: dict[str, list[float]]) -> dict[str, floa
         rets = strategy_returns[name]
         mu  = _mean(rets)
         std = _std(rets)
-        sharpes[name] = (mu - RISK_FREE_RATE) / std
+        # std=0 means all returns are identical — perfectly consistent.
+        # Assign a high Sharpe (capped at 10) so it's rewarded, not penalised.
+        sharpes[name] = (mu - RISK_FREE_RATE) / std if std > 0 else 10.0 * mu
 
     # Clip negative Sharpe → 0 (don't want negative weights)
     raw: dict[str, float] = {n: max(0.0, s) for n, s in sharpes.items()}
