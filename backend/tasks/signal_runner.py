@@ -232,9 +232,12 @@ def run_signals(self):
                         # when Celery fires the same task multiple times per candle).
                         from datetime import datetime, timezone as _tz
                         from sqlalchemy import and_
+                        # GAP-4 FIX: added 3m, 30m, 2h, 6h, 12h so these timeframes
+                        # get the correct candle-window instead of falling back to 1h.
                         _tf_seconds = {
-                            "1m": 60, "5m": 300, "15m": 900, "1h": 3600,
-                            "4h": 14400, "1d": 86400, "1w": 604800,
+                            "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+                            "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200,
+                            "1d": 86400, "1w": 604800,
                         }
                         _candle_secs = _tf_seconds.get(timeframe, 3600)
                         _candle_start = datetime.fromtimestamp(

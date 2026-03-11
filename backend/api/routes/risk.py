@@ -19,14 +19,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.risk_manager import RiskManager
+from core.risk_manager import RiskManager, get_risk_manager  # BUG-2 FIX: import singleton factory
 from db.database import get_db
 from db.models import BrokerRiskSettings, BrokerName
 
 router = APIRouter()
 
 # Shared singleton so resets propagate to the same state file used by ForwardEngine
-_rm = RiskManager()
+_rm = get_risk_manager()  # BUG-2 FIX: process-wide singleton — reset propagates to ForwardEngine
 
 _VALID_BROKERS = {"binance", "alpaca", "ibkr"}
 

@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     # (1m strat → runs every 60 s, 1h strat → every 3600 s, 1d → every 86400 s).
     forward_test_interval_minutes: int = 1  # non-zero = enabled
 
+    # BUG-3 FIX: Daily P&L counter reset hour (UTC). Default 0 = midnight UTC.
+    # US traders may prefer 22 (10 PM UTC = 5 PM ET) so the counter resets at
+    # end-of-NYSE-session instead of 7 PM ET (=midnight UTC).
+    daily_reset_hour_utc: int = 0  # 0–23
+
     # Internal API — used by Celery workers to call back into the FastAPI server
     # (e.g. flush MLScorer cache after weekly retrain).
     # In Docker Compose this must point at the service name, not 127.0.0.1.
@@ -149,6 +154,25 @@ class Settings(BaseSettings):
             logger.warning(
                 f"[Config] Missing or default secrets detected: {', '.join(warnings)}. "
                 "Update your .env file."
+            )
+
+        # GAP-6 FIX: warn if internal_api_secret is empty — /internal/* endpoints
+        # are callable by anyone on the network without authentication.
+        if not self.internal_api_secret:
+            logger.warning(
+                "[Config] INTERNAL_API_SECRET is empty — /internal/* endpoints are "
+                "unprotected. Generate a secret: "
+                "python -c \"import secrets; print(secrets.token_hex(32))\" and set it in .env."
+            )
+
+        # GAP-7 FIX: warn if cookie_secure is False in a context that looks like
+        # production (DEBUG=False). Secure cookies are silently dropped by browsers
+        # over plain HTTP, but on HTTPS/VPS this setting must be True.
+        if not self.cookie_secure and not self.debug:
+            logger.warning(
+                "[Config] COOKIE_SECURE=False but DEBUG=False — if this instance is "
+                "served over HTTPS (e.g. a VPS with TLS), set COOKIE_SECURE=True in "
+                ".env or login sessions will be silently dropped by browsers."
             )
 
         # ── IBKR client ID collision (Error 326) check ─────────────────

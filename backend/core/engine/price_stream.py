@@ -44,7 +44,15 @@ class PriceStreamManager:
     # ──────────────────────────────────────────────────────────────────────────
 
     def get_price(self, symbol: str) -> Optional[float]:
-        """Return the latest streamed mid-price, or None if not yet received."""
+        """Return the latest streamed mid-price, or None if not yet received.
+
+        GAP-9 NOTE: this returns the mid-price (midpoint of bid/ask).
+        For tight SL triggers on illiquid instruments the bid/ask spread means
+        the actual fill may differ by half-spread.  In practice this is < 0.05%
+        for liquid crypto/FX pairs and is acceptable.  If sub-pip SL precision
+        is required, replace with actual bid (short) or ask (long) via REST
+        get_bid_ask() calls rather than the streamed mid-price.
+        """
         return self._prices.get(symbol)
 
     # ──────────────────────────────────────────────────────────────────────────

@@ -10,11 +10,11 @@ from sqlalchemy import select, func
 from db.database import get_db
 from db.models import Trade, LiveTrade, OrderStatus, BrokerName
 from config import settings
-from core.risk_manager import RiskManager as _RiskManager
+from core.risk_manager import RiskManager as _RiskManager, get_risk_manager as _get_risk_manager  # BUG-2 FIX
 
 # Singleton — reads risk_state.json the same way ForwardEngine does.
 # _load_state() is called inside each request to refresh from disk.
-_risk_mgr = _RiskManager()
+_risk_mgr = _get_risk_manager()  # BUG-2 FIX: process-wide singleton
 
 router = APIRouter()
 

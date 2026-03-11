@@ -150,7 +150,7 @@ def is_market_open(broker_name: str, asset_class: str | None = None) -> bool:
     now_et = _dt.now(tz=_ET)
     if not _is_nyse_trading_day(now_et.date()):
         return False
-    return _MARKET_OPEN <= now_et.time() <= _MARKET_CLOSE
+    return _MARKET_OPEN <= now_et.time() < _MARKET_CLOSE  # GAP-1 FIX: strict < so 16:00:00 is closed
 
 
 # ─────────────────────────────────────────────────────────────────────────────

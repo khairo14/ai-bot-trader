@@ -36,8 +36,18 @@ _TF_SECONDS: dict[str, int] = {
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
     "1h": 3600, "1Hour": 3600, "4h": 14400, "1d": 86400,
 }
-# Sub-hour timeframes whose live history is often limited — fall back to 1h
+# Sub-hour timeframes whose live history is often limited — fall back gradually
+# GAP-8 FIX: use a graduated chain instead of jumping straight to 1h.
+# e.g. a 1m strategy falls back to 5m → 15m → 30m → 1h before giving up.
+# This preserves intraday SL detection resolution that a 1h candle would lose.
 _SUB_HOUR = {"1m", "5m", "15m", "30m"}
+
+_SUB_HOUR_FALLBACK: dict[str, list[str]] = {
+    "1m":  ["1m",  "5m", "15m", "30m", "1h"],
+    "5m":  ["5m",  "15m", "30m", "1h"],
+    "15m": ["15m", "30m", "1h"],
+    "30m": ["30m", "1h"],
+}
 
 
 async def _fetch_ohlcv_broker(
@@ -63,7 +73,10 @@ async def _fetch_ohlcv_broker(
     tf_secs = _TF_SECONDS.get(timeframe, 3600)
     limit = max(RESOLUTION_HORIZON + 10, int(elapsed_secs / tf_secs) + RESOLUTION_HORIZON + 10)
 
-    for tf in ([timeframe, "1h"] if timeframe in _SUB_HOUR and timeframe != "1h" else [timeframe]):
+    # GAP-8 FIX: use graduated fallback chain (e.g. 1m→5m→15m→30m→1h) so that
+    # intraday SL hits visible in 5m/15m candles are not lost by jumping to 1h.
+    _tf_chain = _SUB_HOUR_FALLBACK.get(timeframe, [timeframe])
+    for tf in _tf_chain:
         try:
             broker = get_broker(broker_name, force_paper=False)
             df = await broker.get_ohlcv(symbol, tf, limit=limit, since=since_ms)
@@ -74,8 +87,8 @@ async def _fetch_ohlcv_broker(
                 return df[["open", "high", "low", "close", "volume"]].dropna()
         except Exception as exc:
             logger.warning(f"[resolver] broker={broker_name} {symbol}/{tf} OHLCV failed: {exc}")
-        if tf != "1h" and timeframe in _SUB_HOUR:
-            logger.info(f"[resolver] {symbol}/{timeframe} insufficient — retrying with 1h")
+        if tf != timeframe and timeframe in _SUB_HOUR:
+            logger.info(f"[resolver] {symbol}/{timeframe} insufficient — retrying with {tf}")
 
     # Fallback: yfinance — works for all asset classes without a broker connection.
     # Covers the common case where IBKR clientId is already held by the API process.
@@ -201,12 +214,17 @@ def _resolve_outcome(
             effective_stop = stop_loss
 
         # Check take profit first (optimistic — assume best intra-candle fill).
-        # NOTE: if both TP and SL hit on the same candle (high >= TP and low <= SL),
-        # we always resolve as WIN. In reality SL could have fired first; this
-        # assumption over-states the win rate by a small margin but is standard
-        # practice for backtesting. Actual live trades are resolved by the broker.
-        if take_profit is not None:
-            if is_long and high >= take_profit:
+        # BUG-6 FIX: if BOTH TP and SL are hit on the same candle, resolve as SL
+        # (conservative / realistic).  The original code always resolved as WIN,
+        # over-stating the win rate and biasing XGBoost toward overconfident BUYs.
+        _tp_hit_long  = (take_profit is not None and is_long  and high >= take_profit)
+        _tp_hit_short = (take_profit is not None and is_short and low  <= take_profit)
+        _sl_hit_long  = (effective_stop is not None and is_long  and low  <= effective_stop)
+        _sl_hit_short = (effective_stop is not None and is_short and high >= effective_stop)
+
+        if (_tp_hit_long or _tp_hit_short) and not (_sl_hit_long or _sl_hit_short):
+            # Clean TP hit — no SL conflict
+            if _tp_hit_long:
                 pnl_pct = round((take_profit - entry_price) / entry_price * 100, 4)
                 return {
                     "outcome": "win",
@@ -215,7 +233,7 @@ def _resolve_outcome(
                     "candles_held": i + 1,
                     "ml_label": 1,
                 }
-            if is_short and low <= take_profit:
+            if _tp_hit_short:
                 pnl_pct = round((entry_price - take_profit) / entry_price * 100, 4)
                 return {
                     "outcome": "win",
@@ -225,7 +243,7 @@ def _resolve_outcome(
                     "ml_label": 1,
                 }
 
-        # Check stop loss (fixed or trailing)
+        # Check stop loss (fixed or trailing) — also handles the TP+SL same-candle case
         if effective_stop is not None:
             if is_long and low <= effective_stop:
                 pnl_pct = round((effective_stop - entry_price) / entry_price * 100, 4)

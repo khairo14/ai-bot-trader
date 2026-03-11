@@ -5,7 +5,7 @@ from loguru import logger
 from sqlalchemy import select, func
 
 from core.strategies.base import Signal
-from core.risk_manager import RiskManager
+from core.risk_manager import RiskManager, get_risk_manager  # BUG-2 FIX: import singleton factory
 from brokers import get_broker
 from db.models import Trade, LiveTrade, OrderStatus, ExecutionMode
 
@@ -23,6 +23,11 @@ PAPER_INITIAL_CAPITAL: float = _cfg.paper_initial_balance
 # they run on the same event loop (FastAPI process) this stops double-ratcheting.
 # Cross-process (Celery vs FastAPI) deduplication is handled by the DB advisory lock.
 _MONITOR_SL_TP_LOCK: asyncio.Lock = asyncio.Lock()
+
+# BUG-1 FIX: single module-level constant — previously defined as two separate
+# local variables (_G1_DEFAULT_THRESHOLD and _G1_DEFAULT_THRESHOLD_MEM) in
+# separate if/elif branches, which could silently diverge on edits.
+_G1_DEFAULT_THRESHOLD: float = 0.75
 
 
 class ForwardEngine:
@@ -50,7 +55,7 @@ class ForwardEngine:
     """
 
     def __init__(self):
-        self.risk_manager = RiskManager()
+        self.risk_manager = get_risk_manager()  # BUG-2 FIX: use process-wide singleton
         self._paper_positions: dict = {}     # symbol → Trade (open positions, any mode)
         self._paper_balance: dict[str, float] = {}   # broker_name → paper balance (F-028)
         self._emergency_stop_active: bool = False
@@ -113,7 +118,8 @@ class ForwardEngine:
         """Return today's realised + unrealized P&L, optionally filtered to one broker."""
         from datetime import timezone as _tz
         today_start = datetime.now(_tz.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+            hour=_cfg.daily_reset_hour_utc,  # BUG-3 FIX: configurable reset hour (default 0 = midnight UTC)
+            minute=0, second=0, microsecond=0, tzinfo=None
         )
         # Build optional broker filter
         broker_filter: list = []
@@ -236,7 +242,13 @@ class ForwardEngine:
                         LiveTrade.broker == signal.broker,
                     )
                 )
-                open_count = int(_oq_paper.scalar_one() or 0) + int(_oq_live.scalar_one() or 0)
+                # GAP-3 FIX: count only same-mode (paper or live) open positions
+                # so that live positions don’t block paper strategies and vice-versa.
+                is_signal_paper = getattr(signal, 'is_paper', True)
+                if is_signal_paper:
+                    open_count = int(_oq_paper.scalar_one() or 0)
+                else:
+                    open_count = int(_oq_live.scalar_one() or 0)
             except Exception as _cnt_err:
                 logger.debug(f"[ForwardEngine] Could not count open positions from DB: {_cnt_err}")
                 open_count = sum(
@@ -394,8 +406,7 @@ class ForwardEngine:
                     # ML confidence is high enough to justify a fresh re-entry.
                     # g1_override_min_confidence in strategy params overrides the global
                     # default of 0.75 (75%). Any broker, any pair, any timeframe.
-                    _G1_DEFAULT_THRESHOLD = 0.75
-                    _g1_threshold = _G1_DEFAULT_THRESHOLD
+                    _g1_threshold = _G1_DEFAULT_THRESHOLD  # BUG-1 FIX: uses module-level constant
                     if strategy_params:
                         try:
                             _g1_threshold = float(strategy_params["g1_override_min_confidence"])
@@ -433,8 +444,7 @@ class ForwardEngine:
                     )
             else:
                 # G1 in-memory path — same override logic, same global default
-                _G1_DEFAULT_THRESHOLD_MEM = 0.75
-                _g1_threshold_mem = _G1_DEFAULT_THRESHOLD_MEM
+                _g1_threshold_mem = _G1_DEFAULT_THRESHOLD  # BUG-1 FIX: reuses module-level constant
                 if strategy_params:
                     try:
                         _g1_threshold_mem = float(strategy_params["g1_override_min_confidence"])
@@ -1241,8 +1251,10 @@ class ForwardEngine:
                     _breakeven_h is not None
                     and _age_hours >= _breakeven_h
                     and (trade.stop_loss is None or (
-                        is_long  and trade.stop_loss < trade.entry_price or
-                        not is_long and trade.stop_loss > trade.entry_price
+                        # GAP-2 FIX: explicit parentheses — prevents silent precedence bug
+                        # if the condition is ever extended with more terms.
+                        (is_long     and trade.stop_loss < trade.entry_price) or
+                        (not is_long and trade.stop_loss > trade.entry_price)
                     ))
                 ):
                     _old_sl = trade.stop_loss
@@ -1411,24 +1423,81 @@ class ForwardEngine:
                 )
                 try:
                     exit_price: float = 0.0
-                    try:
-                        exit_price = await broker.get_price(trade.symbol)
-                    except Exception:
-                        pass
-
-                    # Best-guess reason: compare exit price to SL/TP levels
                     is_long = trade.side in _long_sides
                     reason = "broker_sl_tp"
-                    if exit_price and trade.stop_loss and trade.take_profit:
-                        if is_long:
-                            reason = "take_profit" if exit_price >= trade.take_profit else "stop_loss"
-                        else:
-                            reason = "take_profit" if exit_price <= trade.take_profit else "stop_loss"
-                    elif exit_price and trade.stop_loss:
-                        if is_long:
-                            reason = "stop_loss" if exit_price <= trade.stop_loss else "broker_close"
-                        else:
-                            reason = "stop_loss" if exit_price >= trade.stop_loss else "broker_close"
+
+                    # IMP-3 FIX: attempt actual bracket fill-price lookup from the broker
+                    # (same F-108 logic used in close_position) before falling back to a
+                    # current market snapshot that may be stale by minutes or hours.
+                    _imp3_resolved = False
+                    if hasattr(broker, "exchange"):
+                        try:
+                            _closed = await broker.exchange.fetch_closed_orders(trade.symbol, limit=10)
+                            _tp_types = {"TAKE_PROFIT", "TAKE_PROFIT_LIMIT", "TAKE_PROFIT_MARKET"}
+                            _sl_types = {"STOP_LOSS", "STOP_LOSS_LIMIT", "STOP_MARKET"}
+                            _tp_fills = [
+                                o for o in _closed
+                                if str(o.get("type", "")).upper() in _tp_types
+                                and str(o.get("status", "")).upper() == "CLOSED"
+                                and float(o.get("filled", 0) or 0) > 0
+                            ]
+                            _sl_fills = [
+                                o for o in _closed
+                                if str(o.get("type", "")).upper() in _sl_types
+                                and str(o.get("status", "")).upper() == "CLOSED"
+                                and float(o.get("filled", 0) or 0) > 0
+                            ]
+                            if _tp_fills:
+                                _latest = sorted(_tp_fills, key=lambda o: o.get("timestamp", 0))[-1]
+                                _fp = float(_latest.get("average") or _latest.get("price") or 0)
+                                if _fp:
+                                    exit_price = _fp
+                                    reason = "take_profit"
+                                    _imp3_resolved = True
+                                    logger.info(
+                                        f"[ForwardEngine] IMP-3: {trade.symbol} id={trade.id} "
+                                        f"bracket TP fill @ {exit_price} from closed orders"
+                                    )
+                            elif _sl_fills:
+                                _latest = sorted(_sl_fills, key=lambda o: o.get("timestamp", 0))[-1]
+                                _fp = float(_latest.get("average") or _latest.get("price") or 0)
+                                if _fp:
+                                    exit_price = _fp
+                                    reason = "stop_loss"
+                                    _imp3_resolved = True
+                                    logger.info(
+                                        f"[ForwardEngine] IMP-3: {trade.symbol} id={trade.id} "
+                                        f"bracket SL fill @ {exit_price} from closed orders"
+                                    )
+                        except Exception as _imp3_err:
+                            logger.debug(f"[ForwardEngine] IMP-3 bracket fill lookup failed: {_imp3_err}")
+
+                    if not _imp3_resolved:
+                        # Fallback: use current market snapshot to estimate reason
+                        try:
+                            exit_price = await broker.get_price(trade.symbol)
+                        except Exception:
+                            pass
+
+                        # Best-guess reason: compare snapshot price to SL/TP levels
+                        if exit_price and trade.stop_loss and trade.take_profit:
+                            if is_long:
+                                reason = "take_profit" if exit_price >= trade.take_profit else "stop_loss"
+                            else:
+                                reason = "take_profit" if exit_price <= trade.take_profit else "stop_loss"
+                        elif exit_price and trade.stop_loss:
+                            if is_long:
+                                reason = "stop_loss" if exit_price <= trade.stop_loss else "broker_close"
+                            else:
+                                reason = "stop_loss" if exit_price >= trade.stop_loss else "broker_close"
+
+                        # BUG-4 FIX: use the SL/TP bracket level instead of the stale
+                        # market snapshot (only when IMP-3 broker lookup was unavailable).
+                        if reason == "take_profit" and trade.take_profit:
+                            exit_price = trade.take_profit
+                        elif reason == "stop_loss" and trade.stop_loss:
+                            exit_price = trade.stop_loss
+                        # reason == "broker_close" → no known bracket fired, keep snapshot
 
                     # Compute PnL from exit price
                     if exit_price and trade.entry_price:

@@ -12,6 +12,19 @@ from core.strategies.base import Signal
 # Persisted risk-state file (circuit breaker + consecutive losses survive restarts)
 _STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "runtime", "risk_state.json")
 
+# BUG-2 FIX: process-wide singleton — all callers (ForwardEngine, risk.py, portfolio.py)
+# share one in-memory instance so reset_circuit_breaker() from the API propagates
+# immediately to the engine without requiring a full process restart.
+_risk_manager_instance: Optional["RiskManager"] = None
+
+
+def get_risk_manager() -> "RiskManager":
+    """Return the process-wide RiskManager singleton, creating it on first call."""
+    global _risk_manager_instance
+    if _risk_manager_instance is None:
+        _risk_manager_instance = RiskManager()
+    return _risk_manager_instance
+
 
 @dataclass
 class RiskValidation:
@@ -113,19 +126,12 @@ class RiskManager:
         Uses write-to-temp-then-rename to avoid partial writes corrupting the state
         file when FastAPI and Celery workers both call _save_state concurrently.
 
-        IMP-4: When called from an async context (FastAPI event loop), the blocking
-        file I/O is offloaded to a thread executor so the event loop is not stalled.
-        When called from a sync context (Celery worker before asyncio.run), falls
-        back to direct synchronous I/O.
+        BUG-5 FIX: always call _do_save_state() synchronously.
+        The JSON payload is tiny (< 1 KB) so the blocking I/O completes in < 1 ms
+        — not worth the risk of losing state on SIGTERM if the executor future
+        is still queued when the event loop shuts down.
         """
-        try:
-            loop = asyncio.get_running_loop()
-            # We are on an event loop — offload to thread pool (fire-and-forget).
-            # The write is atomic (temp+rename) so a concurrent call can't corrupt.
-            loop.run_in_executor(None, self._do_save_state)
-        except RuntimeError:
-            # No running loop (e.g. pure-sync Celery task context)
-            self._do_save_state()
+        self._do_save_state()
 
     def _do_save_state(self) -> None:
         """Blocking file write — always safe to call from a thread."""
