@@ -21,7 +21,7 @@ router = APIRouter()
 _engine = SignalEngine()
 
 # Timeframes available for confluence analysis
-VALID_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d", "3d", "1w"}
+VALID_TIMEFRAMES = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "3d", "1w"}
 DEFAULT_TIMEFRAMES = ["1h", "4h", "1d"]
 
 
