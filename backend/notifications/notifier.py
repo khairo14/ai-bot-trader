@@ -86,7 +86,7 @@ async def dispatch(
         category=NotificationCategory(category),
         title=title,
         message=message,
-        extra=metadata or {},
+        extra_data=metadata or {},
     )
     try:
         db.add(notif)

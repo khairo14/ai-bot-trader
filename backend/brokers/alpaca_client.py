@@ -198,6 +198,18 @@ class AlpacaClient(AbstractBroker):
         entry_price: Optional[float] = kwargs.get("entry_price")
 
         loop = asyncio.get_running_loop()
+
+        # Alpaca rejects fractional quantities for short (SELL) orders with error 42210000.
+        # Floor to whole shares for any sell/short side — fractional is only supported for BUY.
+        if side.lower() in ("sell", "short"):
+            import math as _math
+            quantity = _math.floor(quantity)
+            if quantity < 1:
+                raise ValueError(
+                    f"[Alpaca] Computed quantity < 1 after flooring for short order on {symbol} — "
+                    "insufficient balance or position sizing error."
+                )
+
         logger.info(f"[Alpaca] {order_type.upper()} {side.upper()} {quantity} {symbol}")
         order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
         tif = TimeInForce.GTC
@@ -281,6 +293,12 @@ class AlpacaClient(AbstractBroker):
                             pass
 
             if _is_42210000 and (stop_price or take_profit_price):
+                # If base_price wasn't in the error payload, fetch current market price.
+                if _is_42210000 and _base_price is None:
+                    try:
+                        _base_price = await self.get_price(symbol)
+                    except Exception as _price_err:
+                        logger.warning(f"[Alpaca] Could not fetch fallback base_price for {symbol}: {_price_err}")
                 # Extract base_price from the Alpaca error JSON payload
                 if _base_price and entry_price:
                     # Preserve the ATR distance from the original signal
@@ -293,15 +311,15 @@ class AlpacaClient(AbstractBroker):
                     if _is_short:
                         # SHORT: SL above market, TP below market
                         if stop_price is not None:
-                            new_sl = round(_base_price + max(_sl_dist, _min_tick), 4)
+                            new_sl = round(_base_price + max(_sl_dist, _min_tick), 2)
                         if take_profit_price is not None:
-                            new_tp = round(_base_price - max(_tp_dist, _min_tick), 4)
+                            new_tp = round(_base_price - max(_tp_dist, _min_tick), 2)
                     else:
                         # BUY: SL below market, TP above market
                         if stop_price is not None:
-                            new_sl = round(_base_price - max(_sl_dist, _min_tick), 4)
+                            new_sl = round(_base_price - max(_sl_dist, _min_tick), 2)
                         if take_profit_price is not None:
-                            new_tp = round(_base_price + max(_tp_dist, _min_tick), 4)
+                            new_tp = round(_base_price + max(_tp_dist, _min_tick), 2)
                     logger.warning(
                         f"[Alpaca] Bracket rejected (stale SL/TP): {symbol} {side} "
                         f"base_price={_base_price}, original entry={entry_price}, "
@@ -314,26 +332,18 @@ class AlpacaClient(AbstractBroker):
                         _effective_sl = new_sl
                         _effective_tp = new_tp
                     except Exception as _retry_err:
-                        # Adjusted bracket also failed — fall back to plain market order
-                        logger.warning(
-                            f"[Alpaca] Adjusted bracket also failed for {symbol}: {_retry_err}. "
-                            f"Placing plain market order (no bracket)."
-                        )
-                        req = _build_req(None, None)
-                        raw_result = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
-                        _effective_sl = None
-                        _effective_tp = None
+                        # Adjusted bracket also failed — reject the order; never fill without a bracket.
+                        raise RuntimeError(
+                            f"[Alpaca] Bracket order for {symbol} rejected even after SL/TP reanchor "
+                            f"(base_price={_base_price}, new_sl={new_sl}, new_tp={new_tp}): {_retry_err}"
+                        ) from _retry_err
                 else:
-                    # No base_price or entry_price — fall back to plain market order
-                    logger.warning(
+                    # No base_price or entry_price — cannot reanchor; reject rather than fill without bracket.
+                    raise RuntimeError(
                         f"[Alpaca] Bracket rejected (code 42210000) for {symbol} "
                         f"and cannot reanchor SL/TP (missing base_price or entry_price). "
-                        f"Placing plain market order."
+                        f"Order aborted — strategy requires a bracket."
                     )
-                    req = _build_req(None, None)
-                    raw_result = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
-                    _effective_sl = None
-                    _effective_tp = None
             else:
                 raise  # unrelated error — propagate normally
         order_id = str(raw_result.id)
