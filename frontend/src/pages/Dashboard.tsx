@@ -271,7 +271,7 @@ export default function Dashboard() {
   const handleApprove = async (id: number) => {
     setActioning(id)
     try {
-      await axios.post(`/api/signals/${id}/approve`)
+      await axios.post(`/api/forward-test/execute-signal/${id}`)
       toast.success('Signal approved and executed.')
       fetchAll()
     } catch (e: any) {

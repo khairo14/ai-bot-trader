@@ -631,7 +631,30 @@ class _IBKRManager:
             if not await self._ensure_connected():
                 raise ConnectionError("IBKR Gateway is not reachable")
             assert self._ib is not None
-            return await self._ib.reqPositionsAsync()
+            # reqPositionsAsync() triggers a fresh REQ_POSITIONS from TWS.
+            # However, when reqAccountUpdates(True) was already called on connect,
+            # TWS delivers position data via the portfolio update pathway instead,
+            # meaning reqPositionsAsync() may return [] even though positions exist.
+            # Fix: if reqPositionsAsync() returns empty, fall back to portfolio()
+            # which is populated by the account-update subscription.
+            positions = await self._ib.reqPositionsAsync()
+            if not positions:
+                # portfolio() returns PortfolioItem objects; convert to Position namedtuples
+                # so callers get a consistent type. PortfolioItem has the same fields we need.
+                portfolio_items = self._ib.portfolio()
+                if portfolio_items:
+                    from ib_insync import Position as IbPosition
+                    positions = [
+                        IbPosition(
+                            account=item.account,
+                            contract=item.contract,
+                            position=item.position,
+                            avgCost=item.averageCost,
+                        )
+                        for item in portfolio_items
+                        if item.position != 0
+                    ]
+            return positions
 
     def fetch_positions(self) -> list:
         """Thread-safe fresh position fetch via the singleton IB connection."""
@@ -764,6 +787,139 @@ class _IBKRManager:
                 await asyncio.sleep(0.1)   # let the Gateway process the amendment
                 return True
         return False
+
+    async def _fetch_open_brackets(self) -> dict:
+        """
+        Query TWS for all open bracket child orders and return a map:
+            { contract_symbol (str) → {
+                "sl": float | None,
+                "tp": float | None,
+                "full_symbol": str,   # e.g. "GBP/USD" for forex, "AAPL" for stock
+                "side": str,          # "long" | "short" (from parent entry action)
+                "quantity": float,
+              }
+            }
+
+        Called by get_open_brackets() on IBKRClient (run via run_in_executor).
+        Uses ib.reqOpenOrdersAsync() to force TWS to push the current open-order
+        list before reading ib.trades(), so stale in-memory state is never returned.
+        """
+        if not self._ib:
+            return {}
+        if not await self._ensure_connected():
+            return {}
+        ib = self._ib
+        # Force TWS to push the full open-order list for our clientId.
+        await ib.reqOpenOrdersAsync()
+
+        # Build parent orderId → (contract_symbol, full_symbol, entry_action)
+        # from ALL trades in the current session (includes filled parent orders).
+        parent_map: dict[int, tuple[str, str, str]] = {}
+        for t in ib.trades():
+            if t.order.parentId != 0:
+                continue  # skip child orders in this pass
+            contract = getattr(t, "contract", None)
+            if contract is None:
+                continue
+            sym = contract.symbol
+            sec_type = getattr(contract, "secType", "")
+            currency = getattr(contract, "currency", "USD")
+            full_sym = f"{sym}/{currency}" if sec_type == "CASH" else sym
+            parent_map[t.order.orderId] = (sym, full_sym, t.order.action)
+
+        result: dict[str, dict] = {}
+        for t in ib.openTrades():
+            order = t.order
+            if order.parentId == 0:
+                continue  # only interested in bracket children
+            info = parent_map.get(order.parentId)
+            if info is None:
+                continue
+            sym, full_sym, parent_action = info
+            if sym not in result:
+                result[sym] = {
+                    "sl": None,
+                    "tp": None,
+                    "full_symbol": full_sym,
+                    # parent_action is BUY → long, SELL → short
+                    "side": "long" if parent_action == "BUY" else "short",
+                    "quantity": float(order.totalQuantity or 0),
+                }
+            ot = order.orderType.upper()
+            if ot in ("STP", "STOP"):
+                result[sym]["sl"] = float(order.auxPrice) if order.auxPrice else None
+            elif ot in ("LMT", "LIMIT"):
+                result[sym]["tp"] = float(order.lmtPrice) if order.lmtPrice else None
+
+        return result
+
+    def fetch_open_brackets(self) -> dict:
+        """Thread-safe sync wrapper for _fetch_open_brackets."""
+        self._start()
+        return self._submit(self._fetch_open_brackets(), timeout=15.0)
+
+    async def _do_convert_fx_to_usd(self) -> list[dict]:
+        """
+        Convert all non-USD cash balances back to USD immediately via spot FX orders.
+
+        After a forex trade closes, IBKR holds the foreign currency until T+2.
+        This method finds every non-USD cash balance in the account and places a
+        spot SELL market order (e.g. SELL AUD → buy USD on AUD.USD CASH contract)
+        to collapse the FX exposure instantly.
+
+        Returns a list of dicts describing each conversion placed, e.g.
+            [{"currency": "AUD", "amount": 150000.0, "order_id": "..."}]
+        """
+        if not await self._ensure_connected():
+            return []
+        assert self._ib is not None
+        ib = self._ib
+
+        # Pull latest account values — filter for CashBalance per currency
+        # (IBKR reports one entry per currency with tag="CashBalance")
+        fx_balances: dict[str, float] = {}
+        for v in ib.accountValues():
+            if v.tag == "CashBalance" and v.currency not in ("USD", "BASE", "", "EUR"):
+                # Only convert if balance is meaningful (> $1 equivalent)
+                try:
+                    amount = float(v.value)
+                except (ValueError, TypeError):
+                    continue
+                if abs(amount) > 1.0:
+                    fx_balances[v.currency] = amount
+
+        conversions = []
+        for currency, amount in fx_balances.items():
+            try:
+                from ib_insync import Forex as _IbForex, MarketOrder as _MktOrder
+                # Construct the CASH contract: e.g. AUD/USD → Forex("AUDUSD")
+                pair = f"{currency}USD"
+                contract = _IbForex(pair)
+                await ib.qualifyContractsAsync(contract)
+                # Positive balance = we're LONG the foreign currency → SELL to get USD
+                # Negative balance = we're SHORT the foreign currency → BUY to cover
+                action = "SELL" if amount > 0 else "BUY"
+                qty = abs(int(amount))  # IBKR CASH contracts use integer lots
+                if qty < 1:
+                    continue
+                order = _MktOrder(action, qty)
+                trade = ib.placeOrder(contract, order)
+                await asyncio.sleep(0.2)  # let TWS acknowledge
+                order_id = str(trade.order.orderId)
+                logger.info(
+                    f"[IBKR] FX conversion: {action} {qty:,} {currency}/USD "
+                    f"(order {order_id}) — collapsing T+2 exposure"
+                )
+                conversions.append({"currency": currency, "amount": amount, "order_id": order_id})
+            except Exception as _conv_err:
+                logger.warning(f"[IBKR] FX conversion failed for {currency}: {_conv_err}")
+
+        return conversions
+
+    def convert_fx_to_usd(self) -> list[dict]:
+        """Thread-safe sync wrapper for _do_convert_fx_to_usd."""
+        self._start()
+        return self._submit(self._do_convert_fx_to_usd(), timeout=20.0)
 
 
 _manager = _IBKRManager(client_id=settings.ibkr_client_id)
@@ -1000,7 +1156,14 @@ class IBKRClient(AbstractBroker):
         positions = []
         for p in raw:
             contract = p.contract
-            asset_class = "stock" if contract.secType == "STK" else "option"
+            sec_type = getattr(contract, "secType", "")
+            currency = getattr(contract, "currency", "USD")
+            sym = contract.symbol
+            # For CASH (forex) contracts IBKR only stores the base currency as symbol
+            # (e.g. "GBP" for GBP/USD).  Reconstruct the full pair so DB records and
+            # signal lookups use the correct symbol form.
+            full_sym = f"{sym}/{currency}" if sec_type == "CASH" else sym
+            asset_class = "stock" if sec_type == "STK" else ("forex" if sec_type == "CASH" else "option")
             qty = abs(p.position)
             entry_price = float(p.avgCost)
             # Derive current price from market value provided by IB Gateway
@@ -1010,7 +1173,8 @@ class IBKRClient(AbstractBroker):
             )
             unrealized_pnl = float(p.unrealizedPNL) if hasattr(p, "unrealizedPNL") and p.unrealizedPNL is not None else 0.0
             positions.append(Position(
-                symbol=contract.symbol,
+                symbol=sym,          # short symbol for broker_symbols matching (e.g. "GBP")
+                full_symbol=full_sym, # full symbol for DB records (e.g. "GBP/USD")
                 side="long" if p.position > 0 else "short",
                 quantity=qty,
                 entry_price=entry_price,
@@ -1019,6 +1183,24 @@ class IBKRClient(AbstractBroker):
                 asset_class=asset_class,
             ))
         return positions
+
+    async def get_open_brackets(self) -> dict:
+        """
+        Return a map of open IBKR bracket SL/TP orders keyed by contract symbol.
+        See _IBKRManager._fetch_open_brackets() for the full dict schema.
+        Used by reconcile_positions to recover SL/TP for orphan broker positions.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _get_manager().fetch_open_brackets)
+
+    async def auto_convert_fx(self) -> list[dict]:
+        """
+        Convert all non-USD cash balances to USD immediately via spot CASH orders.
+        Called automatically after IBKR forex trades close to prevent T+2 FX exposure.
+        Returns list of conversions placed (empty if already all USD).
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _get_manager().convert_fx_to_usd)
 
     # ── Order Management ─────────────────────────────────
 

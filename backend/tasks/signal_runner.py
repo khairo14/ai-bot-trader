@@ -207,7 +207,7 @@ def run_signals(self):
                     if _ghosts:
                         logger.info(f"[signal_runner] Reconciled {_ghosts} ghost position(s)")
                 except Exception as _rec_err:
-                    logger.debug(f"[signal_runner] Reconcile error (non-fatal): {_rec_err}")
+                    logger.warning(f"[signal_runner] Reconcile error (non-fatal): {_rec_err}", exc_info=True)
 
                 # Software SL/TP enforcement — runs AFTER reconcile so it only
                 # fires on positions that are genuinely still open at the broker.
@@ -578,6 +578,26 @@ def run_signals(self):
                                     f"[signal_runner] ⚠ Low confluence {conf:.0%} for "
                                     f"{sig.signal} {symbol} on {timeframe} — not executing"
                                 )
+                                try:
+                                    await _notify.warning(
+                                        session,
+                                        title=f"⚠️ Execution Suppressed — {sig.signal} {symbol}",
+                                        message=(
+                                            f"Strategy: {sig.strategy_name} | "
+                                            f"Multi-TF confluence {conf:.0%} below minimum {_min_conf:.0%}. "
+                                            f"Signal saved but trade not placed."
+                                        ),
+                                        metadata={
+                                            "symbol": symbol,
+                                            "signal": sig.signal,
+                                            "strategy": sig.strategy_name,
+                                            "confluence": conf,
+                                            "min_confluence": _min_conf,
+                                            "reason": "low_confluence",
+                                        },
+                                    )
+                                except Exception as _nw_err:
+                                    logger.debug(f"[signal_runner] Suppression notification failed: {_nw_err}")
 
                         # ── Market-hours gate (execution only) ──────────────────
                         # Signals are always saved — useful visibility even overnight.
@@ -594,6 +614,25 @@ def run_signals(self):
                                     f"[signal_runner] ⏸ Market closed for {strat.broker.value} — "
                                     f"signal saved but trade suppressed"
                                 )
+                                try:
+                                    await _notify.warning(
+                                        session,
+                                        title=f"⏸ Execution Suppressed — {sig.signal} {symbol}",
+                                        message=(
+                                            f"Strategy: {sig.strategy_name} | "
+                                            f"{strat.broker.value} session is closed. "
+                                            f"Signal saved but trade not placed."
+                                        ),
+                                        metadata={
+                                            "symbol": symbol,
+                                            "signal": sig.signal,
+                                            "strategy": sig.strategy_name,
+                                            "broker": strat.broker.value,
+                                            "reason": "market_closed",
+                                        },
+                                    )
+                                except Exception as _nw_err:
+                                    logger.debug(f"[signal_runner] Market-closed notification failed: {_nw_err}")
 
                         # ── ML-03: Portfolio weight multiplier ───────────────────
                         # Strategies with a higher Sharpe-based weight (set by the

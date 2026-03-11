@@ -983,6 +983,17 @@ class ForwardEngine:
         except Exception as _n_err:
             logger.debug(f"[ForwardEngine] Close notification failed: {_n_err}")
 
+        # Auto-convert residual FX to USD immediately after closing an IBKR forex position.
+        # This prevents T+2 balance fluctuation from unsettled foreign-currency proceeds.
+        try:
+            _close_broker_str2 = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+            if _close_broker_str2 == "ibkr" and "/" in trade.symbol:
+                _fx_result = await broker.auto_convert_fx()
+                if _fx_result:
+                    logger.info(f"[ForwardEngine] FX auto-converted after {trade.symbol} close: {_fx_result}")
+        except Exception as _fx_err:
+            logger.warning(f"[ForwardEngine] FX auto-convert failed after {trade.symbol} close: {_fx_err}")
+
     async def emergency_stop(self, db_session=None) -> int:
         """
         Close ALL open positions immediately.
@@ -1393,8 +1404,10 @@ class ForwardEngine:
             _sel(LiveTrade).where(LiveTrade.status.in_([OrderStatus.OPEN, OrderStatus.PENDING]))
         )
         open_trades: list = paper_q.scalars().all() + live_q.scalars().all()
-        if not open_trades:
-            return 0
+        # NOTE: do NOT early-return here even when open_trades is empty.
+        # The orphan-sync block at the bottom of this function must always run
+        # so that IBKR live positions that were never saved to the DB are detected
+        # and created as LiveTrade records.
 
         # Group by (broker_name, is_paper) so paper trades are reconciled against
         # the paper endpoint and live trades against the live endpoint.  Without
@@ -1598,6 +1611,16 @@ class ForwardEngine:
                     except Exception as _ne:
                         logger.debug(f"[ForwardEngine] Reconcile notification failed: {_ne}")
 
+                    # Auto-convert residual FX to USD when reconcile-closing an IBKR forex ghost.
+                    try:
+                        _rec_broker_str = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+                        if _rec_broker_str == "ibkr" and "/" in trade.symbol:
+                            _rec_fx = await broker.auto_convert_fx()
+                            if _rec_fx:
+                                logger.info(f"[ForwardEngine] FX auto-converted after reconcile of {trade.symbol}: {_rec_fx}")
+                    except Exception as _fx_rec_err:
+                        logger.warning(f"[ForwardEngine] FX auto-convert failed during reconcile of {trade.symbol}: {_fx_rec_err}")
+
                     ghost_count += 1
                 except Exception as _re:
                     logger.error(f"[ForwardEngine] Reconcile failed for {trade.symbol} id={trade.id}: {_re}")
@@ -1606,7 +1629,114 @@ class ForwardEngine:
             await db_session.commit()
             logger.info(f"[ForwardEngine] Reconciled {ghost_count} ghost position(s).")
 
-        return ghost_count
+        # ── Broker→DB sync: create records for IBKR positions with no DB trade ──
+        # This recovers from the scenario where place_order() succeeded at IBKR but the
+        # DB commit failed (session crash, timeout, etc.), leaving the position orphaned.
+        # We pull all the data directly from TWS: entry price (avgCost), side, quantity,
+        # and — crucially — the live SL/TP prices from the open bracket child orders.
+        orphan_count = 0
+        try:
+            from db.models import Signal as SignalModel, BrokerName
+            from config import settings as _settings
+            # Respect configured IBKR mode (paper or live) — the singleton always
+            # connects to the configured port so force_paper must match.
+            _ibkr_is_paper: bool = _settings.ibkr_paper
+            ibkr_key = ("ibkr", _ibkr_is_paper)
+            if ibkr_key in by_broker:
+                _ibkr_trades = by_broker[ibkr_key]
+            else:
+                # No existing DB trades for this IBKR mode — still need to check broker
+                _ibkr_trades = []
+
+            ibkr_broker = get_broker("ibkr", force_paper=_ibkr_is_paper)
+            await ibkr_broker.connect()
+            ibkr_positions = await ibkr_broker.get_positions()
+            brackets = await ibkr_broker.get_open_brackets()
+
+            # Build the set of short symbols already tracked in DB (normalised)
+            tracked_symbols = {
+                _normalize(t.symbol, "ibkr") for t in _ibkr_trades
+            }
+
+            # Use the right ORM model: Trade for paper, LiveTrade for live
+            _TradeModel = Trade if _ibkr_is_paper else LiveTrade
+
+            for pos in ibkr_positions:
+                if pos.symbol in tracked_symbols:
+                    continue  # already in DB — handled by ghost-close loop above
+
+                # Orphan position: at broker, not in DB
+                bracket = brackets.get(pos.symbol, {})
+                sl_price: Optional[float] = bracket.get("sl")
+                tp_price: Optional[float] = bracket.get("tp")
+                # Priority: bracket full_symbol → pos.full_symbol (CASH→"GBP/USD") → pos.symbol fallback
+                full_sym: str = bracket.get("full_symbol") or pos.full_symbol or pos.symbol
+
+                # Find the most recent signal for this symbol/broker to link strategy info.
+                # We check both acted_on=False (DB save failed) and acted_on=True (saved but
+                # trade record missing) in the last 48 hours.
+                from datetime import timedelta
+                _cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=48)
+                _sig_q = await db_session.execute(
+                    _sel(SignalModel)
+                    .where(
+                        SignalModel.symbol == full_sym,
+                        SignalModel.broker == BrokerName.IBKR,
+                        SignalModel.created_at >= _cutoff,
+                    )
+                    .order_by(SignalModel.created_at.desc())
+                    .limit(1)
+                )
+                linked_signal = _sig_q.scalar_one_or_none()
+
+                # If no signal found by full_sym, retry with the short contract symbol
+                # (handles edge cases where signals were stored without the /currency suffix)
+                if linked_signal is None and full_sym != pos.symbol:
+                    _sig_q2 = await db_session.execute(
+                        _sel(SignalModel)
+                        .where(
+                            SignalModel.symbol == pos.symbol,
+                            SignalModel.broker == BrokerName.IBKR,
+                            SignalModel.created_at >= _cutoff,
+                        )
+                        .order_by(SignalModel.created_at.desc())
+                        .limit(1)
+                    )
+                    linked_signal = _sig_q2.scalar_one_or_none()
+
+                new_trade = _TradeModel(
+                    symbol=full_sym,
+                    side=pos.side,  # "long" | "short"
+                    quantity=pos.quantity,
+                    entry_price=round(pos.entry_price, 8),
+                    stop_loss=round(sl_price, 8) if sl_price else (linked_signal.stop_loss if linked_signal else None),
+                    take_profit=round(tp_price, 8) if tp_price else (linked_signal.take_profit if linked_signal else None),
+                    status=OrderStatus.OPEN,
+                    broker=BrokerName.IBKR,
+                    is_paper=_ibkr_is_paper,
+                    strategy_name=linked_signal.strategy_name if linked_signal else "unknown",
+                    signal_id=linked_signal.id if linked_signal else None,
+                    broker_order_id="orphan_sync",
+                )
+                db_session.add(new_trade)
+
+                if linked_signal and not linked_signal.acted_on:
+                    linked_signal.acted_on = True
+
+                orphan_count += 1
+                logger.info(
+                    f"[ForwardEngine] ORPHAN SYNC: created LiveTrade for {full_sym} "
+                    f"entry={pos.entry_price} sl={sl_price} tp={tp_price} "
+                    f"(signal_id={linked_signal.id if linked_signal else None})"
+                )
+
+            if orphan_count:
+                await db_session.commit()
+                logger.info(f"[ForwardEngine] Synced {orphan_count} orphan broker position(s) to DB.")
+        except Exception as _oe:
+            logger.error(f"[ForwardEngine] Orphan broker sync failed: {_oe}", exc_info=True)
+
+        return ghost_count + orphan_count
 
     def resume(self):
         """Re-enable trading after emergency stop."""

@@ -87,6 +87,54 @@ async def get_balance(broker_name: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/ibkr/raw-state")
+async def ibkr_raw_state():
+    """
+    Dump raw TWS state directly from the singleton: portfolio items, open orders,
+    open trades, and account values. Use this to diagnose missing positions.
+    """
+    import asyncio
+    from brokers.ibkr_client import _get_manager
+    mgr = _get_manager()
+
+    async def _fetch():
+        if not await mgr._ensure_connected():
+            return {"error": "IBKR not connected"}
+        ib = mgr._ib
+        # Force fresh data from TWS
+        await ib.reqOpenOrdersAsync()
+        raw_pos = await ib.reqPositionsAsync()
+        portfolio = ib.portfolio()
+        open_trades = ib.openTrades()
+        acct_values = {v.tag: v.value for v in ib.accountValues() if v.currency in ("USD", "BASE", "")}
+        return {
+            "req_positions": [
+                {"account": p.account, "symbol": p.contract.symbol,
+                 "secType": p.contract.secType, "position": p.position, "avgCost": p.avgCost}
+                for p in raw_pos
+            ],
+            "portfolio_items": [
+                {"account": p.account, "symbol": p.contract.symbol,
+                 "secType": p.contract.secType, "position": p.position,
+                 "avgCost": p.averageCost, "marketValue": p.marketValue,
+                 "unrealizedPNL": p.unrealizedPNL}
+                for p in portfolio
+            ],
+            "open_orders_count": len(open_trades),
+            "open_orders": [
+                {"symbol": t.contract.symbol, "action": t.order.action,
+                 "orderType": t.order.orderType, "qty": t.order.totalQuantity,
+                 "status": t.orderStatus.status, "parentId": t.order.parentId}
+                for t in open_trades
+            ],
+            "account_values": acct_values,
+        }
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: mgr._submit(_fetch(), timeout=20.0))
+    return result
+
+
 @router.get("/{broker_name}/positions")
 async def get_positions(broker_name: str):
     """Get open positions for a broker."""

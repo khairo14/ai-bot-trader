@@ -148,3 +148,40 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
     )
     await db.commit()
     return {"message": "Emergency stop executed.", "positions_closed": closed}
+
+
+@router.post("/sync-broker")
+async def sync_broker_positions(db: AsyncSession = Depends(get_db)):
+    """
+    Immediately pull all open positions from IBKR and create DB records for any
+    that are not already tracked.  Also closes ghost DB positions that the broker
+    has already exited.  This is the same logic that runs every 60 s via the
+    Celery scheduler — calling this endpoint forces it to run right now.
+    """
+    from core.engine.forward_engine import ForwardEngine
+    engine = ForwardEngine()
+    try:
+        synced = await engine.reconcile_positions(db)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Broker sync failed: {exc}")
+    return {"message": f"Broker sync complete.", "positions_synced": synced}
+
+
+@router.post("/settle-fx")
+async def settle_fx_now():
+    """
+    Immediately convert any non-USD cash balances at IBKR into USD via spot
+    market orders.  Call this after a forex position closes to avoid T+2
+    settlement-period balance fluctuation.
+    """
+    from brokers.ibkr_client import IBKRClient
+    broker = IBKRClient()
+    try:
+        await broker.connect()
+        conversions = await broker.auto_convert_fx()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"FX settlement failed: {exc}")
+    return {
+        "message": "FX settlement triggered.",
+        "conversions": conversions,
+    }

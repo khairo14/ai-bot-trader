@@ -29,6 +29,7 @@ class Position:
     current_price: float
     unrealized_pnl: float
     asset_class: str
+    full_symbol: str = ""  # full symbol for DB records (e.g. "GBP/USD" for IBKR CASH, same as symbol for stocks)
 
 
 @dataclass

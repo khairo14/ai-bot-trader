@@ -654,6 +654,28 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
                     f"[ForwardTest] ⚠ Low confluence {conf:.0%} for "
                     f"{sig.signal} {symbol} on {timeframe} — not executing"
                 )
+                try:
+                    from notifications.notifier import notifier as _ft_notify
+                    async with AsyncSessionLocal() as _notif_session:
+                        await _ft_notify.warning(
+                            _notif_session,
+                            title=f"⚠️ Execution Suppressed — {sig.signal} {symbol}",
+                            message=(
+                                f"Strategy: {sig.strategy_name} | "
+                                f"Multi-TF confluence {conf:.0%} below minimum {_min_conf:.0%}. "
+                                f"Signal saved but trade not placed."
+                            ),
+                            metadata={
+                                "symbol": symbol,
+                                "signal": sig.signal,
+                                "strategy": sig.strategy_name,
+                                "confluence": conf,
+                                "min_confluence": _min_conf,
+                                "reason": "low_confluence",
+                            },
+                        )
+                except Exception as _nw_err:
+                    logger.debug(f"[ForwardTest] Suppression notification failed: {_nw_err}")
 
         # ── Market-hours gate (execution only) ─────────────────────────
         # Signals are always saved to DB — useful for review even overnight.
@@ -667,6 +689,27 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
                 f"[ForwardTest] ⏸ Market closed for {strat.broker.value} — "
                 f"signal saved but trade suppressed"
             )
+            try:
+                from notifications.notifier import notifier as _ft_notify
+                async with AsyncSessionLocal() as _notif_session:
+                    await _ft_notify.warning(
+                        _notif_session,
+                        title=f"⏸ Execution Suppressed — {sig.signal} {symbol}",
+                        message=(
+                            f"Strategy: {sig.strategy_name} | "
+                            f"{strat.broker.value} session is closed. "
+                            f"Signal saved but trade not placed."
+                        ),
+                        metadata={
+                            "symbol": symbol,
+                            "signal": sig.signal,
+                            "strategy": sig.strategy_name,
+                            "broker": strat.broker.value,
+                            "reason": "market_closed",
+                        },
+                    )
+            except Exception as _nw_err:
+                logger.debug(f"[ForwardTest] Market-closed notification failed: {_nw_err}")
 
         # ── ML-03: Portfolio weight multiplier ───────────────────────────
         port_weight = 1.0

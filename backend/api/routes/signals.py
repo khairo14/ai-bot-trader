@@ -5,7 +5,7 @@ from typing import Optional
 from datetime import datetime, timedelta, timezone
 
 from db.database import get_db
-from db.models import Signal, Strategy, ExecutionMode, SignalType, BrokerName
+from db.models import Signal, ExecutionMode, SignalType, BrokerName
 from core.auth import get_current_user
 
 router = APIRouter()
@@ -117,81 +117,12 @@ async def list_pending_signals(db: AsyncSession = Depends(get_db)):
 @router.post("/{signal_id}/approve")
 async def approve_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
     """
-    Approve a pending semi-auto signal and execute it immediately as full-auto.
+    DEPRECATED: Thin redirect to /api/forward-test/execute-signal/{id}.
+    This endpoint is kept only for backwards compatibility with any external callers.
+    All frontend code now calls the forward-test endpoint directly.
     """
-    sig_row = (await db.execute(select(Signal).where(Signal.id == signal_id))).scalar_one_or_none()
-    if not sig_row:
-        raise HTTPException(status_code=404, detail="Signal not found")
-    if sig_row.acted_on:
-        raise HTTPException(status_code=400, detail="Signal already acted on")
-
-    # Look up the originating strategy to get is_paper (needed for market-hours gate below)
-    strat_row = (await db.execute(
-        select(Strategy).where(
-            Strategy.name == sig_row.strategy_name,
-            Strategy.broker == sig_row.broker,
-        ).limit(1)
-    )).scalar_one_or_none()
-    is_paper = strat_row.is_paper if strat_row else True
-
-    # F-085: Market-hours gate — only block LIVE signal execution outside trading hours.
-    # Paper signals are pure simulation and may be approved at any time.
-    from api.routes.forward_test import is_market_open
-    broker_name = sig_row.broker.value if hasattr(sig_row.broker, "value") else str(sig_row.broker)
-    asset_cls = sig_row.asset_class.value if hasattr(sig_row.asset_class, "value") else str(sig_row.asset_class)
-    if not is_paper and not is_market_open(broker_name, asset_cls):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Market is currently closed for {broker_name}/{asset_cls}. Signal approval blocked outside trading hours.",
-        )
-
-    # Reconstruct a Signal dataclass and execute via ForwardEngine
-    from core.strategies.base import Signal as SigDC
-    from core.engine.forward_engine import ForwardEngine
-
-    signal_dc = SigDC(
-        symbol=sig_row.symbol,
-        signal=sig_row.signal.value if hasattr(sig_row.signal, "value") else sig_row.signal,
-        entry_price=sig_row.entry_price,
-        stop_loss=sig_row.stop_loss,
-        take_profit=sig_row.take_profit,
-        confidence=sig_row.confidence or 1.0,
-        timeframe=sig_row.timeframe,
-        strategy_name=sig_row.strategy_name,
-        asset_class=sig_row.asset_class.value if hasattr(sig_row.asset_class, "value") else sig_row.asset_class,
-        broker=sig_row.broker.value if hasattr(sig_row.broker, "value") else sig_row.broker,
-        regime=sig_row.regime,
-        reasons=sig_row.reasons or [],
-        # Restore options fields so ForwardEngine can pass IBKR option kwargs
-        iv_rank=sig_row.iv_rank,
-        delta=sig_row.delta,
-        theta=sig_row.theta,
-        vega=sig_row.vega,
-        options_meta=sig_row.options_meta,
-    )
-
-    engine = ForwardEngine()
-    await engine.initialize(db)
-
-    trade = await engine.process_signal(
-        signal=signal_dc,
-        execution_mode=ExecutionMode.FULL_AUTO.value,
-        is_paper=is_paper,
-        db_session=db,
-    )
-
-    sig_row.acted_on = True
-    if trade:
-        trade.signal_id = sig_row.id
-    await db.commit()
-    from core.auth import audit
-    audit("signal.approve", signal_id=signal_id, symbol=sig_row.symbol, trade_placed=trade is not None)
-
-    return {
-        "message": "Signal approved and executed.",
-        "signal_id": signal_id,
-        "trade_placed": trade is not None,
-    }
+    from api.routes.forward_test import execute_signal as _execute_signal
+    return await _execute_signal(signal_id=signal_id, db=db)
 
 
 @router.post("/{signal_id}/reject")

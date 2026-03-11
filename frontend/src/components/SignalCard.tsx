@@ -116,13 +116,23 @@ export default function SignalCard({ signal }: Props) {
   const ageMin = Math.floor(ageMs / 60000)
   const isStale = ageMs > 5 * 60 * 1000
 
+  // Suppress the Execute button when upstream gates (confluence, market-hours) blocked
+  // auto-execution. The risk manager gate is intentionally NOT blocked here — the user
+  // can still attempt manual override and will receive a clear rejection message.
+  const suppressionReason = reasons.find(r => r.startsWith('execution suppressed'))
+  const isButtonDisabled = isStale || !!suppressionReason
+
   const executeSignal = async () => {
     if (isStale) {
       toast.error(`Signal is ${ageMin}m old — price levels may be invalid. Run Now to get a fresh signal.`)
       return
     }
+    if (suppressionReason) {
+      toast.error(suppressionReason)
+      return
+    }
     try {
-      await axios.post(`/api/signals/${signal.id}/approve`)
+      await axios.post(`/api/forward-test/execute-signal/${signal.id}`)
       toast.success(`Order submitted for ${signal.symbol}`)
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || 'Execution failed')
@@ -282,13 +292,19 @@ export default function SignalCard({ signal }: Props) {
           )}
           <button
             onClick={executeSignal}
+            disabled={isButtonDisabled}
+            title={suppressionReason ?? (isStale ? `Signal is ${ageMin}m old` : undefined)}
             className={`w-full py-1.5 text-xs font-semibold rounded-lg transition-all border ${
-              isStale
+              isButtonDisabled
                 ? 'bg-dark-700 text-gray-500 border-dark-500 cursor-not-allowed opacity-50'
                 : `${cfg.bg} ${cfg.color} ${cfg.border} hover:opacity-80`
             }`}
           >
-            {isStale ? `Stale (${ageMin}m ago) — Run Now first` : 'Execute Signal'}
+            {isStale
+              ? `Stale (${ageMin}m ago) — Run Now first`
+              : suppressionReason
+              ? `Suppressed — ${suppressionReason.replace('execution suppressed: ', '')}`
+              : 'Execute Signal'}
           </button>
         </div>
       )}
