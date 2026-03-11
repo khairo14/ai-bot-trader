@@ -404,12 +404,27 @@ export default function Backtest() {
             {historyLoading && <span className="text-xs text-gray-500">loading…</span>}
             {!historyLoading && <span className="text-xs text-gray-600">({history.length} run{history.length !== 1 ? 's' : ''})</span>}
           </div>
-          <a
-            href="/api/backtest/results/export/all"
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 text-xs transition-all"
-          >
-            <Download size={12} /> Export All CSV
-          </a>
+          <div className="flex items-center gap-2">
+            <a
+              href="/api/backtest/results/export/all"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 text-xs transition-all"
+            >
+              <Download size={12} /> Export All CSV
+            </a>
+            <button
+              onClick={async () => {
+                if (!window.confirm('Delete all backtest history? This cannot be undone.')) return
+                await axios.delete('/api/backtest/results/all')
+                setHistory([])
+                setResult(null)
+                setBacktestId(null)
+                toast.success('Backtest history cleared')
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-dark-700 text-gray-400 hover:text-red-400 hover:bg-red-500/10 text-xs transition-all"
+            >
+              <X size={12} /> Clear History
+            </button>
+          </div>
         </div>
 
         {history.length === 0 && !historyLoading ? (

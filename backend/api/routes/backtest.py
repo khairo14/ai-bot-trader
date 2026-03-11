@@ -214,6 +214,29 @@ async def export_backtest_trades(result_id: int, db: AsyncSession = Depends(get_
     )
 
 
+@router.delete("/results/all")
+async def delete_all_results(db: AsyncSession = Depends(get_db)):
+    """Delete every backtest result row from the database."""
+    from sqlalchemy import delete as _delete
+    await db.execute(_delete(BacktestResult))
+    await db.commit()
+    return {"deleted": True}
+
+
+@router.delete("/results/{result_id}")
+async def delete_result(result_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a single backtest result by ID."""
+    result = await db.execute(
+        select(BacktestResult).where(BacktestResult.id == result_id)
+    )
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Backtest result not found")
+    await db.delete(item)
+    await db.commit()
+    return {"deleted": True}
+
+
 @router.get("/results/export/all")
 async def export_all_backtest_summary(db: AsyncSession = Depends(get_db)):
     """Download a summary CSV of all backtest runs."""
