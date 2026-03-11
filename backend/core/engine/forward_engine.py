@@ -749,52 +749,147 @@ class ForwardEngine:
         # NOTE: "long" is an alias for "buy" used by the DB rebuild script.
         _long_sides = {"buy", "cover", "long"}
         side = "sell" if trade.side in _long_sides else "buy"
+        # F-108: bracket tracking — how much the exchange's own SL/TP order already sold
+        # and at what average price, so we can compute a weighted-average exit price.
+        _bracket_qty: float = 0.0
+        _bracket_price: float = 0.0
+        _close_qty: float = trade.quantity
+        _do_market_close: bool = True
         if not _skip_market_order:
+            # Cancel any standing bracket exit orders (SL guard, TP limit) so that
+            # the asset balance is fully freed before we issue the market close order.
+            # On Binance spot, open exit orders lock the full sell quantity — without
+            # cancellation, the market sell fails with "insufficient balance".
             try:
-                close_result = await broker.place_order(
-                    symbol=trade.symbol,
-                    side=side,
-                    quantity=trade.quantity,
-                    order_type="market",
-                )
-                # Use broker-confirmed fill price for PnL accuracy
-                if close_result.fill_price:
-                    exit_price = close_result.fill_price
-                    logger.info(f"[ForwardEngine] Close order filled @ {exit_price} (confirmed)")
-                elif exit_price:
-                    logger.warning(
-                        f"[ForwardEngine] Close order {close_result.order_id} not confirmed filled — "
-                        f"using price snapshot ({exit_price}) for PnL"
-                    )
-                else:
-                    raise RuntimeError("Close order unconfirmed and no price snapshot available")
-            except RuntimeError:
-                raise
-            except Exception as _close_err:
-                # F-103b: revert the atomic guard (PENDING→OPEN) so the next scheduler tick
-                # can retry instead of leaving the trade permanently stuck as PENDING.
-                if db_session is not None and trade.id is not None:
-                    from sqlalchemy import update as _upd_revert
-                    _TradeModelRevert = type(trade)
-                    try:
-                        await db_session.execute(
-                            _upd_revert(_TradeModelRevert)
-                            .where(_TradeModelRevert.id == trade.id, _TradeModelRevert.status == OrderStatus.PENDING)
-                            .values(status=OrderStatus.OPEN)
+                await broker.cancel_open_orders(trade.symbol)
+            except Exception as _coo_err:
+                logger.debug(f"[ForwardEngine] pre-close cancel_open_orders failed: {_coo_err}")
+            # F-108: After cancelling bracket orders, verify the actual free balance.
+            # Binance spot deducts fees from the received base quantity, so trade.quantity
+            # (what was ordered) may exceed what's actually free.  Also handles the case
+            # where the exchange's own bracket SL/TP already executed the position (free=0).
+            if hasattr(broker, "exchange"):
+                try:
+                    _fb = await broker.exchange.fetch_balance()
+                    _asset = trade.symbol.split("/")[0]
+                    _free_now = float((_fb.get(_asset) or {}).get("free", 0) or 0)
+                    if _free_now == 0.0:
+                        logger.info(
+                            f"[ForwardEngine] F-108: {trade.symbol} free balance=0 after cancel "
+                            f"— exchange bracket already closed this position. Marking FILLED at snapshot price."
                         )
-                        await db_session.flush()
-                    except Exception:
-                        pass
-                logger.error(
-                    f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
-                    "— guard reverted to OPEN for retry next tick"
-                )
-                raise
+                        _do_market_close = False
+                        # Try to recover bracket fill price from recent closed orders
+                        try:
+                            _closed = await broker.exchange.fetch_closed_orders(trade.symbol, limit=10)
+                            _sl_fills = [
+                                o for o in _closed
+                                if str(o.get("type", "")).upper() in ("STOP_LOSS", "STOP_LOSS_LIMIT", "STOP_MARKET")
+                                and str(o.get("status", "")).upper() == "CLOSED"
+                                and float(o.get("filled", 0) or 0) > 0
+                            ]
+                            if _sl_fills:
+                                _latest = sorted(_sl_fills, key=lambda o: o.get("timestamp", 0))[-1]
+                                _bracket_qty = float(_latest.get("filled", 0) or 0)
+                                _bracket_price = float(_latest.get("average") or _latest.get("price") or 0)
+                        except Exception as _bfp_err:
+                            logger.debug(f"[ForwardEngine] F-108 bracket fill-price lookup failed: {_bfp_err}")
+                        # Final fallback: use SL level as bracket price estimate
+                        if _bracket_price == 0.0 and trade.stop_loss:
+                            _bracket_qty = trade.quantity
+                            _bracket_price = trade.stop_loss
+                    elif 0 < _free_now < trade.quantity:
+                        _bracket_qty = round(trade.quantity - _free_now, 8)
+                        # Try to get actual bracket fill price
+                        try:
+                            _closed = await broker.exchange.fetch_closed_orders(trade.symbol, limit=10)
+                            _sl_fills = [
+                                o for o in _closed
+                                if str(o.get("type", "")).upper() in ("STOP_LOSS", "STOP_LOSS_LIMIT", "STOP_MARKET")
+                                and str(o.get("status", "")).upper() == "CLOSED"
+                                and float(o.get("filled", 0) or 0) > 0
+                            ]
+                            if _sl_fills:
+                                _latest = sorted(_sl_fills, key=lambda o: o.get("timestamp", 0))[-1]
+                                _bracket_price = float(_latest.get("average") or _latest.get("price") or 0)
+                        except Exception as _bfp_err:
+                            logger.debug(f"[ForwardEngine] F-108 bracket fill-price lookup failed: {_bfp_err}")
+                        # Fallback: use stop_loss level as bracket price estimate
+                        if _bracket_price == 0.0 and trade.stop_loss:
+                            _bracket_price = trade.stop_loss
+                        _close_qty = _free_now
+                        logger.info(
+                            f"[ForwardEngine] F-108: {trade.symbol} bracket filled {_bracket_qty:.4f} "
+                            f"@ ~{_bracket_price}, remnant {_close_qty:.4f} free — selling remnant"
+                        )
+                except Exception as _f108_err:
+                    logger.debug(f"[ForwardEngine] F-108 balance check failed: {_f108_err}")
+            if _do_market_close:
+                try:
+                    close_result = await broker.place_order(
+                        symbol=trade.symbol,
+                        side=side,
+                        quantity=_close_qty,
+                        order_type="market",
+                    )
+                    # Use broker-confirmed fill price for PnL accuracy
+                    if close_result.fill_price:
+                        _remnant_fill = close_result.fill_price
+                        # F-108: compute weighted average exit across bracket fill + remnant fill
+                        # so the recorded PnL reflects the full original position cost.
+                        if _bracket_qty > 0 and _bracket_price > 0:
+                            exit_price = round(
+                                (_bracket_qty * _bracket_price + _close_qty * _remnant_fill) / trade.quantity, 8
+                            )
+                            logger.info(
+                                f"[ForwardEngine] Close order filled @ {_remnant_fill} (confirmed) — "
+                                f"weighted avg exit {exit_price} "
+                                f"(bracket {_bracket_qty:.4f}@{_bracket_price} + remnant {_close_qty:.4f}@{_remnant_fill})"
+                            )
+                        else:
+                            exit_price = _remnant_fill
+                            logger.info(f"[ForwardEngine] Close order filled @ {exit_price} (confirmed)")
+                    elif exit_price:
+                        logger.warning(
+                            f"[ForwardEngine] Close order {close_result.order_id} not confirmed filled — "
+                            f"using price snapshot ({exit_price}) for PnL"
+                        )
+                    else:
+                        raise RuntimeError("Close order unconfirmed and no price snapshot available")
+                except RuntimeError:
+                    raise
+                except Exception as _close_err:
+                    # F-103b: revert the atomic guard (PENDING→OPEN) so the next scheduler tick
+                    # can retry instead of leaving the trade permanently stuck as PENDING.
+                    if db_session is not None and trade.id is not None:
+                        from sqlalchemy import update as _upd_revert
+                        _TradeModelRevert = type(trade)
+                        try:
+                            await db_session.execute(
+                                _upd_revert(_TradeModelRevert)
+                                .where(_TradeModelRevert.id == trade.id, _TradeModelRevert.status == OrderStatus.PENDING)
+                                .values(status=OrderStatus.OPEN)
+                            )
+                            await db_session.flush()
+                        except Exception:
+                            pass
+                    logger.error(
+                        f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
+                        "— guard reverted to OPEN for retry next tick"
+                    )
+                    raise
+
+        # F-108: when bracket filled the entire position (free=0 after cancel),
+        # no market sell was sent — override exit_price with the bracket's fill price.
+        # Short-circuit AND: if _skip_market_order=True, _do_market_close is never evaluated.
+        if not _skip_market_order and not _do_market_close and _bracket_price > 0:
+            exit_price = _bracket_price
 
         # ── Compute realised PnL ──────────────────────────────────────────
         if exit_price and trade.entry_price:
-            # F-071: COVER trades are long (bought to cover a short), so they
-            # profit when price rises — same sign as BUY.
+            # Always use the full original trade.quantity for PnL — exit_price is
+            # already the weighted average across any bracket fill + remnant fill (F-108),
+            # so multiplying by the full qty gives the correct total realised P&L.
             side_mult = 1.0 if trade.side in _long_sides else -1.0
             raw_pnl = (exit_price - trade.entry_price) * trade.quantity * side_mult
             trade.exit_price = round(exit_price, 8)

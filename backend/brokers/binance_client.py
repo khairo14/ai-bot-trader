@@ -186,14 +186,20 @@ class BinanceClient(AbstractBroker):
         positions = []
         for asset, info in items:
             free = float(info.get("free", 0))
-            if free > 0 and asset != "USDT":
+            locked = float(info.get("locked", 0))
+            total = free + locked
+            # F-108: include locked balance — Binance spot locks the full quantity in
+            # standing bracket SL/TP orders.  Without this, F-103 in close_position()
+            # incorrectly sees "no position" and skips the cancel+sell flow, causing
+            # the trade to stay open or close at the wrong price.
+            if total > 0 and asset != "USDT":
                 symbol = f"{asset}/USDT"
                 try:
                     price = await self.get_price(symbol)
                     positions.append(Position(
                         symbol=symbol,
                         side="long",
-                        quantity=free,
+                        quantity=total,
                         entry_price=price,  # spot has no tracked entry; use current price → PnL = 0
                         current_price=price,
                         unrealized_pnl=0.0,
@@ -266,13 +272,12 @@ class BinanceClient(AbstractBroker):
             # placing two separate exit orders achieves the same protection.
             result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
             exit_side = "sell" if side == "buy" else "buy"
-            # SL guard
+            # SL guard — use STOP_LOSS (market-on-trigger) not STOP_LOSS_LIMIT so the
+            # full quantity is guaranteed to fill even when price gaps through the level.
             for _attempt in range(2):
                 try:
-                    _sl_limit = round(stop_price * (0.999 if exit_side == "sell" else 1.001), 8)
                     await self.exchange.create_order(
-                        symbol, "STOP_LOSS_LIMIT", exit_side, quantity,
-                        price=_sl_limit,
+                        symbol, "STOP_LOSS", exit_side, quantity,
                         params={"stopPrice": stop_price}
                     )
                     break
@@ -299,12 +304,11 @@ class BinanceClient(AbstractBroker):
             exit_side = "sell" if side == "buy" else "buy"
             # F-082: retry once (0.5 s delay) so transient Binance errors don't silently
             # leave a position unprotected.  Log at ERROR on permanent failure.
+            # STOP_LOSS (market-on-trigger) guarantees full fill on gap moves.
             for _attempt in range(2):
                 try:
-                    _sl_limit = round(stop_price * (0.999 if exit_side == "sell" else 1.001), 8)
                     await self.exchange.create_order(
-                        symbol, "STOP_LOSS_LIMIT", exit_side, quantity,
-                        price=_sl_limit,
+                        symbol, "STOP_LOSS", exit_side, quantity,
                         params={"stopPrice": stop_price}
                     )
                     break  # success
@@ -388,6 +392,38 @@ class BinanceClient(AbstractBroker):
             logger.error(f"[Binance] Cancel order failed: {e}")
             return False
 
+    async def cancel_open_orders(self, symbol: str) -> None:
+        """
+        Cancel all open orders for *symbol* (SL guard, TP limit, etc.) so the
+        asset balance is freed before a software-generated market close order.
+        Binance spot locks the full quantity in each standing exit order, which
+        causes a subsequent market sell to fail with "insufficient balance".
+
+        Uses the atomic DELETE /api/v3/openOrders endpoint (cancel_all_orders)
+        rather than a fetch-then-cancel loop.  The atomic endpoint is more reliable
+        on testnet where fetch_open_orders can return stale/empty data while orders
+        still hold the balance locked.
+        """
+        try:
+            result = await self.exchange.cancel_all_orders(symbol)
+            cancelled = len(result) if isinstance(result, list) else 0
+            if cancelled:
+                logger.info(f"[Binance] Cancelled {cancelled} open order(s) for {symbol} before market close")
+        except Exception as exc:
+            # Fallback: fetch-then-cancel loop (older ccxt or endpoint unavailable)
+            logger.debug(f"[Binance] cancel_all_orders unavailable for {symbol} ({exc}), falling back to fetch+cancel")
+            try:
+                open_orders = await self.exchange.fetch_open_orders(symbol)
+                for order in open_orders:
+                    try:
+                        await self.exchange.cancel_order(str(order["id"]), symbol)
+                    except Exception as _ce:
+                        logger.debug(f"[Binance] cancel_open_orders: could not cancel {order.get('id')}: {_ce}")
+                if open_orders:
+                    logger.info(f"[Binance] Cancelled {len(open_orders)} open order(s) for {symbol} (fallback)")
+            except Exception as _fb_exc:
+                logger.warning(f"[Binance] cancel_open_orders failed for {symbol}: {_fb_exc}")
+
     async def get_order_status(self, order_id: str, symbol: str) -> OrderResult:
         result = await self.exchange.fetch_order(order_id, symbol)
         return OrderResult(
@@ -469,8 +505,16 @@ class BinanceClient(AbstractBroker):
         import websockets
 
         streams = "/".join([f"{s.replace('/', '').lower()}@aggTrade" for s in symbols])
-        base_url = "wss://testnet.binance.vision/stream" if self._paper else "wss://stream.binance.com:9443/stream"
-        url = f"{base_url}?streams={streams}"
+        # Testnet uses /ws/ path; live uses /stream?streams= combined feed.
+        # Note: price_stream_manager always uses force_paper=False (live feed) for
+        # SL/TP evaluation, so this testnet branch is only hit if explicitly testing
+        # the WebSocket with a paper BinanceClient directly.
+        if self._paper:
+            # Testnet only supports single-stream /ws/<stream> — use first symbol.
+            first_stream = f"{symbols[0].replace('/', '').lower()}@aggTrade"
+            url = f"wss://testnet.binance.vision/ws/{first_stream}"
+        else:
+            url = f"wss://stream.binance.com:9443/stream?streams={streams}"
 
         logger.info(f"[Binance] Starting price stream for: {symbols}")
         async with websockets.connect(url) as ws:
