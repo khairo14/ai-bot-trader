@@ -53,6 +53,8 @@ class BacktestRequest(BaseModel):
     risk_per_trade_pct: float = 2.0
     broker: str = "binance"
     parameters: Optional[dict] = None
+    min_rr_ratio: float = 2.0           # mirrors DEFAULT_RR_RATIO in config
+    max_consecutive_losses: int = 3     # mirrors MAX_CONSECUTIVE_LOSSES in config
 
 
 # Broker capability rules:
@@ -132,6 +134,8 @@ async def run_backtest(request: BacktestRequest, db: AsyncSession = Depends(get_
         risk_per_trade_pct=request.risk_per_trade_pct,
         broker=request.broker,
         parameters=request.parameters or {},
+        min_rr_ratio=request.min_rr_ratio,
+        max_consecutive_losses=request.max_consecutive_losses,
     )
 
     if "error" in result:
@@ -146,6 +150,7 @@ async def run_backtest(request: BacktestRequest, db: AsyncSession = Depends(get_
         "sortino_ratio", "profit_factor", "win_rate_pct", "total_trades",
         "avg_win", "avg_loss", "rr_ratio", "trades_detail", "parameters",
     }
+    # filters_applied is not stored in DB (no column) — returned in API response only
     db_result = BacktestResult(**{k: v for k, v in result.items() if k in _ALLOWED})
     db.add(db_result)
     await db.commit()

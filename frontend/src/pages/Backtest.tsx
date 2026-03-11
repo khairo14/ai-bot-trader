@@ -79,6 +79,8 @@ export default function Backtest() {
     commission_pct: 0.1,
     slippage_pct: 0.05,
     broker: 'binance',
+    min_rr_ratio: 2.0,
+    max_consecutive_losses: 3,
   })
 
   // Strategies available for the currently selected broker
@@ -259,7 +261,7 @@ export default function Backtest() {
               onChange={e => setForm(f => ({ ...f, timeframe: e.target.value }))}
               className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
             >
-              {['1m','5m','15m','30m','1h','2h','4h','6h','12h','1d'].map(tf => (
+              {['1m','3m','5m','15m','30m','1h','2h','4h','6h','12h','1d','1w'].map(tf => (
                 <option key={tf} value={tf}>{tf}</option>
               ))}
             </select>
@@ -272,6 +274,8 @@ export default function Backtest() {
             { label: 'Initial Capital ($)', key: 'initial_capital', type: 'number' },
             { label: 'Commission (%)', key: 'commission_pct', type: 'number' },
             { label: 'Slippage (%)', key: 'slippage_pct', type: 'number' },
+            { label: 'Min R:R Ratio', key: 'min_rr_ratio', type: 'number' },
+            { label: 'Max Consecutive Losses', key: 'max_consecutive_losses', type: 'number' },
           ].map(({ label, key, type, placeholder }) => (
             <div key={key}>
               <label className="text-xs text-gray-500 block mb-1">{label}</label>

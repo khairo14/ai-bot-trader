@@ -32,6 +32,8 @@ class BacktestEngine:
         risk_per_trade_pct: float = 2.0,
         broker: str = "binance",
         parameters: Optional[dict] = None,
+        min_rr_ratio: float = 2.0,
+        max_consecutive_losses: int = 3,
     ) -> dict:
         """Run a full backtest and return performance metrics."""
 
@@ -75,6 +77,7 @@ class BacktestEngine:
             df, symbol, timeframe, start_date, end_date,
             strategy_name, initial_capital, commission_pct,
             slippage_pct, risk_per_trade_pct, parameters,
+            min_rr_ratio, max_consecutive_losses,
         )
 
     def _run_sync(
@@ -90,9 +93,13 @@ class BacktestEngine:
         slippage_pct: float,
         risk_per_trade_pct: float,
         parameters,
+        min_rr_ratio: float = 2.0,
+        max_consecutive_losses: int = 3,
     ) -> dict:
         """Synchronous candle-replay loop and metrics calculation.
-        Runs in a thread pool to avoid blocking the event loop."""
+        Runs in a thread pool to avoid blocking the event loop.
+        Applies the same gates as live trading: R:R filter and consecutive-loss
+        circuit breaker, so backtest results match real forward-test behaviour."""
 
         # Warm-up period (first 50 candles for indicator calculation)
         warmup = 50
@@ -102,6 +109,11 @@ class BacktestEngine:
         equity_curve = [capital]
         commission = commission_pct / 100
         slippage = slippage_pct / 100
+        # Live-trading gate state — mirrors ForwardEngine / RiskManager behaviour
+        consecutive_losses = 0   # resets on win; trips CB when >= max_consecutive_losses
+        circuit_breaker = False  # once tripped, no new entries for rest of backtest
+        signals_skipped_rr = 0  # informational counter
+        signals_skipped_cb = 0  # informational counter
 
         def _ts(val) -> str:
             """Convert a pandas Timestamp or datetime to ISO string."""
@@ -164,17 +176,37 @@ class BacktestEngine:
                         "pnl_pct": round(pnl / initial_capital * 100, 4),
                         "exit_reason": exit_reason,
                     })
+                    # ── Consecutive-loss circuit breaker (mirrors RiskManager) ──
+                    if pnl > 0:
+                        consecutive_losses = 0
+                    else:
+                        consecutive_losses += 1
+                        if consecutive_losses >= max_consecutive_losses:
+                            circuit_breaker = True
                     position = None
 
             # Generate new signal if not in position
             if position is None and capital > 0:
+                # ── Circuit breaker gate (mirrors RiskManager) ──────────────
+                if circuit_breaker:
+                    signals_skipped_cb += 1
+                    equity_curve.append(capital)
+                    continue
+
                 signal = self.signal_engine.get_strategy(strategy_name).generate_signal(
                     window, symbol=symbol, timeframe=timeframe, **(parameters or {})
                 )
 
                 if signal.signal in ("BUY", "SHORT") and signal.stop_loss and signal.take_profit:
-                    risk_amount = capital * (risk_per_trade_pct / 100)
+                    # ── R:R gate (mirrors RiskManager Level 1) ──────────────
                     stop_dist = abs(current_price - signal.stop_loss)
+                    reward    = abs(signal.take_profit - current_price)
+                    if stop_dist > 0 and (reward / stop_dist) < min_rr_ratio:
+                        signals_skipped_rr += 1
+                        equity_curve.append(capital)
+                        continue
+
+                    risk_amount = capital * (risk_per_trade_pct / 100)
                     if stop_dist > 0:
                         qty = risk_amount / stop_dist
                         fill_price = current_price * (1 + slippage if signal.signal == "BUY" else 1 - slippage)
@@ -264,6 +296,13 @@ class BacktestEngine:
             "rr_ratio": round(_safe(avg_win / (avg_loss + 1e-10)), 4),
             "trades_detail": trades,
             "parameters": parameters or {},
+            # Filters applied — helps explain lower trade counts vs unfiltered runs
+            "filters_applied": {
+                "min_rr_ratio": min_rr_ratio,
+                "max_consecutive_losses": max_consecutive_losses,
+                "signals_skipped_rr": signals_skipped_rr,
+                "signals_skipped_circuit_breaker": signals_skipped_cb,
+            },
         }
 
         logger.info(
