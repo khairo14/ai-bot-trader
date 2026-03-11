@@ -185,7 +185,7 @@ const isFxPair = (sym: string) => /^[A-Za-z]{3}\/[A-Za-z]{3}$/.test(sym)
 // ─── Constants ─────────────────────────────────────────────────────────────────
 const MA_COLORS  = ['#06b6d4', '#f97316', '#84cc16', '#ec4899', '#8b5cf6', '#14b8a6']
 const BROKERS    = ['binance', 'alpaca', 'ibkr'] as const
-const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d', '3d', '1w']
+const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '3d', '1w']
 const PRESETS    = ['1W', '1M', '3M', '6M', '1Y', 'Custom'] as const
 type Preset = typeof PRESETS[number]
 const BROKER_DEFAULT: Record<string, string> = { binance: 'BTC/USDT', alpaca: 'AAPL', ibkr: 'SPY' }

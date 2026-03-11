@@ -123,7 +123,7 @@ function ConfluenceCard({ data }: { data: ConfluenceData }) {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 const BROKERS = ['binance', 'alpaca', 'ibkr']
-const TF_OPTIONS = ['5m', '15m', '1h', '4h', '1d']
+const TF_OPTIONS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w']
 const DEFAULT_SYMBOLS: Record<string, string> = {
   binance: 'BTC/USDT',
   alpaca:  'SPY',

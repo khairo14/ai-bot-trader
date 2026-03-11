@@ -40,7 +40,7 @@ function deriveAssetClass(broker: string, symbol: string, currentStratType: stri
 // Option-only strategies always force asset_class = 'option'
 const OPTION_STRATEGIES = new Set(['iron_condor', 'covered_call', 'bull_call_spread'])
 
-const TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d']
+const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w']
 
 const ModeBadge = ({ mode }: { mode: string }) => {
   const colors: Record<string, string> = {

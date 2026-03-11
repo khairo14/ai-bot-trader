@@ -36,7 +36,7 @@ const BROKER_WATCHLISTS: Record<string, string[]> = {
   ibkr:    ['us_stocks', 'us_stocks_mid', 'eu_stocks', 'forex_major'],
 }
 
-const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '2h', '4h', '1d']
+const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w']
 
 const WATCHLIST_LABELS: Record<string, string> = {
   crypto_major:  'Crypto — Major (BTC, ETH, SOL…)',
