@@ -392,18 +392,17 @@ class ForwardEngine:
                 else:
                     # G1: same-direction position already OPEN — block pyramiding unless
                     # ML confidence is high enough to justify a fresh re-entry.
-                    # g1_override_min_confidence in strategy params opts-in to this;
-                    # when confidence >= threshold, allow the new entry trusting the model's
-                    # own SL/TP fully (no artificial tightening — we trust the model).
-                    _g1_threshold = None
+                    # g1_override_min_confidence in strategy params overrides the global
+                    # default of 0.75 (75%). Any broker, any pair, any timeframe.
+                    _G1_DEFAULT_THRESHOLD = 0.75
+                    _g1_threshold = _G1_DEFAULT_THRESHOLD
                     if strategy_params:
                         try:
                             _g1_threshold = float(strategy_params["g1_override_min_confidence"])
                         except (KeyError, TypeError, ValueError):
                             pass
                     if (
-                        _g1_threshold is not None
-                        and signal.confidence is not None
+                        signal.confidence is not None
                         and signal.confidence >= _g1_threshold
                     ):
                         logger.info(
@@ -433,16 +432,16 @@ class ForwardEngine:
                         f"[ForwardEngine] Failed to close opposing position for {_existing.symbol}: {_rev_err}"
                     )
             else:
-                # G1 in-memory path — same override logic
-                _g1_threshold_mem = None
+                # G1 in-memory path — same override logic, same global default
+                _G1_DEFAULT_THRESHOLD_MEM = 0.75
+                _g1_threshold_mem = _G1_DEFAULT_THRESHOLD_MEM
                 if strategy_params:
                     try:
                         _g1_threshold_mem = float(strategy_params["g1_override_min_confidence"])
                     except (KeyError, TypeError, ValueError):
                         pass
                 if (
-                    _g1_threshold_mem is not None
-                    and signal.confidence is not None
+                    signal.confidence is not None
                     and signal.confidence >= _g1_threshold_mem
                 ):
                     logger.info(

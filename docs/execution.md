@@ -27,6 +27,11 @@ The execution engine is responsible for translating signals into actual orders (
 | Real-time price streaming | ✅ Complete | `core/engine/price_stream.py` — `PriceStreamManager` singleton; one asyncio Task per broker |
 | SL/TP concurrency lock | ✅ Complete | `_MONITOR_SL_TP_LOCK` in `forward_engine.py` — prevents duplicate monitor runs |
 | Static SL enforcement | ✅ Fixed | Static stop loss now checked for all trades, not only trailing-stop trades (BUG-1) |
+| G1 override (ML re-entry) | ✅ Complete | Global default 0.75 (75% confidence); overridable per strategy via `g1_override_min_confidence` |
+| Trailing stop ratchet | ✅ Complete | SL moves in favourable direction only; synced to broker standing order + WebSocket broadcast |
+| Binance bracket partial-fill fix | ✅ Fixed | F-108: fetches real free balance after cancel; weighted avg exit price; broker SL now `STOP_LOSS` (market) |
+| IBKR reconnect resilience | ✅ Fixed | Exponential backoff 15s→300s; Error 326 guard (120s cooldown); 20-failure cap stops runaway loop |
+| Price stream live-feed only | ✅ Fixed | `PriceStreamManager` always connects to the live (non-paper) broker so SL/TP evaluates real market prices |
 
 ---
 
@@ -85,6 +90,68 @@ Exit when target hit, stop hit, or exit signal fires
 All actions logged to DB + dashboard updated
 ```
 **Use when:** 24/7 autonomous operation. Human sets parameters and reviews performance.
+
+---
+
+## G1 Override — ML-Confidence Re-Entry
+
+By default (`G1` rule) the engine blocks opening a second trade in the **same direction** on the same symbol if one is already open. This prevents unintended pyramiding.
+
+When the ML model is highly confident, G1 can be overridden to allow a fresh re-entry alongside the existing position.
+
+### How It Works
+
+```
+New BUY signal fires for BTC/USDT
+  ↓
+Engine finds existing LONG BTC/USDT already open
+  ↓
+ML confidence check:
+  signal.confidence >= g1_override_min_confidence?
+    YES (≥ 0.75) → new entry allowed with its own SL/TP
+    NO  (< 0.75) → signal blocked, logged, discarded
+```
+
+### Configuration
+
+| Parameter | Default | Scope |
+|---|---|---|
+| `g1_override_min_confidence` | **0.75 (global code default)** | Per-strategy override via `parameters.g1_override_min_confidence` |
+
+- **0.75** = 75% ML confidence required (current global default)
+- Works across **all brokers, all pairs, all timeframes** — no per-broker or per-symbol setup needed
+- Per-strategy override: set `g1_override_min_confidence` in the strategy's parameters JSON to a different value (e.g. `0.85` for more conservative, `0.65` for more aggressive)
+- If the ML model has not yet been trained for a symbol, `signal.confidence` will be `0.0` — override will never trigger
+- The re-entry gets its **own independent SL/TP** from the new signal — the existing position is untouched
+- No duplication risk: each entry is a separate `trades` row with its own lifecycle
+
+---
+
+## Trailing Stop Ratchet
+
+When a strategy has `trailing_stop_pct` configured, the SL/TP monitor moves the stop loss in the profitable direction every heartbeat tick.
+
+### Mechanics
+
+| Side | Formula | Move Direction |
+|---|---|---|
+| Long | `new_SL = bid × (1 − trail_pct%)` | Only UP — never widens |
+| Short | `new_SL = ask × (1 + trail_pct%)` | Only DOWN — never widens |
+
+### What Happens on Every Ratchet
+
+1. New SL written to `trades.stop_loss` in the DB
+2. `broker.update_stop_loss()` called — syncs the standing stop order at the broker
+3. `trailing_stop_moved` WebSocket event broadcast to the frontend (dashboard updates live)
+4. Old SL logged for audit trail
+
+### Configuration
+
+| Parameter | Example | Description |
+|---|---|---|
+| `trailing_stop_pct` | `1.5` | Trail distance as % of current price. `1.5` = SL trails 1.5% behind price |
+
+Set in strategy parameters. If omitted, trailing stop is disabled and a static SL/TP is used instead.
 
 ---
 

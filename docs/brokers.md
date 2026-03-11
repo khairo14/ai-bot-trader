@@ -79,13 +79,27 @@ Binance provides a free testnet at `testnet.binance.vision`. Set `BINANCE_TESTNE
 |---|---|
 | `MARKET` | Instant fill at current price |
 | `LIMIT` | Fill at specified price or better |
-| `STOP_LOSS_LIMIT` | Triggered stop with limit price |
+| `STOP_LOSS` | Market-on-trigger stop (guaranteed fill — used for bracket SL) |
+| `STOP_LOSS_LIMIT` | Triggered stop with limit price (used for trailing stop updates only) |
 | `TAKE_PROFIT_LIMIT` | Triggered take profit with limit price |
 | `OCO` | One-Cancels-the-Other (stop + take profit together) |
 
----
+### Bracket Order Behaviour (F-108)
 
-## 2. Alpaca (Stocks)
+When placing a bracket order (entry + SL + TP), the SL leg uses `STOP_LOSS` (market-on-trigger), **not** `STOP_LOSS_LIMIT`. This ensures the full position quantity is liquidated even when price gaps hard through the stop level.
+
+**Problem solved:** `STOP_LOSS_LIMIT` only partially fills on fast gap moves. The unfilled base-asset quantity remains locked by the standing order, causing every subsequent market-sell attempt to fail with `insufficient balance`. The bot would retry indefinitely.
+
+**Fix applied:**
+- Bracket SL uses `STOP_LOSS` (market order triggered at `stopPrice`) — guaranteed full fill
+- After SL fires, `cancel_open_orders()` uses the atomic `DELETE /api/v3/openOrders` endpoint, with a fetch-and-cancel fallback
+- `get_positions()` counts `free + locked` balance so the engine sees the correct position size even while bracket orders hold the asset
+- If a partial bracket fill is detected (F-108), the engine fetches the actual fill price from `fetch_closed_orders`, sells the remaining free balance as a market order, and computes a **weighted average exit price** across both fills for accurate PnL recording
+
+### Testnet Notes
+- Paper trading uses `testnet.binance.vision` (separate API keys required)
+- WebSocket price stream uses `/ws/<stream>` path on testnet (different from production `/stream?streams=`)
+- `PriceStreamManager` always connects to the **live** Binance WebSocket even for paper strategies, ensuring SL/TP is evaluated against real market prices
 
 **Asset Classes:** US Stocks, ETFs, Crypto (limited)
 **API Type:** Official REST + WebSocket
@@ -192,7 +206,22 @@ IBKR_CLIENT_ID_CELERY=2 # Must differ from IBKR_CLIENT_ID — used by Celery wor
 IBKR_PAPER=true         # Set to false for live trading
 ```
 
-> **IBKR Client ID Collision:** IB Gateway rejects a second connection that shares a client ID with an existing session. The bot validates at startup that `IBKR_CLIENT_ID ≠ IBKR_CLIENT_ID_CELERY` and raises a `ValueError` if they match, preventing silent Celery order failures.
+> **IBKR Client ID Collision:** IB Gateway rejects a second connection that shares a client ID with an existing session (Error 326). The bot validates at startup that `IBKR_CLIENT_ID ≠ IBKR_CLIENT_ID_CELERY` and raises a `ValueError` if they match, preventing silent Celery order failures.
+
+### Reconnection Resilience
+
+The IBKR background reconnect loop uses exponential backoff and handles Error 326 (clientId conflict) separately from genuine network failures:
+
+| Scenario | Behaviour |
+|---|---|
+| Transient network drop | Reconnects immediately; backoff resets on success |
+| Repeated failures | Backoff doubles each cycle: 15s → 30s → 60s → 120s → 300s (cap) |
+| Error 326 (clientId in use) | 120s cooldown — waits for stale TWS socket to release, then retries |
+| 20 consecutive genuine failures | Loop exits with `CRITICAL` log; container restart recovers it |
+
+- Backoff resets to 15s on every successful reconnect so short outages recover quickly
+- Error 326 does **not** count toward the consecutive-failure cap — it's an expected transient state after a crash/restart until the old socket times out (~60–90s in TWS)
+- Celery workers get `clientId = IBKR_CLIENT_ID_CELERY` (default: 2); FastAPI gets `IBKR_CLIENT_ID` (default: 1) — they never interfere with each other's TWS session
 
 ### Minimum Balance Requirements
 - **Paper account:** No minimum (free, unlimited)
