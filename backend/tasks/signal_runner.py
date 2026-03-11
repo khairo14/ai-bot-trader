@@ -18,10 +18,15 @@ _TRACKABLE_SIGNALS = {"BUY", "SELL", "SHORT", "COVER"}
 # Multi-timeframe confluence: map each TF to the two higher ones to check
 _HIGHER_TF: dict[str, list[str]] = {
     "1m":  ["5m",  "1h"],
+    "3m":  ["15m", "1h"],   # GAP-1 FIX: was missing → returned [] → confluence bypassed
     "5m":  ["1h",  "4h"],
     "15m": ["1h",  "4h"],
+    "30m": ["4h",  "1d"],   # GAP-1 FIX
     "1h":  ["4h",  "1d"],
+    "2h":  ["1d",  "1w"],   # GAP-1 FIX
     "4h":  ["1d",  "1w"],
+    "6h":  ["1d",  "1w"],   # GAP-1 FIX
+    "12h": ["1d",  "1w"],   # GAP-1 FIX
     "1d":  [],  # already highest common TF — no suppression
     "1w":  [],
 }

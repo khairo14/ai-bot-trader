@@ -1087,6 +1087,36 @@ class ForwardEngine:
         # Use streamed prices (sub-second) where available; fall back to REST.
         from core.engine.price_stream import price_stream_manager as _psm
 
+        # GAP-7 FIX: batch-fetch all uncached prices in parallel BEFORE the trade loop
+        # to avoid sequential REST calls (each ~300ms for IBKR) when streaming is down.
+        _prefetch: list[tuple[tuple, str, str, bool]] = []
+        _seen_prefetch: set[tuple] = set()
+        for _t in open_trades:
+            if _t.stop_loss is None and _t.take_profit is None and _t.trailing_stop_pct is None:
+                continue
+            _t_broker = _t.broker.value if hasattr(_t.broker, "value") else str(_t.broker)
+            _t_key = (_t_broker, _t.is_paper, _t.symbol)
+            if _psm.get_price(_t.symbol) is None and _t_key not in _price_cache and _t_key not in _seen_prefetch:
+                _prefetch.append((_t_key, _t_broker, _t.symbol, _t.is_paper))
+                _seen_prefetch.add(_t_key)
+        if _prefetch:
+            async def _fetch_bid_ask_one(ck, bn, sym, ip):
+                try:
+                    _b = get_broker(bn, force_paper=ip)
+                    await _b.connect()
+                    bid, ask = await _b.get_bid_ask(sym)
+                    return ck, bid, ask
+                except Exception as _fe:
+                    logger.debug(f"[ForwardEngine] batch price prefetch failed {sym}: {_fe}")
+                    return ck, None, None
+            _pf_results = await asyncio.gather(
+                *[_fetch_bid_ask_one(ck, bn, sym, ip) for ck, bn, sym, ip in _prefetch],
+                return_exceptions=False,
+            )
+            for _ck, _bid, _ask in _pf_results:
+                if _bid is not None:
+                    _price_cache[_ck] = (_bid, _ask)
+
         for trade in open_trades:
             # Skip price fetch entirely if this trade has nothing to monitor:
             # no SL, no TP, no trailing stop, and no time-based exit params.
@@ -1570,3 +1600,17 @@ class ForwardEngine:
         """Re-enable trading after emergency stop."""
         self._emergency_stop_active = False
         logger.info("[ForwardEngine] Trading resumed after emergency stop.")
+
+
+# ── Module-level singleton (GAP-6 FIX) ──────────────────────────────────────────────────────────
+# Shared instance for the SL/TP heartbeat and manual-execute paths.
+# NOT used by _run_one_strategy (concurrent, needs per-call isolation).
+_forward_engine_instance: "ForwardEngine | None" = None
+
+
+def get_forward_engine() -> ForwardEngine:
+    """Return the process-wide ForwardEngine singleton (mirrors get_risk_manager)."""
+    global _forward_engine_instance
+    if _forward_engine_instance is None:
+        _forward_engine_instance = ForwardEngine()
+    return _forward_engine_instance

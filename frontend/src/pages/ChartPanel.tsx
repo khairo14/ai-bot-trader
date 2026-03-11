@@ -524,12 +524,18 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
           })
         }
 
-        if (t.exit_time && t.exit_price && t.exit_time >= minTime && t.exit_time <= maxTime) {
+        // BUG-5 FIX: drop the `exit_time <= maxTime` hard cutoff.
+        // When a trade closes AFTER the last chart candle (e.g. chart wasn't refreshed),
+        // exit_time > maxTime and the exit circle was silently dropped even though pnl_pct
+        // was already rendered on the entry arrow (causing the confusing "+0.4% but no EXIT
+        // marker" appearance seen on trades #35 and #32).
+        // Mirror the entry-marker snap: clamp to maxTime so the circle always appears.
+        if (t.exit_time && t.exit_price && t.exit_time >= minTime) {
           const won = t.pnl != null ? t.pnl > 0 : null
           const exitColor = won === null ? '#9ca3af' : won ? '#22c55e' : '#ef4444'
           const pnlTag = t.pnl_pct != null ? ` ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct.toFixed(1)}%` : ''
           tradeMarkers.push({
-            time:     t.exit_time as any,
+            time:     Math.min(t.exit_time, maxTime) as any,
             position: isBuy ? 'aboveBar' : 'belowBar',
             color:    exitColor,
             shape:    'circle',

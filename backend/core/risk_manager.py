@@ -182,7 +182,14 @@ class RiskManager:
         _max_consec        = int(bs["max_consecutive_losses"])      if bs.get("max_consecutive_losses")     is not None else self.max_consecutive_losses
         _max_asset_exp     = (bs["max_exposure_per_asset_pct"] / 100.0) if bs.get("max_exposure_per_asset_pct") is not None else self.max_exposure_per_asset_pct
         _max_class_exp     = (bs["max_exposure_per_class_pct"] / 100.0) if bs.get("max_exposure_per_class_pct") is not None else self.max_exposure_per_class_pct
-
+        # BUG-4 FIX: cache the effective per-broker consecutive-loss threshold so
+        # record_outcome() uses the same value rather than always the global default.
+        if broker:
+            _b = self._per_broker.setdefault(
+                broker,
+                {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
+            )
+            _b["max_consecutive_losses_effective"] = _max_consec
         # ── Per-broker circuit breaker (checked first) ────────────────────────
         if broker:
             b_state = self._per_broker.get(broker, {})
@@ -237,9 +244,9 @@ class RiskManager:
         if account_balance > 0:
             daily_loss_pct = daily_pnl / account_balance
             if daily_loss_pct <= -_daily_cb_pct:
-                self._circuit_breaker_active = True
-                self._save_state()
-                # Also trip the per-broker CB so only this broker halts
+                # BUG-3 FIX: trip ONLY the per-broker CB — never the global one from a
+                # per-broker daily-loss check. The global CB halts ALL brokers and should
+                # only fire for portfolio-wide thresholds, not a single broker breach.
                 if broker:
                     b = self._per_broker.setdefault(
                         broker,
@@ -247,7 +254,10 @@ class RiskManager:
                     )
                     b["circuit_breaker_active"] = True
                     b["circuit_breaker_date"] = str(date.today())
-                    self._save_state()
+                else:
+                    # No specific broker context — treat as portfolio-wide daily loss
+                    self._circuit_breaker_active = True
+                self._save_state()
                 logger.warning(
                     f"[RiskManager] CIRCUIT BREAKER TRIGGERED — "
                     f"broker={broker or 'global'} daily loss: {daily_loss_pct*100:.2f}%"
@@ -319,11 +329,11 @@ class RiskManager:
         if signal.take_profit:
             reward = abs(signal.take_profit - signal.entry_price)
             rr = reward / stop_distance
-            if rr < 1.5:
+            if rr < self.default_rr_ratio:  # BUG-2 FIX: use config value, not hardcoded 1.5
                 return RiskValidation(
                     approved=False,
                     position_size=0, position_value=0, risk_amount=0, stop_distance=0,
-                    reason=f"R:R ratio {rr:.2f} below minimum 1.5."
+                    reason=f"R:R ratio {rr:.2f} below minimum {self.default_rr_ratio}."
                 )
 
         # ── All checks passed ─────────────────────────────────────────────────
@@ -392,14 +402,22 @@ class RiskManager:
         """
         # ── Portfolio-wide counter ────────────────────────
         if won:
-            if self.consecutive_losses > 0:
+            # GAP-3 FIX: only reset global counter when the win is from the same broker
+            # that caused the streak — prevents a win on Alpaca zeroing a Binance losing
+            # streak (cross-broker counter contamination).
+            _last_loss_broker = getattr(self, "_last_loss_broker", None)
+            if self.consecutive_losses > 0 and (
+                broker is None or _last_loss_broker is None or broker == _last_loss_broker
+            ):
                 logger.info(
                     f"[RiskManager] Win — resetting portfolio consecutive_losses "
                     f"(was {self.consecutive_losses})"
                 )
-            self.consecutive_losses = 0
+                self.consecutive_losses = 0
+                self._last_loss_broker = None
         else:
             self.consecutive_losses += 1
+            self._last_loss_broker = broker
             logger.warning(
                 f"[RiskManager] Loss — portfolio consecutive_losses={self.consecutive_losses}"
             )
@@ -452,7 +470,9 @@ class RiskManager:
                     f"[RiskManager] Loss on broker '{broker}' — "
                     f"consecutive_losses={b['consecutive_losses']}"
                 )
-                if b["consecutive_losses"] >= self.max_consecutive_losses:
+                # BUG-4 FIX: use broker-specific threshold if cached by validate(), else global
+                _broker_max_consec = b.get("max_consecutive_losses_effective", self.max_consecutive_losses)
+                if b["consecutive_losses"] >= _broker_max_consec:
                     b["circuit_breaker_active"] = True
                     b["circuit_breaker_date"] = str(date.today())
                     logger.warning(

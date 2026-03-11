@@ -22,6 +22,7 @@ from db.models import (
     OrderStatus,
     ExecutionMode,
 )
+from config import settings as _settings
 
 router = APIRouter()
 
@@ -228,11 +229,14 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
     realized_pnl   = sum(t.pnl or 0.0 for t in closed_trades)
     unrealized_pnl = sum(t.pnl or 0.0 for t in open_trades)
     open_count     = len(open_trades)
-    # Total = sum of real API balances for active+connected brokers
-    total_balance = sum(
-        bd["total"] for bd in broker_breakdown
-        if bd["connected"] and bd["is_active"]
-    ) or sum(bd["total"] for bd in broker_breakdown if bd["connected"])
+    # Total = sum of real API balances for active+connected brokers.
+    # GAP-5 FIX: fall back to paper_initial_balance when all brokers are offline
+    # so the dashboard does not show a misleadingly alarming $0.00 balance.
+    total_balance = (
+        sum(bd["total"] for bd in broker_breakdown if bd["connected"] and bd["is_active"])
+        or sum(bd["total"] for bd in broker_breakdown if bd["connected"])
+        or _settings.paper_initial_balance
+    )
 
     # Days running — from earliest paper trade
     first_q = await db.execute(

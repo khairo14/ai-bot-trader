@@ -27,9 +27,9 @@ async def _sl_tp_heartbeat():
          close them via market order if breached (software safety net).
     """
     from db.database import AsyncSessionLocal
-    from core.engine.forward_engine import ForwardEngine
+    from core.engine.forward_engine import get_forward_engine  # GAP-6 FIX: use singleton
 
-    _engine = ForwardEngine()
+    _engine = get_forward_engine()
     logger.info("[SL/TP Heartbeat] Continuous 60s monitor started.")
 
     while True:

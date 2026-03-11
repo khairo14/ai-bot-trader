@@ -272,6 +272,21 @@ class BinanceClient(AbstractBroker):
             # placing two separate exit orders achieves the same protection.
             result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
             exit_side = "sell" if side == "buy" else "buy"
+            # BUG-1 FIX: place TP limit order FIRST, then SL STOP_LOSS order.
+            # Binance spot locks the full base asset when a STOP_LOSS (sell) order is placed.
+            # Placing SL first means free balance = 0 when TP tries to place, causing a
+            # silent "insufficient balance" failure.  A limit sell order does NOT lock
+            # the asset as reserved collateral, so the TP must come first.
+            # TP guard
+            for _attempt in range(2):
+                try:
+                    await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
+                    break
+                except Exception as _tp_err:
+                    if _attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        logger.error(f"[Binance] TP guard (bracket) failed after retry: {_tp_err}")
             # SL guard — use STOP_LOSS (market-on-trigger) not STOP_LOSS_LIMIT so the
             # full quantity is guaranteed to fill even when price gaps through the level.
             for _attempt in range(2):
@@ -286,16 +301,6 @@ class BinanceClient(AbstractBroker):
                         await asyncio.sleep(0.5)
                     else:
                         logger.error(f"[Binance] SL guard (bracket) failed after retry: {_sl_err}")
-            # TP guard
-            for _attempt in range(2):
-                try:
-                    await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
-                    break
-                except Exception as _tp_err:
-                    if _attempt == 0:
-                        await asyncio.sleep(0.5)
-                    else:
-                        logger.error(f"[Binance] TP guard (bracket) failed after retry: {_tp_err}")
             order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif stop_price and not take_profit_price:

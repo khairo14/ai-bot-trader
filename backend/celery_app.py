@@ -27,10 +27,12 @@ celery_app.conf.update(
 
 # Scheduled tasks
 celery_app.conf.beat_schedule = {
-    # Run signal engine every 5 minutes during market hours
-    "run-signals-every-5m": {
+    # Run signal engine every 60 seconds — matches the minimum 1m candle period.
+    # GAP-2 FIX: was 300 (5 min), which skipped 80% of 1m/3m live strategy candles.
+    # The existing candle-dedup logic prevents double-processing on fast ticks.
+    "run-signals-every-60s": {
         "task": "tasks.signal_runner.run_signals",
-        "schedule": 300,  # every 5 minutes
+        "schedule": 60,   # every 60 seconds
     },
     # Resolve pending trade outcomes nightly at 01:30 UTC
     "resolve-outcomes-nightly": {

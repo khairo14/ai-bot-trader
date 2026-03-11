@@ -70,7 +70,8 @@ class AlpacaClient(AbstractBroker):
     async def get_price(self, symbol: str) -> float:
         loop = asyncio.get_running_loop()
         req = StockLatestTradeRequest(symbol_or_symbols=symbol)
-        resp = await loop.run_in_executor(None, lambda: self.data.get_stock_latest_trade(req))
+        # GAP-4 FIX: wrap with timeout so a hanging Alpaca SDK call doesn't block the event loop
+        resp = await asyncio.wait_for(loop.run_in_executor(None, lambda: self.data.get_stock_latest_trade(req)), timeout=10.0)
         return float(resp[symbol].price)
 
     async def get_bid_ask(self, symbol: str) -> tuple[float, float]:
@@ -78,7 +79,7 @@ class AlpacaClient(AbstractBroker):
         loop = asyncio.get_running_loop()
         try:
             req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
-            resp = await loop.run_in_executor(None, lambda: self.data.get_stock_latest_quote(req))
+            resp = await asyncio.wait_for(loop.run_in_executor(None, lambda: self.data.get_stock_latest_quote(req)), timeout=10.0)
             q = resp[symbol]
             bid = float(q.bid_price)
             ask = float(q.ask_price)
@@ -158,7 +159,7 @@ class AlpacaClient(AbstractBroker):
 
     async def get_balance(self) -> Balance:
         loop = asyncio.get_running_loop()
-        account: Any = await loop.run_in_executor(None, self.trading.get_account)
+        account: Any = await asyncio.wait_for(loop.run_in_executor(None, self.trading.get_account), timeout=10.0)
         return Balance(
             total=float(account.portfolio_value),
             available=float(account.cash),  # use cash, not buying_power (which includes margin)
@@ -167,7 +168,7 @@ class AlpacaClient(AbstractBroker):
 
     async def get_positions(self) -> List[Position]:
         loop = asyncio.get_running_loop()
-        raw: Any = await loop.run_in_executor(None, self.trading.get_all_positions)
+        raw: Any = await asyncio.wait_for(loop.run_in_executor(None, self.trading.get_all_positions), timeout=10.0)
         return [
             Position(
                 symbol=p.symbol,
@@ -238,7 +239,7 @@ class AlpacaClient(AbstractBroker):
         _effective_sl: Optional[float] = stop_price
         _effective_tp: Optional[float] = take_profit_price
         try:
-            raw_result: Any = await loop.run_in_executor(None, lambda: self.trading.submit_order(req))
+            raw_result: Any = await asyncio.wait_for(loop.run_in_executor(None, lambda: self.trading.submit_order(req)), timeout=15.0)
         except Exception as _bracket_err:
             # ── Stale SL/TP bracket rejection (Alpaca code 42210000) ─────────
             # When a signal is generated and then executed later, the market may
@@ -382,7 +383,7 @@ class AlpacaClient(AbstractBroker):
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(None, lambda: self.trading.cancel_order_by_id(order_id))
+            await asyncio.wait_for(loop.run_in_executor(None, lambda: self.trading.cancel_order_by_id(order_id)), timeout=10.0)
             return True
         except Exception as e:
             logger.error(f"[Alpaca] Cancel failed: {e}")
