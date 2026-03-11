@@ -114,6 +114,10 @@ class _IBKRManager:
         # Entries are added in place_order (bracket path) and removed in
         # cancel_bracket_subscription() which is called from close_position().
         self._bracket_subscriptions: dict = {}  # symbol_key → contract
+        # Reconnect resilience: exponential backoff + hard-reject guard (Error 326)
+        self._reconnect_backoff: float = 15.0   # current sleep interval (grows on failure)
+        self._reconnect_consec_fails: int = 0   # consecutive failed reconnect cycles
+        self._hard_rejected_until: float = 0.0  # epoch — skip reconnect until this time (Error 326)
 
     # ── background thread / loop ─────────────────────────────────────────────
 
@@ -140,40 +144,77 @@ class _IBKRManager:
         self._loop.run_forever()
 
     async def _reconnect_loop(self) -> None:
-        """Background task: silently reconnect whenever the Gateway drops us."""
-        _RECONNECT_INTERVAL = 15  # seconds between checks (reduced from 30 for faster recovery)
+        """Background task: silently reconnect whenever the Gateway drops us.
+
+        Behaviour:
+        - Error 326 (clientId conflict): back off 120s so the stale TWS socket
+          can time out, then retry — does NOT count as a consecutive failure.
+        - Genuine network failure: exponential backoff 15s → 30s → 60s → … → 300s.
+        - After 20 consecutive genuine failures: stop the loop and log CRITICAL.
+          The FastAPI/Celery process must be restarted to recover (container
+          health-check will handle this in production).
+        """
+        _BACKOFF_MIN = 15.0
+        _BACKOFF_MAX = 300.0
+        _MAX_CONSEC_FAILS = 20
         # Brief initial delay so the loop doesn't race with the first _fetch_async call.
         await asyncio.sleep(5)
         while True:
             try:
                 if self._ib is None or not self._ib.isConnected():
+                    # ── Error 326 backoff guard ──────────────────────────────
+                    remaining = self._hard_rejected_until - time.time()
+                    if remaining > 0:
+                        logger.info(
+                            f"[IBKR] clientId conflict backoff — waiting {remaining:.0f}s "
+                            "for stale TWS socket to release"
+                        )
+                        await asyncio.sleep(min(remaining + 1.0, _BACKOFF_MAX))
+                        continue
+
+                    # ── Normal reconnect attempt ─────────────────────────────
                     logger.info("[IBKR] Connection lost — attempting auto-reconnect …")
                     reconnected = await self._ensure_connected()
+
                     if reconnected and self._ib:
-                        # Re-subscribe to account updates so accountValues() repopulates.
+                        # Success — reset counters and re-subscribe
+                        self._reconnect_consec_fails = 0
+                        self._reconnect_backoff = _BACKOFF_MIN
                         try:
                             self._ib.reqAccountUpdates(True)  # type: ignore[arg-type]
                         except Exception:
                             pass
-                        # F-082: refresh in-memory position cache after reconnect so
-                        # get_positions() (and risk-manager open_count) reflects reality.
-                        # F-101: use reqPositionsAsync() — blocking reqPositions() throws
-                        # "This event loop is already running" inside an async coroutine.
                         try:
                             await self._ib.reqPositionsAsync()
                         except Exception:
                             pass
-                        # F-082: re-subscribe market data for every open bracket order
-                        # so IBKR paper SL/TP child orders regain their price feed.
                         for _sym, _contract in list(self._bracket_subscriptions.items()):
                             try:
                                 self._ib.reqMktData(_contract, "", False, False)
                                 logger.debug(f"[IBKR] Re-subscribed mkt data for bracket: {_sym}")
                             except Exception as _sub_err:
                                 logger.debug(f"[IBKR] Re-subscribe failed for {_sym}: {_sub_err}")
+                    else:
+                        # Failure — exponential backoff, cap consecutive count
+                        self._reconnect_consec_fails += 1
+                        self._reconnect_backoff = min(self._reconnect_backoff * 2, _BACKOFF_MAX)
+                        logger.warning(
+                            f"[IBKR] Reconnect failed ({self._reconnect_consec_fails}/"
+                            f"{_MAX_CONSEC_FAILS}) — next retry in {self._reconnect_backoff:.0f}s"
+                        )
+                        if self._reconnect_consec_fails >= _MAX_CONSEC_FAILS:
+                            logger.critical(
+                                f"[IBKR] {_MAX_CONSEC_FAILS} consecutive reconnect failures — "
+                                "background reconnect loop stopped. Restart the container to recover."
+                            )
+                            return  # stop spinning; container restart will revive this
+                else:
+                    # Already connected — reset backoff so a future drop recovers quickly
+                    self._reconnect_consec_fails = 0
+                    self._reconnect_backoff = _BACKOFF_MIN
             except Exception as exc:
                 logger.debug(f"[IBKR] Auto-reconnect attempt failed: {exc}")
-            await asyncio.sleep(_RECONNECT_INTERVAL)
+            await asyncio.sleep(self._reconnect_backoff)
 
     def _submit(self, coro, timeout: float = 30.0):
         """Run a coroutine on the background loop and block until done."""
@@ -210,6 +251,18 @@ class _IBKRManager:
             self._ib.disconnectedEvent += lambda: logger.warning(
                 "[IBKR] Gateway disconnected — will auto-reconnect"
             )
+            # Detect Error 326 (clientId already in use) — a permanent rejection
+            # until the stale TWS socket times out (~60-90s).  Set a backoff guard
+            # so the reconnect loop doesn't hammer TWS pointlessly.
+            _self_ref = self
+            def _on_ib_error(reqId: int, errorCode: int, errorString: str, contract) -> None:  # type: ignore[type-arg]
+                if errorCode == 326:
+                    logger.warning(
+                        f"[IBKR] clientId {_self_ref._client_id} already in use (Error 326) "
+                        "— backing off 120s for stale TWS socket to release"
+                    )
+                    _self_ref._hard_rejected_until = time.time() + 120.0
+            self._ib.errorEvent += _on_ib_error
 
             # Retry loop: Gateway may still be initialising when Docker starts.
             for attempt in range(self._CONNECT_RETRIES):
