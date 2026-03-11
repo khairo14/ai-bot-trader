@@ -32,10 +32,7 @@ RESOLUTION_HORIZON = 24
 MIN_AGE_HOURS = 4
 
 # Seconds per candle for each supported timeframe
-_TF_SECONDS: dict[str, int] = {
-    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
-    "1h": 3600, "1Hour": 3600, "4h": 14400, "1d": 86400,
-}
+from utils import TIMEFRAME_SECONDS as _TF_SECONDS
 # Sub-hour timeframes whose live history is often limited — fall back gradually
 # GAP-8 FIX: use a graduated chain instead of jumping straight to 1h.
 # e.g. a 1m strategy falls back to 5m → 15m → 30m → 1h before giving up.

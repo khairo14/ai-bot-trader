@@ -421,6 +421,18 @@ class ForwardEngine:
                             f"({signal.confidence:.2f} >= {_g1_threshold}): allowing re-entry "
                             f"{signal.signal} {signal.symbol} alongside id={_existing.id}"
                         )
+                        # Re-query position to confirm it's still OPEN.
+                        # The FastAPI scheduler (monitor_sl_tp) runs in a separate
+                        # process and may have closed this position between the
+                        # initial DB read and now.
+                        if db_session is not None:
+                            _recheck = await db_session.get(Trade, _existing.id)
+                            if _recheck is None or _recheck.status != OrderStatus.OPEN:
+                                logger.info(
+                                    f"[ForwardEngine] G1 re-entry aborted: "
+                                    f"position {_existing.id} was already closed"
+                                )
+                                return None
                         # Fall through — new entry proceeds with signal's own SL/TP
                     else:
                         logger.info(

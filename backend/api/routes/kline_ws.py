@@ -28,11 +28,7 @@ from config import settings as _cfg
 
 router = APIRouter()
 
-_TF_SECS: dict[str, int] = {
-    "1m": 60, "5m": 300, "15m": 900,
-    "1h": 3_600, "4h": 14_400,
-    "1d": 86_400, "3d": 259_200, "1w": 604_800,
-}
+from utils import TIMEFRAME_SECONDS as _TF_SECS
 
 
 @router.websocket("/kline")

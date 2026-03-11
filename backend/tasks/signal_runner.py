@@ -5,6 +5,7 @@ import logging
 import math
 import pathlib
 import time as _time
+from utils import timeframe_to_seconds as _timeframe_to_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -249,12 +250,7 @@ def run_signals(self):
 
                     # F-010: skip if the candle for this timeframe hasn't closed
                     # since we last ran this strategy (avoids 288 runs/day for 1d strategies).
-                    _tf_secs_map = {
-                        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
-                        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200,
-                        "1d": 86400, "1w": 604800,
-                    }
-                    _interval = _tf_secs_map.get(timeframe, 3600)
+                    _interval = _timeframe_to_seconds(timeframe)
                     _now_ts = _time.time()
                     _last_close_ts = math.floor(_now_ts / _interval) * _interval
                     if _last_candle_fired.get(strat.id, 0) >= _last_close_ts:
@@ -443,12 +439,7 @@ def run_signals(self):
                         from sqlalchemy import and_
                         # GAP-4 FIX: added 3m, 30m, 2h, 6h, 12h so these timeframes
                         # get the correct candle-window instead of falling back to 1h.
-                        _tf_seconds = {
-                            "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
-                            "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200,
-                            "1d": 86400, "1w": 604800,
-                        }
-                        _candle_secs = _tf_seconds.get(timeframe, 3600)
+                        _candle_secs = _timeframe_to_seconds(timeframe)
                         _candle_start = datetime.fromtimestamp(
                             int(datetime.now(_tz.utc).timestamp() // _candle_secs) * _candle_secs,
                             tz=_tz.utc,

@@ -59,17 +59,7 @@ def _get_strategy_lock(strategy_id: int) -> "_asyncio.Lock":
 # ─────────────────────────────────────────────────────────────────────────────
 # Timeframe helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-_TF_SECONDS: dict = {
-    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
-    "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200,
-    "1d": 86400, "1w": 604800,
-}
-
-
-def timeframe_to_seconds(tf: str) -> int:
-    """Convert '4h' → 14400, '1d' → 86400, etc. Defaults to 3600 (1h)."""
-    return _TF_SECONDS.get(str(tf).lower(), 3600)
+from utils import TIMEFRAME_SECONDS as _TF_SECONDS, timeframe_to_seconds  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────────────────────

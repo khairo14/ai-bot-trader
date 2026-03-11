@@ -2,6 +2,7 @@
 import { CheckCircle, XCircle, AlertTriangle, RefreshCw, ShieldAlert, ChevronDown, ChevronUp, Brain } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
+import { parseUtc } from '../lib/dates'
 
 interface BrokerStatus {
   name: string
@@ -508,7 +509,7 @@ export default function Settings() {
               <span className="text-gray-500">Last retrain</span>
               <span className="text-gray-400">
                 {mlStatus.last_retrain
-                  ? new Date(mlStatus.last_retrain).toLocaleString()
+                  ? parseUtc(mlStatus.last_retrain)?.toLocaleString()
                   : 'Never — click Retrain Now'}
               </span>
             </div>

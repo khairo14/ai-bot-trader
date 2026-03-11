@@ -3,6 +3,7 @@ import { FlaskConical, Play, AlertTriangle, Download, BookOpen, TrendingUp, Hist
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import { useStrategyRegistry } from '../hooks/useStrategyRegistry'
+import { parseUtc } from '../lib/dates'
 
 interface SavedStrategy {
   id: number
@@ -311,7 +312,7 @@ export default function Backtest() {
                   </h2>
                   {result.created_at && (
                     <p className="text-xs text-gray-600 mt-0.5">
-                      Run {new Date(result.created_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
+                      Run {parseUtc(result.created_at)?.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
                       {backtestId ? ` · #${backtestId}` : ''}
                     </p>
                   )}
@@ -488,7 +489,7 @@ export default function Backtest() {
                           {h.profit_factor?.toFixed(2)}
                         </td>
                         <td className="py-2 pr-3 text-gray-500">
-                          {h.created_at ? new Date(h.created_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '—'}
+                          {h.created_at ? parseUtc(h.created_at)?.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '—'}
                         </td>
                         <td className="py-2 text-right">
                           <div className="flex items-center justify-end gap-1.5">
@@ -590,7 +591,7 @@ export default function Backtest() {
                 </p>
                 {modalResult.created_at && (
                   <p className="text-xs text-gray-600 mt-0.5">
-                    Run {new Date(modalResult.created_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+                    Run {parseUtc(modalResult.created_at)?.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
                   </p>
                 )}
               </div>

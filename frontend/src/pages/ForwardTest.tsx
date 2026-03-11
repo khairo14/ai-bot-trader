@@ -6,6 +6,7 @@ import toast from 'react-hot-toast'
 import { SkeletonLine } from '../components/Skeleton'
 import axios from 'axios'
 import MarketClock from '../components/MarketClock'
+import { parseUtc } from '../lib/dates'
 
 const API = ''   // relative — proxied by Vite to http://localhost:8000
 const TRADES_PAGE_SIZE = 10   // rows per page in the trade history table
@@ -584,7 +585,7 @@ export default function ForwardTest() {
                     </td>
                     <td className="px-3 py-2 text-gray-400 truncate">{pos.strategy_name ?? '—'}</td>
                     <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
-                      {pos.opened_at ? new Date(pos.opened_at).toLocaleTimeString() : '—'}
+                      {pos.opened_at ? parseUtc(pos.opened_at)?.toLocaleTimeString() : '—'}
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1.5">
@@ -778,7 +779,7 @@ export default function ForwardTest() {
                           </td>
                           <td className="px-2 py-2 text-gray-400 truncate">{t.strategy_name ?? '—'}</td>
                           <td className="px-2 py-2 text-gray-500 whitespace-nowrap">
-                            {t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}
+                            {t.opened_at ? parseUtc(t.opened_at)?.toLocaleString() : '—'}
                           </td>
                         </tr>
                       ))}
@@ -912,7 +913,7 @@ export default function ForwardTest() {
                       </p>
                     )}
                     {sig.created_at && (
-                      <p className="text-gray-700">{new Date(sig.created_at).toLocaleTimeString()}</p>
+                      <p className="text-gray-700">{parseUtc(sig.created_at)?.toLocaleTimeString()}</p>
                     )}
                   </div>
                 ))

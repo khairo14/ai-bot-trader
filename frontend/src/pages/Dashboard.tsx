@@ -6,6 +6,7 @@ import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
 import { SkeletonStat, SkeletonList } from '../components/Skeleton'
 import MarketClock from '../components/MarketClock'
+import { parseUtc } from '../lib/dates'
 
 interface Signal {
   id: number
@@ -482,7 +483,7 @@ export default function Dashboard() {
             })()}
             {mlStatus?.last_retrain && (
               <span className="text-xs text-gray-500">
-                Last retrain: {new Date(mlStatus.last_retrain).toLocaleDateString()}
+                Last retrain: {parseUtc(mlStatus.last_retrain)?.toLocaleDateString()}
               </span>
             )}
           </div>
@@ -694,7 +695,7 @@ export default function Dashboard() {
                       </span>
                     </td>
                     <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
-                      {pos.opened_at ? new Date(pos.opened_at).toLocaleTimeString() : '—'}
+                      {pos.opened_at ? parseUtc(pos.opened_at)?.toLocaleTimeString() : '—'}
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1.5">
@@ -787,7 +788,7 @@ export default function Dashboard() {
                         <td className="px-3 py-2 text-gray-400 capitalize">{t.broker}</td>
                         <td className="px-3 py-2 text-gray-400 max-w-[90px] truncate">{t.strategy_name ?? '—'}</td>
                         <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
-                          {t.opened_at ? new Date(t.opened_at).toLocaleString() : '—'}
+                          {t.opened_at ? parseUtc(t.opened_at)?.toLocaleString() : '—'}
                         </td>
                       </tr>
                     ))}

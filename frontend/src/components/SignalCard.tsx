@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { TrendingUp, TrendingDown, Minus, Clock, AlertTriangle, GitBranch } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
+import { parseUtc } from '../lib/dates'
 
 interface OptionsLeg {
   action: string   // BUY | SELL
@@ -107,7 +108,11 @@ export default function SignalCard({ signal }: Props) {
   const reasons: string[] = Array.isArray(signal.reasons) ? signal.reasons : []
 
   // Staleness: warn if signal is older than 5 minutes (price levels are no longer reliable)
-  const ageMs = Date.now() - new Date(signal.created_at).getTime()
+  // Ensure the timestamp is parsed as UTC — the backend stores naive ISO strings
+  // (no 'Z' suffix). Without the appended 'Z', JS treats them as local time,
+  // causing an 8-hour skew (e.g. UTC+8 shows every signal as 480m old).
+  const _createdUtc = parseUtc(signal.created_at)
+  const ageMs = Date.now() - (_createdUtc?.getTime() ?? Date.now())
   const ageMin = Math.floor(ageMs / 60000)
   const isStale = ageMs > 5 * 60 * 1000
 
@@ -143,7 +148,7 @@ export default function SignalCard({ signal }: Props) {
           </span>
           <p className="text-xs text-gray-600 mt-1 flex items-center gap-1 justify-end">
             <Clock size={10} />
-            {new Date(signal.created_at).toLocaleTimeString()}
+            {_createdUtc?.toLocaleTimeString()}
           </p>
         </div>
       </div>

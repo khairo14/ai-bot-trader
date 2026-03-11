@@ -85,8 +85,9 @@ async def _forward_test_scheduler():
     """
     import math
     import time
+    from utils import timeframe_to_seconds
     from api.routes.forward_test import (
-        timeframe_to_seconds, _run_one_strategy, is_market_open,
+        _run_one_strategy, is_market_open,
         _get_strategy_lock, _exec_state,
     )
     from db.database import AsyncSessionLocal
@@ -182,7 +183,10 @@ async def _forward_test_scheduler():
                 try:
                     await _redis.hset("scheduler:last_fired", str(strat.id), last_close)
                 except Exception as _re:
-                    logger.debug(f"[Scheduler] Redis save failed for {strat.name}: {_re}")
+                    logger.warning(
+                        f"[Scheduler] Redis save failed for {strat.name}: {_re} "
+                        "— last_fired state may be lost on restart, strategies may double-fire once"
+                    )
 
                 # Capture loop vars for the task closure
                 _strat = strat

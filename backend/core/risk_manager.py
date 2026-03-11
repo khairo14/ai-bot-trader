@@ -407,7 +407,10 @@ class RiskManager:
             # streak (cross-broker counter contamination).
             _last_loss_broker = getattr(self, "_last_loss_broker", None)
             if self.consecutive_losses > 0 and (
-                broker is None or _last_loss_broker is None or broker == _last_loss_broker
+                # Only reset portfolio streak when the win comes from the same broker
+                # that caused it, or when the loss was never attributed to a specific
+                # broker. A broker=None win must NOT reset a Binance/Alpaca streak.
+                _last_loss_broker is None or broker == _last_loss_broker
             ):
                 logger.info(
                     f"[RiskManager] Win — resetting portfolio consecutive_losses "
