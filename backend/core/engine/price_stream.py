@@ -133,12 +133,19 @@ class PriceStreamManager:
         """
         Background task per broker.  Calls broker.stream_prices() and populates
         self._prices.  Reconnects on error.
+
+        Always uses the live (non-paper) broker for the WebSocket connection so
+        that real market prices are used for SL/TP evaluation even when all open
+        trades are paper/testnet trades.  Binance testnet WebSocket is unreliable;
+        the live feed provides accurate prices for both paper and live monitoring.
         """
         from brokers import get_broker
 
         while True:
             try:
-                broker = get_broker(broker_name)
+                # force_paper=False: always stream from the live market feed.
+                # Paper trade SL/TP should be evaluated against real prices.
+                broker = get_broker(broker_name, force_paper=False)
                 await broker.connect()
 
                 async def _on_price(symbol: str, price: float) -> None:

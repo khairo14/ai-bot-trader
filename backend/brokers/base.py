@@ -122,6 +122,13 @@ class AbstractBroker(ABC):
         """Cancel an open order. Returns True on success."""
         ...
 
+    async def cancel_open_orders(self, symbol: str) -> None:
+        """
+        Cancel all open orders for a symbol.
+        Default no-op — brokers that place bracket exit orders (e.g. Binance)
+        override this to free locked asset balance before a market close.
+        """
+
     @abstractmethod
     async def get_order_status(self, order_id: str, symbol: str) -> OrderResult:
         """Get current status of an order."""
@@ -222,7 +229,7 @@ class AbstractBroker(ABC):
         start_ts = pd.Timestamp(start_dt, tz="UTC") if start_dt.tzinfo is None else pd.Timestamp(start_dt).tz_convert("UTC")
         end_ts   = pd.Timestamp(end_dt,   tz="UTC") if end_dt.tzinfo   is None else pd.Timestamp(end_dt).tz_convert("UTC")
         # Ensure index is UTC-aware for comparison
-        if df.index.tz is None:
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is None:
             df.index = df.index.tz_localize("UTC")
         df = df[(df.index >= start_ts) & (df.index <= end_ts)]
         return df
