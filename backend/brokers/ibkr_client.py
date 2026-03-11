@@ -165,9 +165,9 @@ class _IBKRManager:
                     # ── Error 326 backoff guard ──────────────────────────────
                     remaining = self._hard_rejected_until - time.time()
                     if remaining > 0:
-                        logger.info(
-                            f"[IBKR] clientId conflict backoff — waiting {remaining:.0f}s "
-                            "for stale TWS socket to release"
+                        logger.warning(
+                            f"[IBKR] clientId conflict (Error 326) backoff — IBKR trading suspended, "
+                            f"waiting {remaining:.0f}s for stale TWS socket to release"
                         )
                         await asyncio.sleep(min(remaining + 1.0, _BACKOFF_MAX))
                         continue

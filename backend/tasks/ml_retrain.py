@@ -43,9 +43,15 @@ def retrain_all(self):
                         timeout=5.0,
                     ),
                 )
-                logger.info(
-                    f"[ml_retrain] FastAPI MLScorer cache flush: HTTP {resp.status_code}"
-                )
+                if resp.status_code >= 300:
+                    logger.warning(
+                        f"[ml_retrain] FastAPI MLScorer cache flush FAILED: HTTP {resp.status_code} "
+                        "— FastAPI process may still be using the old model until next restart or retrain"
+                    )
+                else:
+                    logger.info(
+                        f"[ml_retrain] FastAPI MLScorer cache flush: HTTP {resp.status_code}"
+                    )
             except Exception as _http_err:
                 logger.warning(
                     f"[ml_retrain] FastAPI cache flush skipped "
