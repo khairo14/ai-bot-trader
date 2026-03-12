@@ -153,7 +153,7 @@ class Trade(Base):
     __tablename__ = "trades"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    signal_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("signals.id"), nullable=True)
+    signal_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("signals.id"), nullable=True, unique=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     side: Mapped[str] = mapped_column(String(10), nullable=False)      # buy | sell | short | cover
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
@@ -190,7 +190,7 @@ class LiveTrade(Base):
     __tablename__ = "live_trades"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    signal_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("signals.id"), nullable=True)
+    signal_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("signals.id"), nullable=True, unique=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     side: Mapped[str] = mapped_column(String(10), nullable=False)      # buy | sell | short | cover
     quantity: Mapped[float] = mapped_column(Float, nullable=False)

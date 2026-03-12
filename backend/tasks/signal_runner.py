@@ -180,9 +180,14 @@ async def _confluence_score(
                 limit=200,
             )
             votes.append(sig.signal)
+        except ValueError as exc:
+            # No data / bad symbol on this TF — counts as a genuine HOLD vote
+            logger.debug(f"[confluence] {strategy_type} {symbol} {tf} no-data: {exc}")
+            votes.append("HOLD")
         except Exception as exc:
-            logger.debug(f"[confluence] {strategy_type} {symbol} {tf}: {exc}")
-            votes.append("HOLD")  # treat error as neutral
+            # Transient broker/network error — skip this TF from the denominator
+            # so a broker outage doesn't systematically suppress all strategies.
+            logger.debug(f"[confluence] {strategy_type} {symbol} {tf} skipped (error): {exc}")
 
     agreeing = sum(1 for v in votes if v == primary_signal)
     return agreeing / len(votes)

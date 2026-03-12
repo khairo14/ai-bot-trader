@@ -303,6 +303,9 @@ class BinanceClient(AbstractBroker):
                         await asyncio.sleep(0.5)
                     else:
                         logger.error(f"[Binance] TP guard (bracket) failed after retry: {_tp_err}")
+                        raise RuntimeError(
+                            f"[Binance] TP guard (bracket) permanently failed for {symbol}: {_tp_err}"
+                        )
             # SL guard — use STOP_LOSS (market-on-trigger) not STOP_LOSS_LIMIT so the
             # full quantity is guaranteed to fill even when price gaps through the level.
             for _attempt in range(2):
@@ -366,6 +369,9 @@ class BinanceClient(AbstractBroker):
                         await asyncio.sleep(0.5)
                     else:
                         logger.error(f"[Binance] TP guard order failed after retry: {_tp_err}")
+                        raise RuntimeError(
+                            f"[Binance] TP guard permanently failed for {symbol}: {_tp_err}"
+                        )
             order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif order_type == "limit" and price:

@@ -285,15 +285,18 @@ class _IBKRManager:
                     # Push an in-app notification so the operator knows trading is suspended.
                     # Scheduled on the IBKR background loop (this callback is synchronous).
                     if _self_ref._loop and not _self_ref._loop.is_closed():
-                        asyncio.run_coroutine_threadsafe(
-                            _dispatch_ibkr_notif(
-                                "IBKR Trading Suspended — clientId Conflict",
-                                f"Error 326: clientId {_self_ref._client_id} is already in use by "
-                                "another TWS/Gateway session. IBKR trading is suspended for ~180s "
-                                "while the stale socket times out.",
-                            ),
-                            _self_ref._loop,
-                        )
+                        try:
+                            asyncio.run_coroutine_threadsafe(
+                                _dispatch_ibkr_notif(
+                                    "IBKR Trading Suspended — clientId Conflict",
+                                    f"Error 326: clientId {_self_ref._client_id} is already in use by "
+                                    "another TWS/Gateway session. IBKR trading is suspended for ~180s "
+                                    "while the stale socket times out.",
+                                ),
+                                _self_ref._loop,
+                            )
+                        except RuntimeError:
+                            pass  # loop closed between the is_closed() check and use — notification lost
             self._ib.errorEvent += _on_ib_error
 
             # Retry loop: Gateway may still be initialising when Docker starts.
