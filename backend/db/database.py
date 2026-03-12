@@ -20,6 +20,10 @@ engine = create_async_engine(
     async_db_url,
     echo=settings.debug,
     pool_pre_ping=True,
+    pool_size=20,        # 20 persistent connections (up from default 5)
+    max_overflow=10,     # 10 burst connections → 30 total
+    pool_recycle=600,    # recycle idle connections after 10 min
+    pool_timeout=30,     # raise after 30 s instead of hanging forever
     connect_args=_connect_args,
 )
 

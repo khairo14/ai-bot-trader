@@ -117,12 +117,14 @@ async def _forward_test_scheduler():
         last_fired = {}
 
     CLOSE_BUFFER = 30       # seconds after candle close before we fire
+    _strat_sem = asyncio.Semaphore(8)   # cap concurrent strategy tasks → protect DB pool
 
     logger.info("[Scheduler] Wall-clock-aligned, market-hours-aware scheduler started.")
 
     while True:
         await asyncio.sleep(60)
         try:
+            _tick_tasks: list[asyncio.Task] = []
             async with AsyncSessionLocal() as session:
                 q = await session.execute(
                     select(StrategyModel).where(
@@ -201,40 +203,91 @@ async def _forward_test_scheduler():
                 _close_dt = close_dt
 
                 async def _run_task(s=_strat, lk=_lock, cdt=_close_dt):
-                    async with lk:
-                        _exec_state.update({
-                            "active": True,
-                            "strategy": s.name,
-                            "trigger": "scheduler",
-                            "started_at": datetime.now(_tz.utc),
-                        })
-                        try:
-                            from api.websocket import manager as _ws_mgr
-                            await _ws_mgr.broadcast("run_started", {
-                                "trigger": "scheduler",
-                                "strategies": 1,
-                                "strategy": s.name,
-                            })
-                            await _run_one_strategy(s)
-                            await _ws_mgr.broadcast("run_finished", {
-                                "trigger": "scheduler",
-                                "strategies": 1,
-                                "strategy": s.name,
-                            })
-                        except Exception as _task_exc:
-                            logger.error(
-                                f"[Scheduler] {s.name} task failed: {_task_exc}",
-                                exc_info=True,
-                            )
-                        finally:
+                    async with _strat_sem:
+                        async with lk:
                             _exec_state.update({
-                                "active": False,
-                                "strategy": None,
-                                "trigger": None,
-                                "started_at": None,
+                                "active": True,
+                                "strategy": s.name,
+                                "trigger": "scheduler",
+                                "started_at": datetime.now(_tz.utc),
                             })
+                            try:
+                                from api.websocket import manager as _ws_mgr
+                                await _ws_mgr.broadcast("run_started", {
+                                    "trigger": "scheduler",
+                                    "strategies": 1,
+                                    "strategy": s.name,
+                                })
+                                _r = await _run_one_strategy(s)
+                                await _ws_mgr.broadcast("run_finished", {
+                                    "trigger": "scheduler",
+                                    "strategies": 1,
+                                    "strategy": s.name,
+                                })
+                                return _r
+                            except Exception as _task_exc:
+                                logger.error(
+                                    f"[Scheduler] {s.name} task failed: {_task_exc}",
+                                    exc_info=True,
+                                )
+                            finally:
+                                _exec_state.update({
+                                    "active": False,
+                                    "strategy": None,
+                                    "trigger": None,
+                                    "started_at": None,
+                                })
+                    return None
 
-                asyncio.create_task(_run_task())
+                _tick_tasks.append(asyncio.create_task(_run_task()))
+
+            # ── Gather all fired tasks and send one tick-level summary ──────────────
+            if _tick_tasks:
+                _tick_results = await asyncio.gather(*_tick_tasks, return_exceptions=True)
+                _held = [
+                    r for r in _tick_results
+                    if isinstance(r, dict) and r.get("reason") == "hold"
+                ]
+                _suppressed = [
+                    r for r in _tick_results
+                    if isinstance(r, dict) and r.get("reason")
+                    and r.get("reason") not in ("hold", "duplicate", "missing_config")
+                    and not r.get("executed")
+                ]
+                if _held or _suppressed:
+                    try:
+                        from notifications.notifier import dispatch as _dispatch
+                        _parts: list[str] = []
+                        if _held:
+                            _pairs = ", ".join(r["symbol"] for r in _held)
+                            _parts.append(f"🔄 HOLD ({len(_held)}): {_pairs}")
+                        for _sr in _suppressed:
+                            _parts.append(
+                                f"⚠️ {_sr['symbol']} [{_sr['strategy']}] — {_sr.get('reason', 'suppressed')}"
+                            )
+                        _close_time = datetime.fromtimestamp(
+                            math.floor(now / 3600) * 3600, tz=_tz.utc
+                        ).strftime("%H:%M UTC")
+                        async with AsyncSessionLocal() as _sum_session:
+                            await _dispatch(
+                                _sum_session,
+                                title=f"📊 Tick Summary [{_close_time}]",
+                                message="\n".join(_parts),
+                                level="info",
+                                category="signal",
+                                metadata={
+                                    "held": len(_held),
+                                    "suppressed": len(_suppressed),
+                                    "type": "tick_summary",
+                                },
+                            )
+                            await _sum_session.commit()
+                        logger.info(
+                            f"[Scheduler] Tick summary: "
+                            f"{len(_held)} held, {len(_suppressed)} suppressed"
+                        )
+                    except Exception as _sum_err:
+                        logger.debug(f"[Scheduler] Summary notification failed: {_sum_err}")
 
         except Exception as exc:
             logger.error(f"[Scheduler] Tick error: {exc}", exc_info=True)

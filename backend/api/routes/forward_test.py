@@ -579,13 +579,15 @@ async def trigger_run(
     }
 
 
-async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
+async def _run_one_strategy(strat, skip_monitor: bool = False) -> dict | None:
     """
     Run signal engine + forward engine for a single strategy.
     Opens its own DB session so it can be called independently by the scheduler.
 
     skip_monitor=True: skip reconcile+monitor (used by Run Now which does a
     single shared reconcile pass before spawning concurrent strategy tasks).
+
+    Returns a result dict for tick-level summary roll-up in the scheduler.
     """
     from core.engine.signal_engine import SignalEngine
     from core.engine.forward_engine import ForwardEngine
@@ -599,11 +601,17 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
     timeframe = params.get("timeframe", "1h")
     limit = int(params.get("limit", 200))
 
+    _result: dict = {
+        "strategy": strat.name, "symbol": symbol or "?",
+        "signal": None, "executed": False, "reason": None,
+    }
+
     if not strategy_type or not symbol:
         logger.warning(
             f"[ForwardTest] Strategy '{strat.name}' missing strategy_type/symbol — skip"
         )
-        return
+        _result["reason"] = "missing_config"
+        return _result
 
     # Resolve asset-class string once — used in market-hours checks below
     _asset_cls_str: str | None = getattr(strat.asset_class, "value", None)
@@ -619,7 +627,8 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
             f"[ForwardTest] {strat.name} ({timeframe}) — "
             f"market closed ({_now_et_str}), skip signal run"
         )
-        return
+        _result["reason"] = "market_closed"
+        return _result
 
     signal_engine = SignalEngine()
     forward_engine = ForwardEngine()
@@ -638,6 +647,7 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
             f"[ForwardTest] {sig.signal} {strat.name} | {symbol} "
             f"(conf={sig.confidence:.2f})"
         )
+        _result["signal"] = sig.signal
 
         # Persist signal (including HOLD — useful for review and ML training)
         try:
@@ -673,28 +683,7 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
                     f"[ForwardTest] ⚠ Low confluence {conf:.0%} for "
                     f"{sig.signal} {symbol} on {timeframe} — not executing"
                 )
-                try:
-                    from notifications.notifier import notifier as _ft_notify
-                    async with AsyncSessionLocal() as _notif_session:
-                        await _ft_notify.warning(
-                            _notif_session,
-                            title=f"⚠️ Execution Suppressed — {sig.signal} {symbol}",
-                            message=(
-                                f"Strategy: {sig.strategy_name} | "
-                                f"Multi-TF confluence {conf:.0%} below minimum {_min_conf:.0%}. "
-                                f"Signal saved but trade not placed."
-                            ),
-                            metadata={
-                                "symbol": symbol,
-                                "signal": sig.signal,
-                                "strategy": sig.strategy_name,
-                                "confluence": conf,
-                                "min_confluence": _min_conf,
-                                "reason": "low_confluence",
-                            },
-                        )
-                except Exception as _nw_err:
-                    logger.debug(f"[ForwardTest] Suppression notification failed: {_nw_err}")
+                _result["reason"] = f"low_confluence:{conf:.0%}<{_min_conf:.0%}"
 
         # ── Market-hours gate (execution only) ─────────────────────────
         # Signals are always saved to DB — useful for review even overnight.
@@ -708,27 +697,7 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
                 f"[ForwardTest] ⏸ Market closed for {strat.broker.value} — "
                 f"signal saved but trade suppressed"
             )
-            try:
-                from notifications.notifier import notifier as _ft_notify
-                async with AsyncSessionLocal() as _notif_session:
-                    await _ft_notify.warning(
-                        _notif_session,
-                        title=f"⏸ Execution Suppressed — {sig.signal} {symbol}",
-                        message=(
-                            f"Strategy: {sig.strategy_name} | "
-                            f"{strat.broker.value} session is closed. "
-                            f"Signal saved but trade not placed."
-                        ),
-                        metadata={
-                            "symbol": symbol,
-                            "signal": sig.signal,
-                            "strategy": sig.strategy_name,
-                            "broker": strat.broker.value,
-                            "reason": "market_closed",
-                        },
-                    )
-            except Exception as _nw_err:
-                logger.debug(f"[ForwardTest] Market-closed notification failed: {_nw_err}")
+            _result["reason"] = "market_closed"
 
         # ── ML-03: Portfolio weight multiplier ───────────────────────────
         port_weight = 1.0
@@ -798,7 +767,8 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
                     f"[ForwardTest] ⏭ Skipping duplicate signal: "
                     f"{sig.signal} {sig.symbol} (already saved within {timeframe} window)"
                 )
-                return
+                _result["reason"] = "duplicate"
+                return _result
 
             db_signal = SignalModel(
                 symbol=sig.symbol,
@@ -865,6 +835,11 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
             if trade is not None:
                 trade.signal_id = db_signal.id
                 db_signal.acted_on = True  # mark regardless of OPEN/REJECTED status
+                _result["executed"] = True
+            elif allow_execution and sig.signal in _TRACKABLE_SIGNALS:
+                _result["reason"] = _result.get("reason") or "risk_rejected"
+            else:
+                _result["reason"] = _result.get("reason") or "hold"
 
             # Capture acted_on before commit — SQLAlchemy expires attributes on commit.
             _signal_acted_on = db_signal.acted_on
@@ -889,9 +864,11 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> None:
             f"[ForwardTest] ✓ {strat.name} | {symbol} → {sig.signal} "
             f"@ {sig.entry_price} (conf={sig.confidence:.2f})"
         )
+        return _result
 
     except Exception as e:
         logger.error(f"[ForwardTest] ✗ '{strat.name}': {e}", exc_info=True)
+        return locals().get("_result")
 
 
 async def _run_signals_background():
