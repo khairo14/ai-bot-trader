@@ -1824,18 +1824,35 @@ class ForwardEngine:
                         # bracket child orders were placed (race condition on fast fills).
                         if trade.stop_loss is None and _open_brackets:
                             _br = _open_brackets.get(_norm_key, {})
+                            _entry_p = trade.entry_price or 0.0
+                            _t_side = trade.side or "buy"
+                            _is_long_r = _t_side in ("buy", "long", "cover")
                             if _br.get("sl"):
-                                trade.stop_loss = round(float(_br["sl"]), 8)
-                                logger.info(
-                                    f"[ForwardEngine] F-105: restored SL={trade.stop_loss} "
-                                    f"from bracket for {trade.symbol} id={trade.id}"
-                                )
+                                _sl_v = float(_br["sl"])
+                                if _entry_p and ((_is_long_r and _sl_v < _entry_p) or (not _is_long_r and _sl_v > _entry_p)):
+                                    trade.stop_loss = round(_sl_v, 8)
+                                    logger.info(
+                                        f"[ForwardEngine] F-105: restored SL={trade.stop_loss} "
+                                        f"from bracket for {trade.symbol} id={trade.id}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[ForwardEngine] F-105: discarding inverted SL={_sl_v} "
+                                        f"for {_t_side} {trade.symbol} id={trade.id} (entry={_entry_p})"
+                                    )
                             if _br.get("tp"):
-                                trade.take_profit = round(float(_br["tp"]), 8)
-                                logger.info(
-                                    f"[ForwardEngine] F-105: restored TP={trade.take_profit} "
-                                    f"from bracket for {trade.symbol} id={trade.id}"
-                                )
+                                _tp_v = float(_br["tp"])
+                                if _entry_p and ((_is_long_r and _tp_v > _entry_p) or (not _is_long_r and _tp_v < _entry_p)):
+                                    trade.take_profit = round(_tp_v, 8)
+                                    logger.info(
+                                        f"[ForwardEngine] F-105: restored TP={trade.take_profit} "
+                                        f"from bracket for {trade.symbol} id={trade.id}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[ForwardEngine] F-105: discarding inverted TP={_tp_v} "
+                                        f"for {_t_side} {trade.symbol} id={trade.id} (entry={_entry_p})"
+                                    )
                         trade.status = OrderStatus.OPEN
                         _rec_bk = trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker)
                         self._paper_positions[f"{trade.symbol}:{_rec_bk}"] = trade
@@ -1849,18 +1866,35 @@ class ForwardEngine:
                         # bracket child orders were placed, or orphan-synced trades).
                         if _open_brackets and (trade.stop_loss is None or trade.take_profit is None):
                             _br_o = _open_brackets.get(_norm_key, {})
+                            _entry_o = trade.entry_price or 0.0
+                            _t_side_o = trade.side or "buy"
+                            _is_long_o = _t_side_o in ("buy", "long", "cover")
                             if trade.stop_loss is None and _br_o.get("sl"):
-                                trade.stop_loss = round(float(_br_o["sl"]), 8)
-                                logger.info(
-                                    f"[ForwardEngine] reconcile: restored SL={trade.stop_loss} "
-                                    f"from bracket for OPEN {trade.symbol} id={trade.id}"
-                                )
+                                _sl_o = float(_br_o["sl"])
+                                if _entry_o and ((_is_long_o and _sl_o < _entry_o) or (not _is_long_o and _sl_o > _entry_o)):
+                                    trade.stop_loss = round(_sl_o, 8)
+                                    logger.info(
+                                        f"[ForwardEngine] reconcile: restored SL={trade.stop_loss} "
+                                        f"from bracket for OPEN {trade.symbol} id={trade.id}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[ForwardEngine] reconcile: discarding inverted SL={_sl_o} "
+                                        f"for {_t_side_o} OPEN {trade.symbol} id={trade.id} (entry={_entry_o})"
+                                    )
                             if trade.take_profit is None and _br_o.get("tp"):
-                                trade.take_profit = round(float(_br_o["tp"]), 8)
-                                logger.info(
-                                    f"[ForwardEngine] reconcile: restored TP={trade.take_profit} "
-                                    f"from bracket for OPEN {trade.symbol} id={trade.id}"
-                                )
+                                _tp_o = float(_br_o["tp"])
+                                if _entry_o and ((_is_long_o and _tp_o > _entry_o) or (not _is_long_o and _tp_o < _entry_o)):
+                                    trade.take_profit = round(_tp_o, 8)
+                                    logger.info(
+                                        f"[ForwardEngine] reconcile: restored TP={trade.take_profit} "
+                                        f"from bracket for OPEN {trade.symbol} id={trade.id}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[ForwardEngine] reconcile: discarding inverted TP={_tp_o} "
+                                        f"for {_t_side_o} OPEN {trade.symbol} id={trade.id} (entry={_entry_o})"
+                                    )
                     continue  # position exists at broker — no further action needed
 
                 # Position is gone from broker.
@@ -2112,14 +2146,67 @@ class ForwardEngine:
             # Use the right ORM model: Trade for paper, LiveTrade for live
             _TradeModel = Trade if _ibkr_is_paper else LiveTrade
 
+            # Build a set of symbols that were FILLED/CANCELLED very recently (< 3 min).
+            # IBKR emits zero-qty position entries for ~1 tick after a bracket close, but
+            # sometimes the entry persists into the next tick.  Skipping recently-closed
+            # symbols prevents orphan sync from re-creating a trade for a stale IBKR position.
+            _recent_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=3)
+            _recent_closed_q = await db_session.execute(
+                _sel(_TradeModel)
+                .where(
+                    _TradeModel.status.in_([OrderStatus.FILLED, OrderStatus.CANCELLED]),
+                    _TradeModel.closed_at >= _recent_cutoff,
+                )
+            )
+            _recently_closed_syms = {
+                _normalize(t.symbol, "ibkr") for t in _recent_closed_q.scalars().all()
+            }
+
+            def _sl_tp_valid(side: str, entry: float, sl: Optional[float], tp: Optional[float]) -> tuple[Optional[float], Optional[float]]:
+                """Return (sl, tp) only if each value has correct orientation for the side.
+                Inverted values (e.g. SL above entry for a long) are set to None — they came
+                from stale bracket orders of a previous opposite-side position."""
+                _is_long = side in ("long", "buy", "cover")
+                valid_sl: Optional[float] = None
+                valid_tp: Optional[float] = None
+                if sl is not None and entry:
+                    if (_is_long and sl < entry) or (not _is_long and sl > entry):
+                        valid_sl = sl
+                    else:
+                        logger.warning(
+                            f"[ForwardEngine] orphan-sync: discarding inverted SL={sl} "
+                            f"for {side} position (entry={entry}) — stale bracket from previous trade"
+                        )
+                if tp is not None and entry:
+                    if (_is_long and tp > entry) or (not _is_long and tp < entry):
+                        valid_tp = tp
+                    else:
+                        logger.warning(
+                            f"[ForwardEngine] orphan-sync: discarding inverted TP={tp} "
+                            f"for {side} position (entry={entry}) — stale bracket from previous trade"
+                        )
+                return valid_sl, valid_tp
+
             for pos in ibkr_positions:
                 if pos.symbol in tracked_symbols:
                     continue  # already in DB — handled by ghost-close loop above
 
+                # Skip positions whose symbol was closed very recently — IBKR may still
+                # be reporting the old position while the close propagates.
+                if pos.symbol in _recently_closed_syms:
+                    logger.debug(
+                        f"[ForwardEngine] orphan-sync: skipping {pos.symbol} — "
+                        "symbol closed < 3 min ago, waiting for IBKR position update to propagate"
+                    )
+                    continue
+
                 # Orphan position: at broker, not in DB
                 bracket = brackets.get(pos.symbol, {})
-                sl_price: Optional[float] = bracket.get("sl")
-                tp_price: Optional[float] = bracket.get("tp")
+                _raw_sl: Optional[float] = bracket.get("sl")
+                _raw_tp: Optional[float] = bracket.get("tp")
+                # Validate bracket SL/TP orientation — stale brackets from a previous
+                # opposite-side position have inverted SL/TP and must not be applied.
+                sl_price, tp_price = _sl_tp_valid(pos.side, pos.entry_price or 0, _raw_sl, _raw_tp)
                 # Priority: bracket full_symbol → pos.full_symbol (CASH→"GBP/USD") → pos.symbol fallback
                 full_sym: str = bracket.get("full_symbol") or pos.full_symbol or pos.symbol
 
