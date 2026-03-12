@@ -880,8 +880,16 @@ class ForwardEngine:
                 return
             _closing_ids.add(trade.id)
 
-        _close_broker_key = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
-        broker = get_broker(_close_broker_key, force_paper=trade.is_paper)
+        # BUG-CRIT-02 FIX: ensure _closing_ids is always cleaned up even when
+        # an exception propagates out of close_position (e.g. broker unreachable,
+        # RuntimeError from place_order).  Without this, the trade is permanently
+        # stuck in _closing_ids and can never be closed again in this process.
+        try:
+            _close_result_cleanup_id = trade.id
+        except Exception:
+            _close_result_cleanup_id = None
+        _close_position_entered = True
+
         try:
             await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
         except Exception as _conn_err:
@@ -1061,6 +1069,10 @@ class ForwardEngine:
                         f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
                         "— guard reverted to OPEN for retry next tick"
                     )
+                    # BUG-CRIT-02 FIX: release in-memory guard so the next tick can retry.
+                    # Without this, the trade is permanently stuck in _closing_ids when
+                    # an exception propagates before the discard at the end of the function.
+                    _closing_ids.discard(trade.id)
                     raise
 
         # F-108: when bracket filled the entire position (free=0 after cancel),
@@ -1411,7 +1423,9 @@ class ForwardEngine:
                 return_exceptions=False,
             )
             for _ck, _bid, _ask in _pf_results:
-                if _bid is not None:
+                # BUG-HIGH-02 FIX: validate price before caching — a zero or negative
+                # bid would cause SL checks to incorrectly trigger on all long positions.
+                if _bid is not None and _bid > 0 and (_ask is None or _ask >= _bid):
                     _price_cache[_ck] = (_bid, _ask)
 
         for trade in open_trades:
@@ -1434,7 +1448,7 @@ class ForwardEngine:
                 broker = get_broker(broker_name, force_paper=trade.is_paper)
 
                 streamed = _psm.get_price(trade.symbol)
-                if streamed is not None:
+                if streamed is not None and streamed > 0:
                     # Streaming mid-price available — no REST call needed.
                     # bid ≈ ask ≈ mid for liquid assets; acceptable for SL/TP trigger.
                     bid_price, ask_price = streamed, streamed
@@ -1444,9 +1458,15 @@ class ForwardEngine:
                 else:
                     await broker.connect()
                     bid_price, ask_price = await broker.get_bid_ask(trade.symbol)
-                    _price_cache[_cache_key] = (bid_price, ask_price)
+                    # Only cache valid prices
+                    if bid_price and bid_price > 0:
+                        _price_cache[_cache_key] = (bid_price, ask_price)
             except Exception as _pe:
                 logger.debug(f"[ForwardEngine] monitor_sl_tp: price fetch failed for {trade.symbol}: {_pe}")
+                continue
+
+            # Skip this trade if we still have no valid price
+            if not bid_price or bid_price <= 0:
                 continue
 
             is_long = trade.side in _long_sides
