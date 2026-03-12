@@ -27,40 +27,6 @@ _ibkr_last_fail: float = 0.0
 _IBKR_COOLDOWN = 60.0  # seconds
 
 
-async def _paper_balance_from_db(broker_name: str) -> float | None:
-    """
-    Compute the DB-tracked paper balance for a broker:
-      initial_capital + sum(realised PnL) + sum(open unrealised PnL)
-    Returns None on error so callers can gracefully fall back.
-    """
-    try:
-        from db.database import AsyncSessionLocal as _ASL
-        from db.models import Trade as _Trade, OrderStatus as _OS, BrokerName as _BN
-        from sqlalchemy import select, func as _func
-        from config import settings as _cfg_s
-        _broker_enum = _BN(broker_name.lower())
-        async with _ASL() as _db:
-            _r = await _db.execute(
-                select(_func.coalesce(_func.sum(_Trade.pnl), 0.0)).where(
-                    _Trade.is_paper == True,
-                    _Trade.status == _OS.FILLED,
-                    _Trade.broker == _broker_enum,
-                )
-            )
-            _u = await _db.execute(
-                select(_func.coalesce(_func.sum(_Trade.pnl), 0.0)).where(
-                    _Trade.is_paper == True,
-                    _Trade.status == _OS.OPEN,
-                    _Trade.pnl.isnot(None),
-                    _Trade.broker == _broker_enum,
-                )
-            )
-        return float(_cfg_s.paper_initial_balance) + float(_r.scalar_one() or 0.0) + float(_u.scalar_one() or 0.0)
-    except Exception as _pe:
-        logger.debug(f"[portfolio] {broker_name} paper balance DB query failed: {_pe}")
-        return None
-
-
 async def _safe_balance(broker_name: str) -> dict:
     """Fetch broker balance with timeout; never raises."""
     global _ibkr_last_fail
@@ -81,25 +47,12 @@ async def _safe_balance(broker_name: str) -> dict:
             broker = get_broker(broker_name)
             balance = await asyncio.wait_for(broker.get_balance(), timeout=8.0)
 
-        # Use live runtime mode (respects toggles without needing a restart)
         is_paper = get_broker_modes().get(broker_name, "paper") == "paper"
-
-        _total = round(balance.total, 2)
-        _available = round(balance.available, 2)
-
-        # For paper-mode brokers the broker-API balance reflects the testnet
-        # account's raw cash (can be wildly inflated on Binance testnet).
-        # Override with the DB-tracked paper balance: initial_capital + realised + unrealised PnL.
-        if is_paper:
-            _db_bal = await _paper_balance_from_db(broker_name)
-            if _db_bal is not None:
-                _total = round(_db_bal, 2)
-                _available = round(_db_bal, 2)
 
         return {
             "broker": broker_name,
-            "total": _total,
-            "available": _available,
+            "total": round(balance.total, 2),
+            "available": round(balance.available, 2),
             "currency": balance.currency,
             "connected": True,
             "is_paper": is_paper,
@@ -108,24 +61,10 @@ async def _safe_balance(broker_name: str) -> dict:
         if broker_name == "ibkr":
             _ibkr_last_fail = time.monotonic()
         logger.warning(f"[portfolio] {broker_name} balance failed: {type(e).__name__}: {e}")
-        is_paper = True
-        try:
-            from brokers import get_broker_modes
-            is_paper = get_broker_modes().get(broker_name, "paper") == "paper"
-        except Exception:
-            pass
-        # Even when the broker API fails, return the DB paper balance for paper mode
-        # so a Binance testnet timeout doesn't show $0 on the dashboard.
-        _total, _available = 0.0, 0.0
-        if is_paper:
-            _db_bal = await _paper_balance_from_db(broker_name)
-            if _db_bal is not None:
-                _total = round(_db_bal, 2)
-                _available = round(_db_bal, 2)
         return {
             "broker": broker_name,
-            "total": _total,
-            "available": _available,
+            "total": 0.0,
+            "available": 0.0,
             "currency": "USD",
             "connected": False,
             "is_paper": is_paper,
