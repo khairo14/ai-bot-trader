@@ -2223,9 +2223,12 @@ class ForwardEngine:
                         _StratModel2.is_active == True,
                     )
                 )
+                # Strategy.symbol does not exist as a column — the symbol is stored
+                # inside the JSON parameters field as parameters["symbol"].
                 _active_orphan_syms = {
-                    _normalize(s.symbol, _orph_broker)
+                    _normalize((s.parameters or {}).get("symbol", ""), _orph_broker)
                     for s in _active_strats_q.scalars().all()
+                    if (s.parameters or {}).get("symbol")
                 }
 
                 for _op in _o_positions:

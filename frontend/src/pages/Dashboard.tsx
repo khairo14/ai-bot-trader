@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers, X, Loader2, History } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers, X, Loader2, History, Edit2 } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
@@ -180,6 +180,10 @@ export default function Dashboard() {
   const [tradePage, setTradePage] = useState(1)
   const TRADES_PER_PAGE = 8
   const [closingId, setClosingId] = useState<number | null>(null)
+  const [editPos, setEditPos] = useState<OpenPosition | null>(null)
+  const [editSl, setEditSl] = useState('')
+  const [editTp, setEditTp] = useState('')
+  const [savingEdit, setSavingEdit] = useState(false)
 
   const enrichPositionsWithLivePnl = useCallback(async (positions: OpenPosition[]): Promise<OpenPosition[]> => {
     if (positions.length === 0) return positions
@@ -299,6 +303,30 @@ export default function Dashboard() {
     } catch {
       setRegime(null)
       setRegimeError(true)
+    }
+  }
+
+  const openEdit = (pos: OpenPosition) => {
+    setEditPos(pos)
+    setEditSl(pos.stop_loss != null ? String(pos.stop_loss) : '')
+    setEditTp(pos.take_profit != null ? String(pos.take_profit) : '')
+  }
+
+  const saveEdit = async () => {
+    if (!editPos) return
+    setSavingEdit(true)
+    try {
+      const body: { stop_loss?: number; take_profit?: number } = {}
+      if (editSl !== '') body.stop_loss = parseFloat(editSl)
+      if (editTp !== '') body.take_profit = parseFloat(editTp)
+      await axios.patch(`/api/forward-test/trades/${editPos.id}`, body)
+      toast.success('SL/TP updated')
+      setEditPos(null)
+      await fetchAll()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Save failed')
+    } finally {
+      setSavingEdit(false)
     }
   }
 
@@ -761,6 +789,13 @@ export default function Dashboard() {
                           <BarChart2 size={11} /> Chart
                         </Link>
                         <button
+                          onClick={() => openEdit(pos)}
+                          title="Edit stop loss / take profit"
+                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 text-xs font-medium transition-all"
+                        >
+                          <Edit2 size={11} /> Edit
+                        </button>
+                        <button
                           onClick={() => closePosition(pos.id)}
                           disabled={closingId === pos.id}
                           title="Force close this position at market price"
@@ -929,6 +964,59 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+
+      {/* Edit SL/TP modal */}
+      {editPos && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-dark-800 border border-dark-600 rounded-xl p-5 w-full max-w-sm space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-white">Edit SL / TP — {editPos.symbol}</h3>
+              <button onClick={() => setEditPos(null)} className="text-gray-500 hover:text-gray-300">
+                <X size={16} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              Entry: <span className="text-white">{editPos.entry_price ?? '—'}</span>
+              {' · '}{editPos.side.toUpperCase()} {editPos.quantity} @ {editPos.broker}
+            </p>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Stop Loss</label>
+                <input
+                  type="number" step="any" value={editSl}
+                  placeholder={editPos.stop_loss != null ? String(editPos.stop_loss) : 'none'}
+                  onChange={e => setEditSl(e.target.value)}
+                  className="w-full bg-dark-700 border border-dark-500 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-red-500 placeholder-gray-600"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Take Profit</label>
+                <input
+                  type="number" step="any" value={editTp}
+                  placeholder={editPos.take_profit != null ? String(editPos.take_profit) : 'none'}
+                  onChange={e => setEditTp(e.target.value)}
+                  className="w-full bg-dark-700 border border-dark-500 text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-green-500 placeholder-gray-600"
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => setEditPos(null)}
+                className="flex-1 py-2 bg-dark-700 hover:bg-dark-600 text-gray-300 text-sm rounded-lg transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEdit}
+                disabled={savingEdit || (editSl === '' && editTp === '')}
+                className="flex-1 py-2 bg-brand-500 hover:bg-green-400 disabled:opacity-50 text-black text-sm font-semibold rounded-lg transition-all"
+              >
+                {savingEdit ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

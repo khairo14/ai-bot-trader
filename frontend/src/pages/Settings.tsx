@@ -28,6 +28,12 @@ interface BrokerRiskState {
   consecutive_losses: number
 }
 
+interface StrategyRiskState {
+  circuit_breaker_active: boolean
+  consecutive_losses: number
+  circuit_breaker_date: string | null
+}
+
 interface MLModelInfo {
   symbol: string
   model_path: string
@@ -116,6 +122,7 @@ export default function Settings() {
     binance: emptyFields(), alpaca: emptyFields(), ibkr: emptyFields(),
   })
   const [brokerState, setBrokerState] = useState<Record<string, BrokerRiskState>>({})
+  const [strategyState, setStrategyState] = useState<Record<string, StrategyRiskState>>({})
   const [savingBroker, setSavingBroker] = useState<string | null>(null)
   const [expandedBroker, setExpandedBroker] = useState<string | null>('binance')
   const [mlStatus, setMlStatus] = useState<MLStatus | null>(null)
@@ -159,6 +166,10 @@ export default function Settings() {
     // Load per-broker runtime state (circuit breaker / consecutive losses)
     axios.get('/api/risk/status')
       .then(res => setBrokerState(res.data.per_broker || {}))
+      .catch(() => {})
+    // Load per-strategy CB state
+    axios.get('/api/risk/strategy/status')
+      .then(res => setStrategyState(res.data || {}))
       .catch(() => {})
     // Load ML status
     axios.get('/api/ml/status')
@@ -293,6 +304,14 @@ export default function Settings() {
     try {
       await axios.post('/api/risk/reset-circuit-breaker')
       toast.success('Global circuit breaker reset')
+      loadAll()
+    } catch { toast.error('Reset failed') }
+  }
+
+  const resetStrategyCB = async (name: string) => {
+    try {
+      await axios.post(`/api/risk/strategy/${encodeURIComponent(name)}/reset-circuit-breaker`)
+      toast.success(`CB reset for '${name}'`)
       loadAll()
     } catch { toast.error('Reset failed') }
   }
@@ -452,6 +471,35 @@ export default function Settings() {
           )
         })}
       </section>
+
+      {/* Per-Strategy Circuit Breakers */}
+      {Object.keys(strategyState).length > 0 && (
+        <section className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-3">
+          <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Strategy Circuit Breakers</h2>
+          <p className="text-xs text-gray-600">Per-strategy consecutive-loss counters. A tripped CB blocks new signals from that strategy only.</p>
+          <div className="space-y-2">
+            {Object.entries(strategyState).map(([name, s]) => (
+              <div key={name} className="flex items-center justify-between bg-dark-700 rounded-lg px-3 py-2.5">
+                <div className="flex items-center gap-2 min-w-0">
+                  {s.circuit_breaker_active
+                    ? <span className="text-red-400 shrink-0">🔴</span>
+                    : <span className="text-brand-500 shrink-0">🟢</span>
+                  }
+                  <span className="text-sm text-white truncate">{name}</span>
+                  <span className="text-xs text-gray-500 shrink-0">{s.consecutive_losses} losses</span>
+                </div>
+                <button
+                  onClick={() => resetStrategyCB(name)}
+                  disabled={!s.circuit_breaker_active && s.consecutive_losses === 0}
+                  className="flex items-center gap-1 text-xs text-yellow-400 hover:text-yellow-300 bg-yellow-900/20 hover:bg-yellow-900/30 disabled:opacity-30 px-2 py-1 rounded border border-yellow-900/40 transition-all shrink-0 ml-2"
+                >
+                  <AlertTriangle size={10} /> Reset
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ML Models */}
       <section className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">

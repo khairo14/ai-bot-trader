@@ -90,6 +90,29 @@ async def reset_consecutive_losses():
     return {"message": "Consecutive-loss counter reset to 0."}
 
 
+# ── Per-strategy state resets ─────────────────────────────────────────────────
+
+@router.post("/strategy/{strategy_name}/reset-circuit-breaker")
+async def reset_strategy_circuit_breaker(strategy_name: str):
+    """Reset the per-strategy circuit breaker and consecutive-loss counter."""
+    _rm.reset_strategy_circuit_breaker(strategy_name)
+    return {"message": f"Strategy '{strategy_name}' circuit breaker reset. Trading is now allowed."}
+
+
+@router.get("/strategy/status")
+async def strategy_risk_status():
+    """Return all per-strategy circuit-breaker and consecutive-loss states."""
+    _rm._load_state()
+    return {
+        name: {
+            "circuit_breaker_active": s.get("circuit_breaker_active", False),
+            "consecutive_losses": s.get("consecutive_losses", 0),
+            "circuit_breaker_date": s.get("circuit_breaker_date"),
+        }
+        for name, s in _rm._per_strategy.items()
+    }
+
+
 # ── Per-broker state resets ───────────────────────────────────────────────────
 
 @router.post("/{broker}/reset-circuit-breaker")

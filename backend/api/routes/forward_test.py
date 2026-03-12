@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 from loguru import logger
@@ -546,6 +547,67 @@ async def export_paper_trades(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=paper_trades.csv"},
     )
+
+
+# ── Edit open trade SL/TP ─────────────────────────────────────────────────────
+
+class _TradePatchBody(BaseModel):
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+@router.patch("/trades/{trade_id}")
+async def patch_trade(
+    trade_id: int,
+    body: _TradePatchBody,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(_get_current_user),
+):
+    """
+    Update stop_loss and/or take_profit on an OPEN trade.
+    Validates that SL/TP are logical relative to current entry_price and side.
+    """
+    from db.models import Trade, LiveTrade, OrderStatus
+    t = None
+    for model in (Trade, LiveTrade):
+        q = await db.execute(select(model).where(model.id == trade_id))
+        t = q.scalar_one_or_none()
+        if t:
+            break
+    if not t:
+        raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found")
+    if t.status != OrderStatus.OPEN:
+        raise HTTPException(status_code=400, detail=f"Trade {trade_id} is {t.status.value}, not open — cannot edit")
+
+    entry = t.entry_price
+    side = (t.side or "").lower()
+    is_long = side in ("buy", "cover", "long")
+
+    if body.stop_loss is not None:
+        if body.stop_loss <= 0:
+            raise HTTPException(status_code=400, detail="stop_loss must be > 0")
+        if entry:
+            if is_long and body.stop_loss >= entry:
+                raise HTTPException(status_code=400, detail=f"BUY trade stop_loss ({body.stop_loss}) must be below entry ({entry})")
+            if not is_long and body.stop_loss <= entry:
+                raise HTTPException(status_code=400, detail=f"SELL trade stop_loss ({body.stop_loss}) must be above entry ({entry})")
+        t.stop_loss = round(body.stop_loss, 8)
+
+    if body.take_profit is not None:
+        if body.take_profit <= 0:
+            raise HTTPException(status_code=400, detail="take_profit must be > 0")
+        if entry:
+            if is_long and body.take_profit <= entry:
+                raise HTTPException(status_code=400, detail=f"BUY trade take_profit ({body.take_profit}) must be above entry ({entry})")
+            if not is_long and body.take_profit >= entry:
+                raise HTTPException(status_code=400, detail=f"SELL trade take_profit ({body.take_profit}) must be below entry ({entry})")
+        t.take_profit = round(body.take_profit, 8)
+
+    await db.commit()
+    logger.info(
+        f"[ForwardTest] Trade {trade_id} updated — sl={t.stop_loss} tp={t.take_profit} by user"
+    )
+    return {"id": trade_id, "stop_loss": t.stop_loss, "take_profit": t.take_profit}
 
 
 @router.post("/run")
