@@ -223,7 +223,10 @@ async def _forward_test_scheduler():
                                     "strategies": 1,
                                     "strategy": s.name,
                                 })
-                                _r = await _run_one_strategy(s)
+                                # skip_monitor=True: reconcile+monitor already ran
+                                # once this tick (pre-tick block above) so we don't
+                                # re-run it per-strategy, avoiding duplicate notifications.
+                                _r = await _run_one_strategy(s, skip_monitor=True)
                                 await _ws_mgr.broadcast("run_finished", {
                                     "trigger": "scheduler",
                                     "strategies": 1,
@@ -245,6 +248,28 @@ async def _forward_test_scheduler():
                     return None
 
                 _tick_tasks.append(asyncio.create_task(_run_task()))
+
+            # ── Pre-tick reconcile+monitor (once per tick, not per-strategy) ──────
+            # Running reconcile_positions() inside every parallel strategy task
+            # causes N concurrent DB scans of the same OPEN trades — any ghost
+            # closure (broker SL/TP) fires N notifications instead of 1.
+            # Fix: mirror the "Run Now" pattern — reconcile once, then skip inside
+            # each strategy task by passing skip_monitor=True.
+            if _tick_tasks:
+                from core.engine.forward_engine import ForwardEngine as _FE
+                try:
+                    async with AsyncSessionLocal() as _pre_session:
+                        _pre_engine = _FE()
+                        await _pre_engine.initialize(_pre_session)
+                        _pre_g = await _pre_engine.reconcile_positions(_pre_session)
+                        _pre_c = await _pre_engine.monitor_sl_tp(_pre_session)
+                        await _pre_session.commit()
+                        if _pre_g:
+                            logger.info(f"[Scheduler] Pre-tick reconcile: {_pre_g} ghost(s) closed")
+                        if _pre_c:
+                            logger.info(f"[Scheduler] Pre-tick SL/TP monitor: {_pre_c} position(s) closed")
+                except Exception as _pre_tick_err:
+                    logger.warning(f"[Scheduler] Pre-tick reconcile failed (non-fatal): {_pre_tick_err}")
 
             # ── Gather all fired tasks and send one tick-level summary ──────────────
             if _tick_tasks:

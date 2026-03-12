@@ -35,6 +35,13 @@ _G1_DEFAULT_THRESHOLD: float = 0.75
 # before any await and removing it after is race-free within one process.
 _closing_ids: set[int] = set()
 
+# Notification dedup: suppress repeated "Signal Blocked" alerts for the same
+# symbol+reason within a 30-minute window to avoid notification spam when a
+# persistent block condition (R:R ratio, circuit breaker) triggers every tick.
+import time as _time
+_last_blocked_notif: dict[str, float] = {}  # key: "symbol|reason_prefix"
+_BLOCKED_NOTIF_COOLDOWN_SECS: int = 1800    # 30 minutes
+
 
 class ForwardEngine:
     """
@@ -403,28 +410,43 @@ class ForwardEngine:
         if not validation.approved:
             logger.warning(f"[ForwardEngine] Signal rejected by risk manager: {validation.reason}")
             if db_session:
-                try:
-                    from notifications.notifier import notifier as _notifier
-                    _mode_tag_risk = "PAPER" if is_paper else "LIVE"
-                    await _notifier.warning(
-                        db_session,
-                        title=f"🛡 [{_mode_tag_risk}] Signal Blocked — {signal.symbol}",
-                        message=(
-                            f"{signal.signal} {signal.symbol} blocked by risk manager.\n"
-                            f"Reason: {validation.reason}"
-                        ),
-                        metadata={
-                            "symbol": signal.symbol,
-                            "side": signal.signal,
-                            "broker": broker_key,
-                            "is_paper": is_paper,
-                            "strategy": signal.strategy_name,
-                            "reason": validation.reason,
-                        },
+                # Dedup: only fire the notification if we haven't sent the same
+                # block for this symbol within the cooldown window (30 min).
+                # Persistent block conditions (R:R below min, circuit breaker)
+                # fire on every candle tick — without this guard they spam.
+                _reason_prefix = (validation.reason or "")[:60]  # first 60 chars as key
+                _notif_key = f"{signal.symbol}|{_reason_prefix}"
+                _now_ts = _time.monotonic()
+                _last_ts = _last_blocked_notif.get(_notif_key, 0.0)
+                if _now_ts - _last_ts >= _BLOCKED_NOTIF_COOLDOWN_SECS:
+                    try:
+                        from notifications.notifier import notifier as _notifier
+                        _mode_tag_risk = "PAPER" if is_paper else "LIVE"
+                        await _notifier.warning(
+                            db_session,
+                            title=f"🛡 [{_mode_tag_risk}] Signal Blocked — {signal.symbol}",
+                            message=(
+                                f"{signal.signal} {signal.symbol} blocked by risk manager.\n"
+                                f"Reason: {validation.reason}"
+                            ),
+                            metadata={
+                                "symbol": signal.symbol,
+                                "side": signal.signal,
+                                "broker": broker_key,
+                                "is_paper": is_paper,
+                                "strategy": signal.strategy_name,
+                                "reason": validation.reason,
+                            },
+                        )
+                        await db_session.commit()
+                        _last_blocked_notif[_notif_key] = _now_ts
+                    except Exception as _n_err:
+                        logger.debug(f"[ForwardEngine] Risk-reject notification failed: {_n_err}")
+                else:
+                    logger.debug(
+                        f"[ForwardEngine] Signal Blocked notification suppressed "
+                        f"(cooldown {_BLOCKED_NOTIF_COOLDOWN_SECS}s): {signal.symbol} — {_reason_prefix}"
                     )
-                    await db_session.commit()
-                except Exception as _n_err:
-                    logger.debug(f"[ForwardEngine] Risk-reject notification failed: {_n_err}")
             return None
         # ── Apply portfolio weight multiplier ─────────────────────────────
         # ML-03: strategies with higher Sharpe weight get proportionally larger size
