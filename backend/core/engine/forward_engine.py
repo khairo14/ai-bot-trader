@@ -2291,6 +2291,48 @@ class ForwardEngine:
 
             if orphan_count:
                 await db_session.commit()
+                # Send a warning notification per orphan-synced trade so the user
+                # can see which positions were recovered by reconciliation vs. opened
+                # normally via a signal.  These are NOT unseen signals — they are
+                # positions that exist at the broker with no DB record (e.g. after a
+                # DB commit failure at entry time).
+                try:
+                    from notifications.notifier import notifier as _orph_notify
+                    for _orph_t in db_session.new if hasattr(db_session, "new") else []:
+                        pass  # new objects no longer in session.new after commit
+                    # Re-query the trades just inserted (orphan_count rows, most recent)
+                    from sqlalchemy import select as _sel2
+                    _orph_q = await db_session.execute(
+                        _sel2(_TradeModel)
+                        .where(
+                            _TradeModel.broker_order_id == "orphan_sync",
+                            _TradeModel.status == OrderStatus.OPEN,
+                        )
+                        .order_by(_TradeModel.id.desc())
+                        .limit(orphan_count)
+                    )
+                    for _ot in _orph_q.scalars().all():
+                        _mode = "PAPER" if _ot.is_paper else "LIVE"
+                        await _orph_notify.warning(
+                            db_session,
+                            title=f"⚠️ [{_mode}] Orphan Position Recovered — {_ot.symbol}",
+                            message=(
+                                f"Broker sync found {_ot.symbol} {_ot.side.upper()} open at IBKR "
+                                f"with no DB record. Created trade #{_ot.id} @ {_ot.entry_price}."
+                                + (f"  SL: {_ot.stop_loss}  TP: {_ot.take_profit}" if _ot.stop_loss else "  No SL/TP set.")
+                            ),
+                            category="trade",
+                            metadata={
+                                "symbol": _ot.symbol, "side": _ot.side,
+                                "entry_price": _ot.entry_price,
+                                "stop_loss": _ot.stop_loss, "take_profit": _ot.take_profit,
+                                "broker": "ibkr", "is_paper": _ot.is_paper,
+                                "trade_id": _ot.id, "source": "orphan_sync",
+                            },
+                        )
+                    await db_session.commit()
+                except Exception as _on_err:
+                    logger.debug(f"[ForwardEngine] Orphan sync notification failed: {_on_err}")
                 logger.info(f"[ForwardEngine] Synced {orphan_count} orphan broker position(s) to DB.")
         except Exception as _oe:
             logger.error(f"[ForwardEngine] Orphan broker sync failed: {_oe}", exc_info=False)
