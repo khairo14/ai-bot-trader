@@ -527,9 +527,16 @@ async def export_paper_trades(
     ])
     for t in trades:
         writer.writerow([
-            t.id, t.symbol, t.side, t.quantity, t.entry_price, t.exit_price,
-            t.stop_loss, t.take_profit, t.pnl, t.pnl_pct, t.status,
-            t.broker, t.strategy_name,
+            t.id, t.symbol, t.side, t.quantity,
+            t.entry_price if t.entry_price is not None else "",
+            t.exit_price if t.exit_price is not None else "",
+            t.stop_loss if t.stop_loss is not None else "",
+            t.take_profit if t.take_profit is not None else "",
+            t.pnl if t.pnl is not None else "",
+            t.pnl_pct if t.pnl_pct is not None else "",
+            t.status.value if hasattr(t.status, "value") else t.status,
+            t.broker.value if hasattr(t.broker, "value") else t.broker,
+            t.strategy_name or "",
             t.opened_at.isoformat() if t.opened_at else "",
             t.closed_at.isoformat() if t.closed_at else "",
         ])

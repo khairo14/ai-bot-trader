@@ -428,6 +428,14 @@ class ForwardEngine:
             return None
         # ── Apply portfolio weight multiplier ─────────────────────────────
         # ML-03: strategies with higher Sharpe weight get proportionally larger size
+        # BUG-LOW-02 FIX: reject zero/negative multipliers — clamp to 0.05 so
+        # position sizing is never silently zeroed out by a bad caller value.
+        if position_size_multiplier is not None and position_size_multiplier <= 0:
+            logger.warning(
+                f"[ForwardEngine] position_size_multiplier={position_size_multiplier} "
+                f"is zero or negative for {signal.symbol} — clamping to 0.05"
+            )
+            position_size_multiplier = 0.05
         effective_size = round(validation.position_size * position_size_multiplier, 6)
         effective_size = max(effective_size, 1e-8)  # never zero
         # ── Handle execution mode ─────────────────────────

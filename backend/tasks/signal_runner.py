@@ -833,6 +833,12 @@ def run_signals(self):
                             exc_info=True,
                         )
                         total_errors += 1
+                        # BUG-MED-01 FIX: persist regime hysteresis state to Redis so it
+                        # survives Celery worker restarts even when a strategy errors out.
+                        try:
+                            _save_regime_state_to_redis()
+                        except Exception as _redis_err:
+                            logger.debug(f"[signal_runner] Failed to save regime state after error: {_redis_err}")
 
             logger.info(
                 f"[signal_runner] Completed: {total_run} strategies run, {total_errors} errors."

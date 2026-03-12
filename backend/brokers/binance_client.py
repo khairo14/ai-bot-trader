@@ -339,7 +339,15 @@ class BinanceClient(AbstractBroker):
                     f"placing emergency market close to avoid orphaned position. Error: {_bracket_err}"
                 )
                 try:
-                    _qty_filled = float(result.get("filled") or result.get("amount") or quantity)
+                    # BUG-CRIT-01 FIX: result["filled"] can be 0.0 (falsy in Python) on a partial
+                    # fill, so an `or` chain would skip it and fall through to result["amount"]
+                    # (the full requested quantity), causing the emergency close to over-sell.
+                    # Use explicit None / > 0 guard instead.
+                    _filled_raw = result.get("filled")
+                    _qty_filled = float(
+                        _filled_raw if (_filled_raw is not None and _filled_raw > 0)
+                        else (result.get("amount") or quantity)
+                    )
                     await self.exchange.create_market_order(symbol, exit_side, _qty_filled)  # type: ignore[arg-type]
                     logger.info(f"[Binance] Emergency market close placed for {symbol} qty={_qty_filled}")
                 except Exception as _emergency_err:
