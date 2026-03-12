@@ -812,7 +812,11 @@ class _IBKRManager:
             return {}
         ib = self._ib
         # Force TWS to push the full open-order list for our clientId.
-        await ib.reqOpenOrdersAsync()
+        # Wrap in a timeout — reqOpenOrdersAsync can hang on IBKR paper.
+        try:
+            await asyncio.wait_for(ib.reqOpenOrdersAsync(), timeout=8.0)
+        except asyncio.TimeoutError:
+            pass  # proceed with whatever cached open-order state ib already holds
 
         # Build parent orderId → (contract_symbol, full_symbol, entry_action)
         # from ALL trades in the current session (includes filled parent orders).

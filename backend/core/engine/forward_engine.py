@@ -1607,9 +1607,15 @@ class ForwardEngine:
                 try:
                     _gob_r = getattr(broker, "get_open_brackets", None)
                     if _gob_r:
-                        _open_brackets = await _gob_r()
+                        _open_brackets = await asyncio.wait_for(_gob_r(), timeout=12.0)
+                        if _open_brackets:
+                            logger.info(f"[ForwardEngine] reconcile: brackets fetched for {list(_open_brackets.keys())}")
+                        else:
+                            logger.debug("[ForwardEngine] reconcile: no open bracket orders found at IBKR")
+                except asyncio.TimeoutError:
+                    logger.warning("[ForwardEngine] reconcile: bracket fetch timed out (>12s) — SL/TP patch skipped")
                 except Exception as _br_err:
-                    logger.debug(f"[ForwardEngine] reconcile: bracket fetch failed: {_br_err}")
+                    logger.warning(f"[ForwardEngine] reconcile: bracket fetch failed: {_br_err}")
 
             for trade in trades:
                 _norm_key = _normalize(trade.symbol, broker_name)
@@ -1874,7 +1880,15 @@ class ForwardEngine:
             await ibkr_broker.connect()
             ibkr_positions = await ibkr_broker.get_positions()
             _gob = getattr(ibkr_broker, "get_open_brackets", None)
-            brackets = await _gob() if _gob else {}
+            try:
+                brackets = await asyncio.wait_for(_gob(), timeout=12.0) if _gob else {}
+                if brackets:
+                    logger.info(f"[ForwardEngine] orphan-sync: brackets fetched for {list(brackets.keys())}")
+                else:
+                    logger.debug("[ForwardEngine] orphan-sync: no open bracket orders found at IBKR")
+            except (asyncio.TimeoutError, Exception) as _be:
+                logger.warning(f"[ForwardEngine] orphan-sync: bracket fetch failed: {_be}")
+                brackets = {}
 
             # Build the set of short symbols already tracked in DB (normalised)
             tracked_symbols = {
