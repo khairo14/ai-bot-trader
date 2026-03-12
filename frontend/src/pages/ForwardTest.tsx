@@ -132,7 +132,7 @@ const fmtPct = (n: number | null) =>
 
 /** Adaptive decimal formatter — shows enough places for the instrument scale. */
 const fmtPrice = (v?: number | null): string => {
-  if (v == null) return '—'
+  if (v == null || v === 0) return '—'
   const abs = Math.abs(v)
   if (abs >= 1000) return v.toFixed(2)
   if (abs >= 10)   return v.toFixed(3)
@@ -613,8 +613,8 @@ export default function ForwardTest() {
                   <tr key={pos.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
                     <td className="px-3 py-2 text-gray-600 font-mono">#{pos.id}</td>
                     <td className="px-3 py-2 font-medium text-white truncate">{pos.symbol}</td>
-                    <td className={`px-3 py-2 font-bold ${pos.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
-                      {pos.side.toUpperCase()}
+                    <td className={`px-3 py-2 font-bold ${(pos.side === 'buy' || pos.side === 'long' || pos.side === 'cover') ? 'text-green-400' : 'text-red-400'}`}>
+                      {pos.side === 'long' ? 'BUY' : pos.side === 'short' ? 'SELL' : pos.side.toUpperCase()}
                     </td>
                     <td className="px-3 py-2 text-gray-300">{fmtPrice(pos.entry_price)}</td>
                     <td className="px-3 py-2 text-red-400">{fmtPrice(pos.stop_loss)}</td>
@@ -787,6 +787,8 @@ export default function ForwardTest() {
                         <th className="text-left px-2 py-2 font-medium w-14">Side</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Entry</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Exit</th>
+                        <th className="text-left px-2 py-2 font-medium w-20">SL</th>
+                        <th className="text-left px-2 py-2 font-medium w-20">TP</th>
                         <th className="text-left px-2 py-2 font-medium w-28">P&L</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Status</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Broker</th>
@@ -799,11 +801,13 @@ export default function ForwardTest() {
                         <tr key={t.id} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
                           <td className="px-2 py-2 text-gray-600 font-mono">#{t.id}</td>
                           <td className="px-2 py-2 font-medium text-white truncate">{t.symbol}</td>
-                          <td className={`px-2 py-2 font-medium ${t.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
-                            {t.side.toUpperCase()}
+                          <td className={`px-2 py-2 font-medium ${(t.side === 'buy' || t.side === 'long' || t.side === 'cover') ? 'text-green-400' : 'text-red-400'}`}>
+                            {t.side === 'long' ? 'BUY' : t.side === 'short' ? 'SELL' : t.side.toUpperCase()}
                           </td>
                           <td className="px-2 py-2 text-gray-300">{fmtPrice(t.entry_price)}</td>
                           <td className="px-2 py-2 text-gray-300">{fmtPrice(t.exit_price)}</td>
+                          <td className="px-2 py-2 text-red-400">{fmtPrice(t.stop_loss)}</td>
+                          <td className="px-2 py-2 text-green-400">{fmtPrice(t.take_profit)}</td>
                           <td className={`px-2 py-2 font-medium ${(t.pnl ?? 0) > 0 ? 'text-green-400' : (t.pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'}`}>
                             {t.pnl != null ? fmtUSD(t.pnl) : '—'}
                             {t.pnl_pct != null && <span className="text-gray-500 ml-1">({fmtPct(t.pnl_pct)})</span>}

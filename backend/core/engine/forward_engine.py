@@ -1649,6 +1649,23 @@ class ForwardEngine:
                             f"[ForwardEngine] F-105: PENDING {trade.symbol} id={trade.id} "
                             f"confirmed at broker → OPEN @ {trade.entry_price}"
                         )
+                    elif trade.status == OrderStatus.OPEN:
+                        # Patch null SL/TP for already-OPEN trades (e.g. created before
+                        # bracket child orders were placed, or orphan-synced trades).
+                        if _open_brackets and (trade.stop_loss is None or trade.take_profit is None):
+                            _br_o = _open_brackets.get(_norm_key, {})
+                            if trade.stop_loss is None and _br_o.get("sl"):
+                                trade.stop_loss = round(float(_br_o["sl"]), 8)
+                                logger.info(
+                                    f"[ForwardEngine] reconcile: restored SL={trade.stop_loss} "
+                                    f"from bracket for OPEN {trade.symbol} id={trade.id}"
+                                )
+                            if trade.take_profit is None and _br_o.get("tp"):
+                                trade.take_profit = round(float(_br_o["tp"]), 8)
+                                logger.info(
+                                    f"[ForwardEngine] reconcile: restored TP={trade.take_profit} "
+                                    f"from bracket for OPEN {trade.symbol} id={trade.id}"
+                                )
                     continue  # position exists at broker — no further action needed
 
                 # Position is gone from broker.
