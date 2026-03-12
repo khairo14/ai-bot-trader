@@ -87,17 +87,17 @@ async def mark_all_read(db: AsyncSession = Depends(get_db), _user=Depends(get_cu
     return {"ok": True}
 
 
-@router.delete("/{notif_id}")
-async def delete_notification(notif_id: int, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
-    """Delete a single notification."""
-    await db.execute(delete(Notification).where(Notification.id == notif_id))
-    await db.commit()
-    return {"ok": True}
-
-
 @router.delete("/clear/read")
 async def clear_read(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """Delete all notifications that have been read."""
     await db.execute(delete(Notification).where(Notification.is_read == True))  # noqa: E712
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/{notif_id}")
+async def delete_notification(notif_id: int, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    """Delete a single notification."""
+    await db.execute(delete(Notification).where(Notification.id == notif_id))
     await db.commit()
     return {"ok": True}
