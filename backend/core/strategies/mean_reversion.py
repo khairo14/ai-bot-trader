@@ -105,13 +105,15 @@ class MeanReversionBBStrategy(BaseStrategy):
         # - BUY at lower BB: veto only when model is STRONGLY bearish (P<0.30)
         # - SHORT at upper BB: veto only when model is STRONGLY bullish (P>0.70)
         ml_prob: Optional[float] = None
+        ml_short_prob: Optional[float] = None
         try:
             ml_prob = ml_scorer.predict_proba(data, symbol, timeframe=timeframe)
+            ml_short_prob = ml_scorer.predict_proba_short(data, symbol, timeframe=timeframe)
         except Exception as _ml_err:
             logger.debug(f"[{self.name}] ML scorer skipped: {_ml_err}")
 
         ML_VETO_BUY   = 0.30   # more lenient: mean-reversion works against trend
-        ML_VETO_SHORT = 0.70
+        ML_VETO_SHORT = 0.30   # G6: P(short_win) direct — wider tolerance for contrarian
 
         if at_lower and rsi_val < self.RSI_OVERSOLD:
             if ml_prob is not None and ml_prob < ML_VETO_BUY:
@@ -141,8 +143,8 @@ class MeanReversionBBStrategy(BaseStrategy):
             ), data, atr_val)
 
         if at_upper and rsi_val > self.RSI_OVERBOUGHT:
-            if ml_prob is not None and ml_prob > ML_VETO_SHORT:
-                return _hold([f"ML veto: P(buy)={ml_prob:.2f} > {ML_VETO_SHORT} — model strongly bullish, no reversion likely"])
+            if ml_short_prob is not None and ml_short_prob < ML_VETO_SHORT:
+                return _hold([f"ML veto: P(short_win)={ml_short_prob:.2f} < {ML_VETO_SHORT} — model not confirming downside, no reversion likely"])
             score = 2
             reasons = [
                 f"BB upper touch (band_pct={bb_out.value:.3f})",
@@ -153,8 +155,8 @@ class MeanReversionBBStrategy(BaseStrategy):
                 reasons.append(f"Volume {vol_out.signal}")
 
             confidence = min(score / 3, 1.0)
-            if ml_prob is not None:
-                confidence = round(0.6 * confidence + 0.4 * (1.0 - ml_prob), 3)
+            if ml_short_prob is not None:
+                confidence = round(0.6 * confidence + 0.4 * ml_short_prob, 3)
             return self._enhance_signal(Signal(
                 symbol=symbol, signal="SHORT",
                 entry_price=current_price,
@@ -163,7 +165,7 @@ class MeanReversionBBStrategy(BaseStrategy):
                 confidence=round(confidence, 3),
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=reasons + [f"Regime: {regime_name}"] + ([f"ML P(buy)={ml_prob:.2f}"] if ml_prob is not None else []),
+                reasons=reasons + [f"Regime: {regime_name}"] + ([f"ML P(short_win)={ml_short_prob:.2f}"] if ml_short_prob is not None else []),
                 regime=regime_name,
             ), data, atr_val)
 

@@ -105,6 +105,29 @@ class MLScorer:
             logger.warning(f"[MLScorer] Failed to load model for {symbol}: {exc}")
             return None
 
+    def _load_model_short(self, symbol: str, timeframe: str = "1d") -> Optional[dict]:
+        """G6: Load the dedicated SHORT model for `symbol:timeframe` from latest.json.
+        Falls back to None if the short model was not trained (e.g. insufficient data).
+        """
+        if not _JOBLIB_OK:
+            return None
+        if not _LATEST_JSON.exists():
+            return None
+        try:
+            registry: dict = json.loads(_LATEST_JSON.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        model_path = registry.get(f"{symbol}:{timeframe}:short")
+        if not model_path or not pathlib.Path(model_path).exists():
+            return None
+        try:
+            data = joblib.load(model_path)
+            logger.info(f"[MLScorer] Loaded SHORT model for {symbol} from {model_path}")
+            return data
+        except Exception as exc:
+            logger.warning(f"[MLScorer] Failed to load SHORT model for {symbol}: {exc}")
+            return None
+
     def _get_model(self, symbol: str, timeframe: str = "1d") -> Optional[dict]:
         """Return cached model or load it (double-checked locking).
 
@@ -121,6 +144,18 @@ class MLScorer:
         # Slow path — load without holding the lock
         model = self._load_model(symbol, timeframe)
         # Store result; another thread may have beaten us — that's fine
+        with self._lock:
+            if cache_key not in self._models:
+                self._models[cache_key] = model
+            return self._models[cache_key]
+
+    def _get_model_short(self, symbol: str, timeframe: str = "1d") -> Optional[dict]:
+        """G6: Cached load for the dedicated SHORT model."""
+        cache_key = f"{symbol}:{timeframe}:short"
+        with self._lock:
+            if cache_key in self._models:
+                return self._models[cache_key]
+        model = self._load_model_short(symbol, timeframe)
         with self._lock:
             if cache_key not in self._models:
                 self._models[cache_key] = model
@@ -211,6 +246,60 @@ class MLScorer:
             return round(prob, 4)
         except Exception as exc:
             logger.warning(f"[MLScorer] Inference failed for {symbol}: {exc}")
+            return None
+
+    def predict_proba_short(self, df: pd.DataFrame, symbol: str,
+                            timeframe: str = "1d") -> Optional[float]:
+        """
+        G6: Return P(SHORT_WIN) ∈ [0, 1] using the dedicated SHORT XGBoost model.
+
+        Uses a separate model trained on labels where price FALLS > 1.5×ATR,
+        which is more accurate than inverting P(BUY).  Falls back to
+        `1.0 - predict_proba()` when no SHORT model exists (e.g. pre-retrain).
+
+        Parameters
+        ----------
+        df        : OHLCV DataFrame
+        symbol    : Trading symbol
+        timeframe : TF-specific model key
+        """
+        model_data = self._get_model_short(symbol, timeframe)
+        if model_data is None:
+            # Fallback: invert the BUY probability (old behaviour)
+            buy_prob = self.predict_proba(df, symbol, timeframe)
+            if buy_prob is None:
+                return None
+            return round(1.0 - buy_prob, 4)
+
+        feats = _compute_features(df)
+        if feats is None:
+            return None
+        try:
+            from core.regime_classifier import regime_classifier as _rc
+            from core.features import _REGIME_ENCODING
+            _window = df.tail(50) if len(df) >= 50 else df
+            _regime_result = _rc.classify(_window)
+            feats = feats.copy()
+            feats["regime_code"] = _REGIME_ENCODING.get(_regime_result.regime, 0)
+        except Exception:
+            feats["regime_code"] = 0
+
+        row = feats.tail(1)
+        if row.empty:
+            return None
+
+        model_features: list = model_data.get("features") or FEATURE_COLS
+        missing = [c for c in model_features if c not in row.columns]
+        if missing:
+            return None
+
+        try:
+            model = model_data["model"]
+            X = row[model_features].values
+            prob = float(model.predict_proba(X)[0, 1])
+            return round(prob, 4)
+        except Exception as exc:
+            logger.warning(f"[MLScorer] SHORT inference failed for {symbol}: {exc}")
             return None
 
 

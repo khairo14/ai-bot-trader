@@ -17,7 +17,7 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-from ib_insync import IB, Stock, Forex as IBForex, Option, Contract, Order, MarketOrder, LimitOrder, StopLimitOrder, StopOrder, Trade as IBTrade
+from ib_insync import IB, Stock, Forex as IBForex, Option, Contract, ComboLeg, Order, MarketOrder, LimitOrder, StopLimitOrder, StopOrder, Trade as IBTrade
 
 from config import settings
 from brokers.base import AbstractBroker, OrderResult, Position, Balance
@@ -718,6 +718,67 @@ class _IBKRManager:
         self._start()
         self._submit(self._do_qualify(contract))
 
+    async def _do_place_multi_leg(
+        self, symbol: str, legs: list, quantity: int, expiry: str
+    ) -> "IBTrade":
+        """GAP-01: Place a multi-leg (BAG/combo) options order via IBKR.
+
+        Each entry in *legs* must be a dict with keys:
+          action  – "BUY" or "SELL"
+          right   – "C" or "P"
+          strike  – float
+
+        The combo (BAG) contract is submitted as a single atomic order so IBKR
+        fills all legs simultaneously at the net debit/credit.
+        """
+        if not await self._ensure_connected():
+            raise ConnectionError("IBKR Gateway is not reachable")
+        assert self._ib is not None
+
+        # Qualify each individual Option leg to obtain its conId.
+        leg_contracts: list = []
+        for leg in legs:
+            opt = Option(symbol, expiry, leg["strike"], leg["right"], "SMART")
+            await self._ib.qualifyContractsAsync(opt)
+            if not opt.conId:
+                raise ValueError(
+                    f"[IBKR] Could not qualify option leg: "
+                    f"{symbol} {expiry} {leg['strike']}{leg['right']}"
+                )
+            leg_contracts.append((opt, leg["action"]))
+
+        # Build BAG (combo) contract.
+        bag = Contract()
+        bag.symbol   = symbol
+        bag.secType  = "BAG"
+        bag.currency = "USD"
+        bag.exchange = "SMART"
+        bag.comboLegs = [
+            ComboLeg(
+                conId=opt.conId,
+                ratio=1,
+                action=action,   # "BUY"/"SELL" — executed as-is for a BUY combo order
+                exchange="SMART",
+            )
+            for opt, action in leg_contracts
+        ]
+
+        order = MarketOrder("BUY", quantity)
+        self.subscribe_mkt_data_for_fill(bag)
+        await asyncio.sleep(0.5)
+        trade: IBTrade = self._ib.placeOrder(bag, order)
+        await asyncio.sleep(0.5)
+        return trade
+
+    def place_multi_leg_sync(
+        self, symbol: str, legs: list, quantity: int, expiry: str
+    ) -> "IBTrade":
+        """Thread-safe wrapper for _do_place_multi_leg (use via run_in_executor)."""
+        self._start()
+        return self._submit(
+            self._do_place_multi_leg(symbol, legs, quantity, expiry), timeout=60.0
+        )
+
     # ── Live market data subscription (used by /ws/kline endpoint) ───────────
 
     async def _do_subscribe_mkt_data(self, contract):
@@ -1356,6 +1417,68 @@ class IBKRClient(AbstractBroker):
         except Exception as e:
             logger.error(f"[IBKR] Cancel order failed: {e}")
             return False
+
+    async def place_multi_leg_order(
+        self,
+        symbol: str,
+        legs: list,
+        quantity: int,
+        expiry: str,
+    ) -> OrderResult:
+        """GAP-01: Submit a multi-leg (BAG/combo) options order to IBKR live.
+
+        Parameters
+        ----------
+        symbol:   Underlying ticker (e.g. "SPY").
+        legs:     List of dicts with keys action ("BUY"/"SELL"), right ("C"/"P"), strike (float).
+        quantity: Number of combos (each combo = 100 shares of notional exposure).
+        expiry:   Option expiry as "YYYYMMDD".
+        """
+        self._ensure_connected()
+        _loop = asyncio.get_running_loop()
+        trade: IBTrade = await _loop.run_in_executor(
+            None,
+            _get_manager().place_multi_leg_sync,
+            symbol, legs, quantity, expiry,
+        )
+        order_id = str(trade.order.orderId)
+        fill_price: Optional[float] = None
+        _FILL_TIMEOUT = 60.0
+        _POLL_INTERVAL = 0.5
+        _elapsed = 0.0
+        while _elapsed < _FILL_TIMEOUT:
+            await asyncio.sleep(_POLL_INTERVAL)
+            _elapsed += _POLL_INTERVAL
+            try:
+                _st = trade.orderStatus.status
+                _fp = trade.orderStatus.avgFillPrice
+                if _st in ("Filled", "PreSubmitted") and _fp:
+                    fill_price = float(_fp)
+                    logger.info(f"[IBKR] Multi-leg order {order_id} filled @ net {fill_price}")
+                    break
+                elif _st == "Cancelled":
+                    raise RuntimeError(f"[IBKR] Multi-leg order {order_id} cancelled by broker")
+                elif _st == "Inactive":
+                    logger.debug(f"[IBKR] Multi-leg order {order_id} Inactive — awaiting price feed")
+            except RuntimeError:
+                raise
+            except Exception as _pe:
+                logger.debug(f"[IBKR] Multi-leg poll {order_id}: {_pe}")
+        else:
+            logger.warning(f"[IBKR] Multi-leg order {order_id} not filled within {_FILL_TIMEOUT}s — treating as pending")
+
+        return OrderResult(
+            order_id=order_id,
+            symbol=symbol,
+            side="buy",
+            quantity=quantity,
+            price=float(fill_price or 0),
+            status="filled" if fill_price is not None else trade.orderStatus.status,
+            raw={"order_id": trade.order.orderId, "status": trade.orderStatus.status,
+                 "legs": legs, "expiry": expiry},
+            fill_price=fill_price,
+        )
+
 
     async def update_stop_loss(
         self,

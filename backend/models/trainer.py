@@ -44,6 +44,7 @@ try:
     import xgboost as xgb
     from sklearn.model_selection import StratifiedKFold, train_test_split
     from sklearn.metrics import roc_auc_score
+    from sklearn.calibration import CalibratedClassifierCV
     import joblib
     _ML_AVAILABLE = True
 except ImportError:
@@ -210,6 +211,20 @@ def _label(feat_df: pd.DataFrame, horizon: int = 24) -> pd.Series:
         if future_max - close.iloc[i] > threshold:
             labels.iloc[i] = 1
     # Last `horizon` rows have no future — mark NaN so they're dropped
+    labels.iloc[-horizon:] = np.nan
+    return labels
+
+
+def _label_short(feat_df: pd.DataFrame, horizon: int = 24) -> pd.Series:
+    """G6: Binary label for SHORT model: 1 if price FALLS > 1.5 × ATR within `horizon` candles."""
+    close = feat_df["_close"]
+    atr14 = feat_df["_atr14"]
+    labels = pd.Series(0, index=feat_df.index, dtype=int)
+    for i in range(len(feat_df) - horizon):
+        threshold = 1.5 * atr14.iloc[i]
+        future_min = close.iloc[i + 1: i + 1 + horizon].min()
+        if close.iloc[i] - future_min > threshold:
+            labels.iloc[i] = 1
     labels.iloc[-horizon:] = np.nan
     return labels
 
@@ -401,69 +416,62 @@ class ModelTrainer:
                 "auc": None,
             }
 
-        # Use the full shared FEATURE_COLS (10 features) — same as MLScorer inference.
-        # Only keep columns that are actually present in feat_df; missing ones (e.g.
-        # vwap_ratio for forex) will be NaN-filled so XGBoost handles them natively.
+        # Use the full shared FEATURE_COLS — same as MLScorer inference.
         active_features = [c for c in FEATURE_COLS if c in feat_df.columns]
-        X = feat_df[active_features].values
-        y = feat_df["label"].values.astype(int)
 
-        # ── 3. Holdout split ─────────────────────────────────────────────────
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, shuffle=False  # time-ordered — no shuffle
-        )
-
-        # ── 4. Cross-validated training ──────────────────────────────────────
-        _n_pos = int(sum(y_train == 1))
-        _n_neg = int(sum(y_train == 0))
-        scale_pos = max(1, int(_n_neg / max(_n_pos, 1)))
-        model = xgb.XGBClassifier(
-            n_estimators=100,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            scale_pos_weight=scale_pos,
-            use_label_encoder=False,
-            eval_metric="logloss",
-            verbosity=0,
-            random_state=42,
-        )
-
-        cv_aucs = []
-        if _n_pos < 2 or _n_neg < 2:
-            # Single-class training split — CV would crash with n_splits=0.
-            # Fit directly; the AUC gate (holdout) will still reject a poor model.
-            logger.warning(
-                f"[trainer] {symbol}: single-class training data "
-                f"(pos={_n_pos}, neg={_n_neg}) — skipping CV, fitting directly"
+        def _train_one(y_arr: np.ndarray, label_name: str) -> tuple:
+            """Fit XGBoost + calibration for one direction. Returns (model, holdout_auc, cv_auc)."""
+            X_all = feat_df[active_features].values
+            # Time-ordered holdout — no shuffle
+            X_tr, X_te, y_tr, y_te = train_test_split(X_all, y_arr, test_size=0.2, shuffle=False)
+            _n_pos = int(sum(y_tr == 1))
+            _n_neg = int(sum(y_tr == 0))
+            scale_pos = max(1, int(_n_neg / max(_n_pos, 1)))
+            base = xgb.XGBClassifier(
+                n_estimators=100, max_depth=4, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos,
+                use_label_encoder=False, eval_metric="logloss", verbosity=0, random_state=42,
             )
-        else:
-            cv = StratifiedKFold(n_splits=max(2, min(5, _n_pos, _n_neg)), shuffle=False)
-            for train_idx, val_idx in cv.split(X_train, y_train):
-                model.fit(X_train[train_idx], y_train[train_idx])
-                proba = model.predict_proba(X_train[val_idx])[:, 1]
-                try:
-                    cv_aucs.append(roc_auc_score(y_train[val_idx], proba))
-                except ValueError:
-                    pass  # single-class fold — skip
+            cv_aucs: list[float] = []
+            if _n_pos < 2 or _n_neg < 2:
+                logger.warning(
+                    f"[trainer] {symbol} ({label_name}): single-class data "
+                    f"(pos={_n_pos}, neg={_n_neg}) — skipping CV"
+                )
+            else:
+                cv = StratifiedKFold(n_splits=max(2, min(5, _n_pos, _n_neg)), shuffle=False)
+                for tr_idx, vl_idx in cv.split(X_tr, y_tr):
+                    base.fit(X_tr[tr_idx], y_tr[tr_idx])
+                    proba = base.predict_proba(X_tr[vl_idx])[:, 1]
+                    try:
+                        cv_aucs.append(roc_auc_score(y_tr[vl_idx], proba))
+                    except ValueError:
+                        pass
+            # Final fit on full training split
+            base.fit(X_tr, y_tr)
+            # G7: Platt / isotonic calibration so P=0.7 ≈ 70% empirical win-rate
+            try:
+                cal_model = CalibratedClassifierCV(base, method="isotonic", cv="prefit")
+                cal_model.fit(X_te, y_te)   # calibrate on the holdout set
+            except Exception as _cal_err:
+                logger.warning(f"[trainer] {symbol} calibration failed ({_cal_err}) — using uncalibrated")
+                cal_model = base  # type: ignore[assignment]
+            # Holdout AUC on calibrated model
+            try:
+                te_proba = cal_model.predict_proba(X_te)[:, 1]
+                h_auc = roc_auc_score(y_te, te_proba)
+            except ValueError:
+                h_auc = 0.0
+            return cal_model, h_auc, float(np.mean(cv_aucs)) if cv_aucs else 0.0
 
-        # Final fit on full training set
-        model.fit(X_train, y_train)
-
-        # ── 5. Holdout evaluation ────────────────────────────────────────────
-        try:
-            test_proba = model.predict_proba(X_test)[:, 1]
-            holdout_auc = roc_auc_score(y_test, test_proba)
-        except ValueError:
-            holdout_auc = 0.0
-
-        mean_cv_auc = float(np.mean(cv_aucs)) if cv_aucs else 0.0
-        logger.info(f"[trainer] {symbol}: CV AUC={mean_cv_auc:.3f}, holdout AUC={holdout_auc:.3f}")
+        # ── 3–5. Train BUY model ─────────────────────────────────────────────
+        y_buy = feat_df["label"].values.astype(int)
+        buy_model, holdout_auc, mean_cv_auc = _train_one(y_buy, "BUY")
+        logger.info(f"[trainer] {symbol}: BUY CV AUC={mean_cv_auc:.3f}, holdout AUC={holdout_auc:.3f}")
 
         if holdout_auc < self.MIN_AUC:
             logger.warning(
-                f"[trainer] {symbol}: holdout AUC {holdout_auc:.3f} < {self.MIN_AUC} — model NOT saved"
+                f"[trainer] {symbol}: BUY holdout AUC {holdout_auc:.3f} < {self.MIN_AUC} — model NOT saved"
             )
             # I7: dispatch in-app notification so operators know the model was rejected
             try:
@@ -505,34 +513,63 @@ class ModelTrainer:
                 "reason": f"AUC {holdout_auc:.3f} below threshold {self.MIN_AUC}",
             }
 
-        # ── 6. Persist model ─────────────────────────────────────────────────
+        # ── G6: Train dedicated SHORT model ──────────────────────────────────
+        # SHORT labels: 1 when price FALLS > 1.5×ATR within horizon candles.
+        feat_df_short = feat_df.copy()
+        _short_raw = _label_short(feat_df_short, horizon=label_horizon)
+        feat_df_short["label"] = _short_raw
+        feat_df_short = feat_df_short.dropna(subset=["label"])
+        short_model, short_auc, _ = (None, 0.0, 0.0)
+        if len(feat_df_short) >= effective_min_rows:
+            short_model, short_auc, _ = _train_one(
+                feat_df_short["label"].values.astype(int), "SHORT"
+            )
+            logger.info(f"[trainer] {symbol}: SHORT holdout AUC={short_auc:.3f}")
+        else:
+            logger.warning(
+                f"[trainer] {symbol}: insufficient rows for SHORT model "
+                f"({len(feat_df_short)} < {effective_min_rows}) — skipping"
+            )
+
+        # ── 6. Persist models ─────────────────────────────────────────────────
         today = datetime.date.today().isoformat()
         safe_sym = symbol.replace("/", "_").replace("-", "_")
         safe_tf  = timeframe.replace("/", "_")
-        # G8: filename encodes timeframe so same symbol can have separate models per TF
-        model_path = self.MODEL_DIR / f"{safe_sym}_{safe_tf}_{today}.pkl"
-        joblib.dump({"model": model, "features": active_features, "symbol": symbol,
-                     "timeframe": timeframe, "trained_at": today},
-                    model_path)
-        logger.info(f"[trainer] Model saved → {model_path}")
+
+        # BUY model (backward-compat key "symbol:timeframe" keeps old lookup working)
+        buy_path = self.MODEL_DIR / f"{safe_sym}_{safe_tf}_{today}_buy.pkl"
+        joblib.dump({"model": buy_model, "features": active_features, "symbol": symbol,
+                     "timeframe": timeframe, "trained_at": today, "direction": "buy"},
+                    buy_path)
+        logger.info(f"[trainer] BUY model saved → {buy_path}")
+
+        # SHORT model (only saved when it passes the min-rows check)
+        short_path = None
+        if short_model is not None:
+            short_path = self.MODEL_DIR / f"{safe_sym}_{safe_tf}_{today}_short.pkl"
+            joblib.dump({"model": short_model, "features": active_features, "symbol": symbol,
+                         "timeframe": timeframe, "trained_at": today, "direction": "short"},
+                        short_path)
+            logger.info(f"[trainer] SHORT model saved → {short_path}")
 
         # G9: delete old .pkl files for this symbol+timeframe to prevent unbounded accumulation
         for _old in self.MODEL_DIR.glob(f"{safe_sym}_{safe_tf}_*.pkl"):
-            if _old != model_path:
+            if _old not in (buy_path, short_path):
                 try:
                     _old.unlink(missing_ok=True)
                     logger.debug(f"[trainer] Removed old model: {_old.name}")
                 except Exception as _del_err:
                     logger.debug(f"[trainer] Could not remove {_old.name}: {_del_err}")
 
-        # Update latest.json registry — key is "symbol:timeframe" for TF-aware lookup
+        # Update latest.json registry
         latest_path = self.MODEL_DIR / "latest.json"
         try:
             latest = json.loads(latest_path.read_text()) if latest_path.exists() else {}
         except json.JSONDecodeError:
             latest = {}
         registry_key = f"{symbol}:{timeframe}"
-        latest[registry_key] = str(model_path)
+        latest[registry_key] = str(buy_path)                         # BUY (default)
+        latest[f"{registry_key}:short"] = str(short_path) if short_path else None
         latest_path.write_text(json.dumps(latest, indent=2))
 
         return {
@@ -541,6 +578,7 @@ class ModelTrainer:
             "status": "trained",
             "auc": round(holdout_auc, 4),
             "cv_auc": round(mean_cv_auc, 4),
-            "model_path": str(model_path),
+            "short_auc": round(short_auc, 4),
+            "model_path": str(buy_path),
             "rows_used": len(feat_df),
         }

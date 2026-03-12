@@ -614,23 +614,51 @@ class ForwardEngine:
                     "option_right":  legs[0].get("right"),
                 }
             elif len(legs) > 1:
-                logger.warning(
-                    f"[ForwardEngine] Multi-leg option ({meta.get('strategy_type', '?')}) for "
-                    f"{signal.symbol} — live execution not supported; switch to paper mode."
-                )
                 if not is_paper:
-                    # BUG-20 FIX: in live mode, refuse execution entirely for multi-leg options
-                    # rather than silently placing a plain market order on the underlying,
-                    # which would create an unintended unhedged outright position.
-                    logger.error(
-                        f"[ForwardEngine] LIVE multi-leg option rejected for {signal.symbol} "
-                        "— use paper mode or reduce to a single-leg order."
-                    )
-                    return None
+                    # GAP-01: IBKR live multi-leg execution via BAG combo contract.
+                    if broker_key == "ibkr":
+                        expiry = meta.get("expiry", "")
+                        quantity = max(1, int(getattr(signal, "quantity", 1) or 1))
+                        try:
+                            result = await broker.place_multi_leg_order(
+                                symbol=signal.symbol,
+                                legs=legs,
+                                quantity=quantity,
+                                expiry=expiry,
+                            )
+                        except Exception as _mleg_err:
+                            logger.error(
+                                f"[ForwardEngine] LIVE multi-leg IBKR order failed for "
+                                f"{signal.symbol}: {_mleg_err}"
+                            )
+                            return None
+                        trade.entry_price = result.fill_price or signal.entry_price
+                        trade.status = OrderStatus.OPEN
+                        trade.broker_order_id = result.order_id
+                        if db_session:
+                            db_session.add(trade)
+                            await db_session.commit()
+                            await db_session.refresh(trade)
+                        logger.info(
+                            f"[ForwardEngine] ✅ LIVE multi-leg IBKR order placed: "
+                            f"{signal.signal} {signal.symbol} @ {trade.entry_price} "
+                            f"(order_id={trade.broker_order_id})"
+                        )
+                        return trade
+                    else:
+                        logger.error(
+                            f"[ForwardEngine] LIVE multi-leg options not supported for "
+                            f"broker '{broker_key}' — use IBKR or switch to paper mode."
+                        )
+                        return None
                 # BUG-CRIT-02 FIX: Paper mode multi-leg options — simulate execution without
                 # calling broker.place_order() (no broker supports multi-leg paper orders).
                 # Mark OPEN directly so the position is tracked and monitor_sl_tp can apply
                 # software-side SL/TP on the net premium.
+                logger.warning(
+                    f"[ForwardEngine] Multi-leg option ({meta.get('strategy_type', '?')}) for "
+                    f"{signal.symbol} — paper simulation (live requires IBKR)."
+                )
                 trade.entry_price = signal.entry_price
                 trade.status = OrderStatus.OPEN
                 trade.broker_order_id = (

@@ -185,10 +185,29 @@ def nearest_strike(price: float, around: float) -> float:
     return round(around / step) * step
 
 
+# GAP-05: NYSE observed holidays 2025-2027 (hardcoded to avoid external dependency).
+# Sources: NYSE holiday schedule. Roll-back to prior day handled in next_monthly_expiry().
+_NYSE_HOLIDAYS: frozenset = frozenset({
+    # 2025
+    date(2025, 1, 1), date(2025, 1, 20), date(2025, 2, 17), date(2025, 4, 18),
+    date(2025, 5, 26), date(2025, 7, 4), date(2025, 9, 1), date(2025, 11, 27),
+    date(2025, 12, 25),
+    # 2026
+    date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
+    date(2026, 5, 25), date(2026, 7, 3), date(2026, 9, 7), date(2026, 11, 26),
+    date(2026, 12, 25),
+    # 2027
+    date(2027, 1, 1), date(2027, 1, 18), date(2027, 2, 15), date(2027, 3, 26),
+    date(2027, 5, 31), date(2027, 7, 5), date(2027, 9, 6), date(2027, 11, 25),
+    date(2027, 12, 24),
+})
+
+
 def next_monthly_expiry(dte_target: int = 30) -> str:
     """
     Return the YYYYMMDD string of the next standard monthly options expiry
     (third Friday of a month) that is at least `dte_target` calendar days away.
+    If the third Friday falls on a NYSE holiday, rolls back to the prior trading day.
     """
     today = date.today()
     for mo_offset in range(5):          # scan up to 5 months ahead
@@ -199,6 +218,10 @@ def next_monthly_expiry(dte_target: int = 30) -> str:
         # Advance to first Friday (weekday 4)
         days_to_fri = (4 - first_day.weekday()) % 7
         third_friday = first_day + timedelta(days=days_to_fri + 14)
+        # GAP-05: roll back past any NYSE holidays (Saturday/Sunday already can't
+        # be third Friday, but a holiday on Friday triggers the loop)
+        while third_friday in _NYSE_HOLIDAYS:
+            third_friday -= timedelta(days=1)
         if (third_friday - today).days >= dte_target:
             return third_friday.strftime("%Y%m%d")
     # Fallback: dte_target days from today

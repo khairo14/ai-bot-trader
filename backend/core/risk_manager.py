@@ -560,3 +560,32 @@ class RiskManager:
         self.consecutive_losses = 0
         self._save_state()
         logger.info("[RiskManager] Consecutive-loss counter reset manually.")
+
+    def maybe_reset_on_regime_change(self, strategy_name: str, current_regime: str) -> bool:
+        """
+        IMP-05: Regime-aware circuit-breaker reset.
+
+        If a per-strategy CB was tripped while the regime was `high_volatility`
+        and the current regime has since normalised (is no longer high_volatility),
+        reset the CB automatically — the losses were regime-driven, not
+        strategy-driven, and blocking the strategy indefinitely hurts edge.
+
+        Returns True if a reset was performed, False otherwise.
+        """
+        _HIGH_VOL = "high_volatility"
+        s = self._per_strategy.get(strategy_name)
+        if not s:
+            return False
+        if not s.get("circuit_breaker_active", False):
+            return False
+        if current_regime == _HIGH_VOL:
+            return False  # regime still hostile — keep CB active
+        # CB is active AND regime has normalised → auto-reset
+        s["circuit_breaker_active"] = False
+        s["consecutive_losses"] = 0
+        self._save_state()
+        logger.info(
+            f"[RiskManager] IMP-05 — auto-reset CB for '{strategy_name}' "
+            f"because regime normalised to '{current_regime}' (was high_volatility)."
+        )
+        return True

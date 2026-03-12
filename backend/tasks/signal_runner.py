@@ -384,6 +384,18 @@ def run_signals(self):
                                     _symbol_key, _raw_regime, _hysteresis_n
                                 )
 
+                                # IMP-05: auto-reset per-strategy CB when regime normalises
+                                # away from high_volatility — losses were regime-driven.
+                                from core.risk_manager import get_risk_manager as _get_rm
+                                _rm = _get_rm()
+                                if _rm.maybe_reset_on_regime_change(
+                                    strategy_type, _confirmed_regime
+                                ):
+                                    logger.info(
+                                        f"[RegimeRouter] {strat.name} | {symbol} | "
+                                        f"regime={_confirmed_regime} → CB auto-reset"
+                                    )
+
                                 # If classifier had no data / errored, confidence=0.0
                                 # means we can't trust the classification — skip filtering
                                 if _regime_result.confidence == 0.0:
