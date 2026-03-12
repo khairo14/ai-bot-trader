@@ -468,13 +468,15 @@ def run_signals(self):
                         # even if auto-switch ran a different strategy.
                         if _active_strategy_type != strategy_type:
                             sig.reasons = (sig.reasons or []) + [
-                                f"auto-switched from {strategy_type} "
+                                f"configured as {strategy_type}, executed as "
+                                f"{_active_strategy_type} via regime auto-switch "
                                 f"(regime: {_confirmed_regime if _regime_enabled else 'n/a'})"
                             ]
-                            # Restore the configured strategy name so DB dedup, advisory lock,
-                            # and TradeOutcome all key on the same identity.  The reasons list
-                            # above already records which strategy actually ran.
-                            sig.strategy_name = strategy_type
+                            # Keep sig.strategy_name as the strategy that actually ran
+                            # (_active_strategy_type) so ML feedback and analytics correctly
+                            # attribute the outcome to the executing strategy, not the
+                            # configured one. Dedup keys on strategy_type below so each
+                            # configured row remains independent.
 
                         # ── Persist signal to DB ─────────────────────────────────
                         # Coerce enums safely
@@ -513,7 +515,11 @@ def run_signals(self):
                         _dup_q = await session.execute(
                             select(SignalModel.id).where(
                                 and_(
-                                    SignalModel.strategy_name == (sig.strategy_name or strategy_type),
+                                    # Key on the configured strategy_type (not the switched
+                                    # sig.strategy_name) so each configured strategy row has
+                                    # its own dedup slot and auto-switch can't eat another
+                                    # row's candle window.
+                                    SignalModel.strategy_name == strategy_type,
                                     SignalModel.symbol == sig.symbol,
                                     SignalModel.signal == sig_type,
                                     SignalModel.timeframe == timeframe,

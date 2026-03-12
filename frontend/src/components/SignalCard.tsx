@@ -37,6 +37,7 @@ interface Signal {
   broker: string
   reasons: string[]
   created_at: string
+  acted_on: boolean
   // Options fields (undefined for equity signals)
   iv_rank?: number
   delta?: number
@@ -120,9 +121,13 @@ export default function SignalCard({ signal }: Props) {
   // auto-execution. The risk manager gate is intentionally NOT blocked here — the user
   // can still attempt manual override and will receive a clear rejection message.
   const suppressionReason = reasons.find(r => r.startsWith('execution suppressed'))
-  const isButtonDisabled = isStale || !!suppressionReason
+  const isButtonDisabled = signal.acted_on || isStale || !!suppressionReason
 
   const executeSignal = async () => {
+    if (signal.acted_on) {
+      toast.error('This signal was already executed.')
+      return
+    }
     if (isStale) {
       toast.error(`Signal is ${ageMin}m old — price levels may be invalid. Run Now to get a fresh signal.`)
       return
@@ -304,7 +309,7 @@ export default function SignalCard({ signal }: Props) {
               ? `Stale (${ageMin}m ago) — Run Now first`
               : suppressionReason
               ? `Suppressed — ${suppressionReason.replace('execution suppressed: ', '')}`
-              : 'Execute Signal'}
+              : signal.acted_on ? 'Signal Executed' : 'Execute Signal'}
           </button>
         </div>
       )}

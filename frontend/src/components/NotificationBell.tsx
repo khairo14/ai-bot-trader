@@ -65,7 +65,16 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
         axios.get('/api/notifications/?limit=25'),
         axios.get('/api/notifications/unread-count'),
       ])
-      setNotifications(listRes.data.notifications || [])
+      const fetched: Notif[] = listRes.data.notifications || []
+      setNotifications(prev => {
+        // Preserve WS-inserted notifications not yet committed to DB.
+        // Without this, the initial fetch (or any poll) that resolves after
+        // a WS insert would overwrite state with stale data and the
+        // notification would disappear immediately.
+        const fetchedIds = new Set(fetched.map(n => n.id))
+        const wsOnly = prev.filter(n => !fetchedIds.has(n.id))
+        return [...wsOnly, ...fetched].slice(0, 25)
+      })
       setUnread(countRes.data.unread_count ?? 0)
     } catch { /* silent */ }
   }, [])
