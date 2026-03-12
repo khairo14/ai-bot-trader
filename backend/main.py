@@ -117,7 +117,7 @@ async def _forward_test_scheduler():
         last_fired = {}
 
     CLOSE_BUFFER = 30       # seconds after candle close before we fire
-    _strat_sem = asyncio.Semaphore(8)   # cap concurrent strategy tasks → protect DB pool
+    _strat_sem = asyncio.Semaphore(12)  # cap concurrent strategy tasks → protect DB pool (supports 30 strategies)
 
     logger.info("[Scheduler] Wall-clock-aligned, market-hours-aware scheduler started.")
 

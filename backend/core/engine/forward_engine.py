@@ -1080,8 +1080,19 @@ class ForwardEngine:
                 trade.pnl = round(raw_pnl, 4)
                 cost_basis = trade.entry_price * trade.quantity
                 trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
-
-        trade.status = OrderStatus.FILLED
+            trade.status = OrderStatus.FILLED
+        else:
+            # Couldn't obtain exit price — mark CANCELLED so the dashboard
+            # never shows a FILLED trade with blank exit/P&L.
+            trade.status = OrderStatus.CANCELLED
+            trade.notes = (
+                (trade.notes or "") +
+                " Closed but exit price unavailable — marked CANCELLED."
+            ).strip()
+            logger.warning(
+                f"[ForwardEngine] close_position: {trade.symbol} id={trade.id} "
+                f"exit_price=0 → CANCELLED (price fetch failed)"
+            )
         trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         # Remove from in-memory cache
         _trade_bk = trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker)
@@ -1795,6 +1806,20 @@ class ForwardEngine:
                     f"[ForwardEngine] RECONCILE ghost: {trade.symbol} id={trade.id} "
                     f"not in {broker_name} positions — closing in DB"
                 )
+                # Guard: zero-qty entries were never actually executed at the broker.
+                # Marking them FILLED would produce phantom trades with no exit/P&L.
+                if (trade.quantity or 0) <= 0:
+                    trade.status = OrderStatus.CANCELLED
+                    trade.notes = (
+                        (trade.notes or "") +
+                        " Zero-quantity order — never executed at broker."
+                    ).strip()
+                    ghost_count += 1
+                    logger.info(
+                        f"[ForwardEngine] Reconcile: {trade.symbol} id={trade.id} "
+                        f"qty=0 → CANCELLED (never executed)"
+                    )
+                    continue
                 try:
                     exit_price: float = 0.0
                     is_long = trade.side in _long_sides
@@ -1884,8 +1909,19 @@ class ForwardEngine:
                             trade.pnl = round(raw_pnl, 4)
                             cost_basis = trade.entry_price * trade.quantity
                             trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
-
-                    trade.status = OrderStatus.FILLED
+                        trade.status = OrderStatus.FILLED
+                    else:
+                        # Could not retrieve exit price → mark CANCELLED so the trade
+                        # doesn't appear as a FILLED record with no exit/P&L data.
+                        trade.status = OrderStatus.CANCELLED
+                        trade.notes = (
+                            (trade.notes or "") +
+                            " Closed at broker but exit price unavailable — marked CANCELLED."
+                        ).strip()
+                        logger.warning(
+                            f"[ForwardEngine] Reconcile: {trade.symbol} id={trade.id} "
+                            f"exit_price=0 → CANCELLED (price unavailable)"
+                        )
                     trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     _mon_bk = trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker)
                     self._paper_positions.pop(f"{trade.symbol}:{_mon_bk}", None)
