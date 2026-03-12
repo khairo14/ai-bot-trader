@@ -44,6 +44,11 @@ async def _sl_tp_heartbeat():
                         logger.info(f"[SL/TP Heartbeat] Reconciled {ghosts} broker-closed position(s)")
                 except Exception as _re:
                     logger.debug(f"[SL/TP Heartbeat] Reconcile error: {_re}")
+                    # Rollback so monitor_sl_tp / cleanup_stale_pending_trades can still run
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
                 try:
                     closed = await _engine.monitor_sl_tp(session)
                     if closed:

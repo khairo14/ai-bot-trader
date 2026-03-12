@@ -2408,6 +2408,21 @@ class ForwardEngine:
                         _osig = None
 
                     _o_model = Trade if _orph_is_paper else LiveTrade
+
+                    # Guard: if this signal already has a trade (any status), skip.
+                    # Same check as IBKR orphan sync — prevents UniqueViolationError on
+                    # uq_trades_signal_id which poisons the session for the rest of the tick.
+                    if _osig is not None:
+                        _ex_sig_q = await db_session.execute(
+                            _sel(_o_model).where(_o_model.signal_id == _osig.id)
+                        )
+                        if _ex_sig_q.scalar_one_or_none() is not None:
+                            logger.debug(
+                                f"[ForwardEngine] Orphan sync ({_orph_broker}): {_op.symbol} — "
+                                f"signal_id={_osig.id} already has a trade record; skipping"
+                            )
+                            continue
+
                     _onew = _o_model(
                         symbol=_op.symbol,
                         side=_op.side,
@@ -2436,6 +2451,12 @@ class ForwardEngine:
                     await db_session.commit()
             except Exception as _o2e:
                 logger.debug(f"[ForwardEngine] Orphan sync skipped for {_orph_broker}: {_o2e}")
+                # CRITICAL: rollback the session so subsequent operations (monitor_sl_tp,
+                # cleanup_stale_pending_trades) are not blocked by a poisoned transaction.
+                try:
+                    await db_session.rollback()
+                except Exception:
+                    pass
 
         return ghost_count + orphan_count
 
