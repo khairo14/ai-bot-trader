@@ -785,6 +785,7 @@ export default function ForwardTest() {
                         <th className="text-left px-2 py-2 font-medium w-20">Exit</th>
                         <th className="text-left px-2 py-2 font-medium w-28">P&L</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Status</th>
+                        <th className="text-left px-2 py-2 font-medium w-20">Broker</th>
                         <th className="text-left px-2 py-2 font-medium">Strategy</th>
                         <th className="text-left px-2 py-2 font-medium w-32">Opened</th>
                       </tr>
@@ -819,6 +820,7 @@ export default function ForwardTest() {
                               }`}>{t.is_paper ? 'paper' : 'LIVE'}</span>
                             </div>
                           </td>
+                          <td className="px-2 py-2 text-gray-400 capitalize">{t.broker}</td>
                           <td className="px-2 py-2 text-gray-400 truncate">{t.strategy_name ?? '—'}</td>
                           <td className="px-2 py-2 text-gray-500 whitespace-nowrap">
                             {t.opened_at ? parseUtc(t.opened_at)?.toLocaleString() : '—'}
