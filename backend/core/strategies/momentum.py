@@ -21,6 +21,7 @@ from loguru import logger
 
 from core.strategies.base import BaseStrategy, Signal
 from core.regime_classifier import regime_classifier
+from core.ml_scorer import ml_scorer
 from tools.basic.volume_atr_adx import VolumeAnalysis, ATR, ADX
 from tools.basic.moving_averages import MovingAverages
 
@@ -133,8 +134,22 @@ class MomentumBreakoutStrategy(BaseStrategy):
         LONG_THRESHOLD  = max(1, 3 + score_adj["long_delta"])
         SHORT_THRESHOLD = max(1, 3 + score_adj["short_delta"])
 
+        # ML gate: same veto logic as hybrid strategy
+        ml_prob: Optional[float] = None
+        try:
+            ml_prob = ml_scorer.predict_proba(data, symbol, timeframe=timeframe)
+        except Exception as _ml_err:
+            logger.debug(f"[{self.name}] ML scorer skipped: {_ml_err}")
+
+        ML_VETO_BUY   = 0.35   # P(buy) below this → suppress BUY
+        ML_VETO_SHORT = 0.65   # P(buy) above this → suppress SHORT
+
         if broke_up and long_score >= LONG_THRESHOLD:
+            if ml_prob is not None and ml_prob < ML_VETO_BUY:
+                return _hold([f"ML veto: P(buy)={ml_prob:.2f} < {ML_VETO_BUY} — breakout unconfirmed by model"])
             confidence = min(long_score / 5, 1.0)
+            if ml_prob is not None:
+                confidence = round(0.6 * confidence + 0.4 * ml_prob, 3)
             return self._enhance_signal(Signal(
                 symbol=symbol, signal="BUY",
                 entry_price=current_price,
@@ -143,12 +158,16 @@ class MomentumBreakoutStrategy(BaseStrategy):
                 confidence=round(confidence, 3),
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=reasons_long + [f"Regime: {regime_name}"],
+                reasons=reasons_long + [f"Regime: {regime_name}"] + ([f"ML P(buy)={ml_prob:.2f}"] if ml_prob is not None else []),
                 regime=regime_name,
             ), data, atr_val)
 
         if broke_down and short_score >= SHORT_THRESHOLD:
+            if ml_prob is not None and ml_prob > ML_VETO_SHORT:
+                return _hold([f"ML veto: P(buy)={ml_prob:.2f} > {ML_VETO_SHORT} — breakdown unconfirmed by model"])
             confidence = min(short_score / 5, 1.0)
+            if ml_prob is not None:
+                confidence = round(0.6 * confidence + 0.4 * (1.0 - ml_prob), 3)
             return self._enhance_signal(Signal(
                 symbol=symbol, signal="SHORT",
                 entry_price=current_price,
@@ -157,7 +176,7 @@ class MomentumBreakoutStrategy(BaseStrategy):
                 confidence=round(confidence, 3),
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=(reasons_short if broke_down else reasons) + [f"Regime: {regime_name}"],
+                reasons=(reasons_short if broke_down else reasons) + [f"Regime: {regime_name}"] + ([f"ML P(buy)={ml_prob:.2f}"] if ml_prob is not None else []),
                 regime=regime_name,
             ), data, atr_val)
 

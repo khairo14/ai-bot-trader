@@ -4,6 +4,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Minimum number of newly-resolved live outcomes before triggering an
+# opportunistic daily retrain.  Set low (3) so early-stage bots with few
+# trades still benefit from fresh labels quickly.
+MIN_NEW_OUTCOMES_FOR_RETRAIN = 3
+
 
 @celery_app.task(name="tasks.ml_retrain.retrain_all", bind=True, max_retries=1)
 def retrain_all(self):
@@ -101,3 +106,104 @@ def retrain_all(self):
     except Exception as exc:
         logger.error(f"ML retrain task failed: {exc}")
         raise self.retry(exc=exc, countdown=600)
+
+
+@celery_app.task(name="tasks.ml_retrain.retrain_if_new_outcomes", bind=True, max_retries=1)
+def retrain_if_new_outcomes(self):
+    """
+    Daily opportunistic retrain — only fires when enough new resolved live
+    outcomes have accumulated since the last model was saved.
+
+    This ensures:
+    - Models stay fresh in active trading periods without waiting for Sunday
+    - Symbols with no new data are skipped (no wasted compute)
+    - Cold-start bootstraps faster once first trades resolve
+    """
+    try:
+        import asyncio
+        import datetime
+        import pathlib
+        import json
+
+        async def _check_and_retrain():
+            from db.database import AsyncSessionLocal
+            from db.models import TradeOutcome
+            from sqlalchemy import select, func
+
+            # Find symbols with outcomes resolved in the last 48 h
+            cutoff = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(hours=48)
+
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(TradeOutcome.symbol, func.count(TradeOutcome.id).label("cnt"))
+                    .where(
+                        TradeOutcome.resolved == True,  # noqa: E712
+                        TradeOutcome.ml_label != None,   # noqa: E711
+                        TradeOutcome.resolved_at >= cutoff,
+                    )
+                    .group_by(TradeOutcome.symbol)
+                    .having(func.count(TradeOutcome.id) >= MIN_NEW_OUTCOMES_FOR_RETRAIN)
+                )
+                rows = result.all()
+
+            if not rows:
+                logger.info("[ml_retrain] Opportunistic check: no symbols with enough new outcomes — skipping")
+                return {"status": "skipped", "reason": "no_new_outcomes"}
+
+            symbols_to_retrain = [r.symbol for r in rows]
+            logger.info(f"[ml_retrain] Opportunistic retrain triggered for: {symbols_to_retrain}")
+
+            from models.trainer import ModelTrainer
+            from core.ml_scorer import ml_scorer
+
+            trainer = ModelTrainer()
+
+            # Fetch strategy configs to get broker/timeframe for each symbol
+            from db.models import Strategy as StrategyModel
+            async with AsyncSessionLocal() as session:
+                strats = (await session.execute(
+                    select(StrategyModel).where(StrategyModel.is_active == True)  # noqa: E712
+                )).scalars().all()
+
+            sym_config: dict[str, tuple[str, str]] = {}
+            for s in strats:
+                params = s.parameters or {}
+                sym = params.get("symbol")
+                if sym and sym in symbols_to_retrain:
+                    broker = str(s.broker.value) if hasattr(s.broker, "value") else str(s.broker)
+                    tf = params.get("timeframe", "1d")
+                    sym_config[sym] = (broker, tf)
+
+            results = []
+            for sym in symbols_to_retrain:
+                broker, tf = sym_config.get(sym, ("binance", "1d"))
+                res = await trainer.train_symbol(sym, broker, timeframe=tf)
+                results.append(res)
+
+            trained = sum(1 for r in results if r.get("status") == "trained")
+            if trained:
+                ml_scorer.reload()
+                # Best-effort cache flush on FastAPI process
+                try:
+                    import httpx
+                    from config import settings as _settings
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None,
+                        lambda: httpx.post(
+                            f"{_settings.api_internal_url}/internal/ml/reload",
+                            headers={"X-Internal-Secret": _settings.internal_api_secret},
+                            timeout=5.0,
+                        ),
+                    )
+                except Exception as _flush_err:
+                    logger.debug(f"[ml_retrain] Opportunistic cache flush skipped: {_flush_err}")
+
+            return {"status": "complete", "trained": trained, "symbols": results}
+
+        report = asyncio.run(_check_and_retrain())
+        logger.info(f"[ml_retrain] Opportunistic retrain result: {report}")
+        return report
+    except Exception as exc:
+        logger.error(f"Opportunistic ML retrain failed: {exc}")
+        raise self.retry(exc=exc, countdown=300)

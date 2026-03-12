@@ -48,6 +48,12 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.ml_retrain.retrain_all",
         "schedule": crontab(hour=2, minute=0, day_of_week="sunday"),
     },
+    # Opportunistic daily retrain: only fires when >=3 new live outcomes resolved
+    # in the last 48 h.  Runs after the nightly outcome resolver (01:30 UTC).
+    "ml-retrain-daily-if-new-outcomes": {
+        "task": "tasks.ml_retrain.retrain_if_new_outcomes",
+        "schedule": crontab(hour=3, minute=0),  # Mon-Sat; Sun is covered by full retrain
+    },
     # Rebalance portfolio weights weekly (Sunday 03:00 UTC — after ML retrain)
     "portfolio-rebalance-weekly": {
         "task": "tasks.portfolio_rebalancer.rebalance",

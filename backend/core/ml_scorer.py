@@ -148,9 +148,44 @@ class MLScorer:
         if model_data is None:
             return None
 
+        # GAP-07 FIX: warn when model is stale so operators know to trigger a retrain.
+        # Staleness ≥ 14 days emits a warning; ≥ 30 days emits a critical alert.
+        _trained_at = model_data.get("trained_at")
+        if _trained_at:
+            try:
+                import datetime as _dt
+                _trained_date = _dt.date.fromisoformat(str(_trained_at))
+                _days_old = (_dt.date.today() - _trained_date).days
+                if _days_old >= 30:
+                    logger.warning(
+                        f"[MLScorer] CRITICAL STALE MODEL: {symbol}:{timeframe} is {_days_old} days old "
+                        f"(trained {_trained_at}). Predictions may be unreliable — retrain immediately."
+                    )
+                elif _days_old >= 14:
+                    logger.warning(
+                        f"[MLScorer] STALE MODEL: {symbol}:{timeframe} is {_days_old} days old "
+                        f"(trained {_trained_at}). Consider triggering a retrain."
+                    )
+            except Exception:
+                pass
+
         feats = _compute_features(df)
         if feats is None:
             return None
+
+        # G5: add regime_code for the latest candle so inference matches training.
+        # Compute regime on the last 50 rows (same window used in trainer._add_regime_codes).
+        try:
+            from core.regime_classifier import regime_classifier as _rc
+            from core.features import _REGIME_ENCODING
+            _window = df.tail(50) if len(df) >= 50 else df
+            _regime_result = _rc.classify(_window)
+            _regime_code = _REGIME_ENCODING.get(_regime_result.regime, 0)
+            feats = feats.copy()
+            feats["regime_code"] = _regime_code
+        except Exception as _re:
+            logger.debug(f"[MLScorer] regime_code computation skipped: {_re}")
+            feats["regime_code"] = 0  # fallback to ranging
 
         # Take the last row for inference — do NOT dropna here.
         # XGBoost handles NaN natively via its missing-value split direction,

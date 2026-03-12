@@ -334,6 +334,15 @@ class RiskManager:
 
         # ── Level 1: Position sizing (broker-specific risk %) ─────────────────
         risk_amount = account_balance * _risk_per_trade
+
+        # ML-confidence scaling: signals with higher blended confidence (rule + ML)
+        # receive proportionally more capital.  Maps confidence ∈ [0, 1] → scale ∈ [0.5, 1.0]
+        # so even a minimum-confidence signal still risks 50% of the normal amount.
+        # confidence=1.0 → 100 % risk; confidence=0.5 → 75 %; confidence=0.0 → 50 %.
+        _sig_conf = float(getattr(signal, "confidence", 1.0) or 1.0)
+        _conf_scale = 0.5 + 0.5 * max(0.0, min(1.0, _sig_conf))
+        risk_amount *= _conf_scale
+
         stop_distance = abs(signal.entry_price - signal.stop_loss)
 
         if stop_distance <= 0:

@@ -165,6 +165,40 @@ def _compute_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _add_regime_codes(feat_df: pd.DataFrame, ohlcv_df: pd.DataFrame) -> pd.DataFrame:
+    """G5 FIX: Compute market regime for every row in the training DataFrame.
+
+    Uses a 50-candle rolling window to classify regime at each point in time,
+    matching what the live system does at inference.  The regime is encoded as
+    an integer (see features._REGIME_ENCODING) and stored in the `regime_code`
+    column so XGBoost can learn regime-specific signal quality.
+
+    Falls back gracefully: if the classifier raises for a window, that row's
+    regime_code is set to 0 (ranging — the safe default).
+    """
+    from core.regime_classifier import regime_classifier as _rc
+    from core.features import _REGIME_ENCODING
+
+    WINDOW = 50
+    codes: list[int] = []
+    n = len(ohlcv_df)
+
+    for i in range(n):
+        if i < WINDOW - 1:
+            codes.append(0)   # not enough history → default to ranging
+            continue
+        window_df = ohlcv_df.iloc[i - WINDOW + 1: i + 1]
+        try:
+            result = _rc.classify(window_df)
+            codes.append(_REGIME_ENCODING.get(result.regime, 0))
+        except Exception:
+            codes.append(0)
+
+    feat_df = feat_df.copy()
+    feat_df["regime_code"] = codes
+    return feat_df
+
+
 def _label(feat_df: pd.DataFrame, horizon: int = 24) -> pd.Series:
     """Binary label: 1 if price rises > 1.5 × ATR within `horizon` candles."""
     close = feat_df["_close"]
@@ -342,6 +376,8 @@ class ModelTrainer:
 
         # ── 2. Feature engineering ───────────────────────────────────────────
         feat_df = _compute_features(df)
+        # G5: add regime_code column via 50-candle rolling regime classifier
+        feat_df = _add_regime_codes(feat_df, df)
         labels = _label(feat_df, horizon=label_horizon)
 
         # Combine and drop NaN rows

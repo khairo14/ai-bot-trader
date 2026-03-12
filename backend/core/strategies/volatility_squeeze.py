@@ -37,6 +37,7 @@ from loguru import logger
 
 from core.strategies.base import BaseStrategy, Signal
 from core.regime_classifier import regime_classifier
+from core.ml_scorer import ml_scorer
 from tools.basic.bollinger_bands import BollingerBands
 from tools.basic.macd import MACD
 from tools.basic.volume_atr_adx import VolumeAnalysis, ATR, ADX
@@ -240,8 +241,22 @@ class VolatilitySqueezeStrategy(BaseStrategy):
         atr_sl = atr_mults["sl"] * atr_val
         atr_tp = atr_mults["tp"] * atr_val
 
+        # ML gate: same veto logic as hybrid strategy
+        ml_prob: Optional[float] = None
+        try:
+            ml_prob = ml_scorer.predict_proba(data, symbol, timeframe=timeframe)
+        except Exception as _ml_err:
+            logger.debug(f"[{self.name}] ML scorer skipped: {_ml_err}")
+
+        ML_VETO_BUY   = 0.35
+        ML_VETO_SHORT = 0.65
+
         if long_score >= long_threshold:
+            if ml_prob is not None and ml_prob < ML_VETO_BUY:
+                return _hold([f"ML veto: P(buy)={ml_prob:.2f} < {ML_VETO_BUY} — squeeze breakout unconfirmed"])
             confidence = round(min(long_score / 5.0, 1.0), 3)
+            if ml_prob is not None:
+                confidence = round(0.6 * confidence + 0.4 * ml_prob, 3)
             return self._enhance_signal(Signal(
                 symbol=symbol, signal="BUY",
                 entry_price=current_price,
@@ -250,12 +265,16 @@ class VolatilitySqueezeStrategy(BaseStrategy):
                 confidence=confidence,
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=long_reasons + [f"Regime: {regime_name}"],
+                reasons=long_reasons + [f"Regime: {regime_name}"] + ([f"ML P(buy)={ml_prob:.2f}"] if ml_prob is not None else []),
                 regime=regime_name,
             ), data, atr_val)
 
         if short_score >= short_threshold:
+            if ml_prob is not None and ml_prob > ML_VETO_SHORT:
+                return _hold([f"ML veto: P(buy)={ml_prob:.2f} > {ML_VETO_SHORT} — squeeze breakdown unconfirmed"])
             confidence = round(min(short_score / 5.0, 1.0), 3)
+            if ml_prob is not None:
+                confidence = round(0.6 * confidence + 0.4 * (1.0 - ml_prob), 3)
             return self._enhance_signal(Signal(
                 symbol=symbol, signal="SHORT",
                 entry_price=current_price,
@@ -264,7 +283,7 @@ class VolatilitySqueezeStrategy(BaseStrategy):
                 confidence=confidence,
                 timeframe=timeframe, strategy_name=self.name,
                 asset_class=self.asset_class, broker=self.broker,
-                reasons=short_reasons + [f"Regime: {regime_name}"],
+                reasons=short_reasons + [f"Regime: {regime_name}"] + ([f"ML P(buy)={ml_prob:.2f}"] if ml_prob is not None else []),
                 regime=regime_name,
             ), data, atr_val)
 

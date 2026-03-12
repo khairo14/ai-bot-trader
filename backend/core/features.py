@@ -21,7 +21,21 @@ FEATURE_COLS = [
     "williams_r",   # Williams %R (14) — overbought/oversold, independent of RSI
     "roc_10",       # Rate of Change over 10 periods — trend momentum
     "vwap_ratio",   # close / VWAP — price relative to volume-weighted mean (NaN for forex)
+    # G5 FIX: encode market regime so model can learn regime-specific signal quality.
+    # Integer encoding: 0=ranging, 1=trending_up, 2=trending_down, 3=high_volatility, 4=low_volatility
+    # Computed via sliding window in trainer.py; uses current regime in ml_scorer.py.
+    "regime_code",
 ]
+
+
+# G5: Integer encoding for market regime — must match regime_classifier constants.
+_REGIME_ENCODING: dict[str, int] = {
+    "ranging":          0,
+    "trending_up":      1,
+    "trending_down":    2,
+    "high_volatility":  3,
+    "low_volatility":   4,
+}
 
 
 def compute_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
@@ -117,4 +131,9 @@ def compute_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         "williams_r": williams_r,
         "roc_10":     roc_10,
         "vwap_ratio": vwap_ratio,
+        # regime_code is NOT computed here — it requires a sliding-window classifier
+        # call which is expensive and creates a circular import.
+        # • trainer.py adds regime_code via _add_regime_codes() on the full DataFrame.
+        # • ml_scorer.py adds regime_code for the latest candle before inference.
+        # The column is left absent here; callers that need it add it themselves.
     })
