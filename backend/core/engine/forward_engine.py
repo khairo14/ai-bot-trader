@@ -921,16 +921,34 @@ class ForwardEngine:
             return clean if _broker_key == "alpaca" else sym
 
         _skip_market_order = False
+        _norm_sym = _norm_sym_close(trade.symbol)
         try:
             _bpos = await broker.get_positions()
-            _norm_sym = _norm_sym_close(trade.symbol)
             _has_pos = any(abs(p.quantity) > 0 and p.symbol == _norm_sym for p in _bpos)
             if not _has_pos:
-                logger.warning(
-                    f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} qty=0 at {_broker_key} "
-                    f"— skipping market close order, marking FILLED at snapshot price"
+                # F-103 false-negative guard: broker APIs can transiently return an empty
+                # position list while a fill is settling (observed with Alpaca paper).  A
+                # false negative here skips the market close and marks the DB FILLED even
+                # though the position is still open — creating a stealth orphan on the next
+                # reconcile tick.  Retry once after a short delay before trusting "absent".
+                logger.info(
+                    f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} not found at {_broker_key} "
+                    f"— retrying position check in 2s before skipping close order"
                 )
-                _skip_market_order = True
+                await asyncio.sleep(2)
+                _bpos2 = await broker.get_positions()
+                _has_pos = any(abs(p.quantity) > 0 and p.symbol == _norm_sym for p in _bpos2)
+                if not _has_pos:
+                    logger.warning(
+                        f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} confirmed absent "
+                        f"at {_broker_key} after retry — skipping market close, marking FILLED at snapshot price"
+                    )
+                    _skip_market_order = True
+                else:
+                    logger.info(
+                        f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} reappeared on retry "
+                        f"— proceeding with market close order (transient position API gap)"
+                    )
         except Exception as _f103_err:
             logger.debug(f"[ForwardEngine] F-103 position check failed: {_f103_err} — proceeding with close order")
 
@@ -957,14 +975,37 @@ class ForwardEngine:
         _close_qty: float = trade.quantity
         _do_market_close: bool = True
         if not _skip_market_order:
-            # Cancel any standing bracket exit orders (SL guard, TP limit) so that
-            # the asset balance is fully freed before we issue the market close order.
-            # On Binance spot, open exit orders lock the full sell quantity — without
-            # cancellation, the market sell fails with "insufficient balance".
-            try:
-                await broker.cancel_open_orders(trade.symbol)
-            except Exception as _coo_err:
-                logger.debug(f"[ForwardEngine] pre-close cancel_open_orders failed: {_coo_err}")
+            # ── Alpaca: use atomic close_broker_position (cancels bracket orders AND
+            # closes the position in one API call) to avoid the 40310000 race where
+            # bracket/stop orders hold the full qty and a separate market order fails.
+            _cbp = getattr(broker, "close_broker_position", None)
+            if _cbp is not None:
+                try:
+                    _atomic_fill = await _cbp(trade.symbol)
+                    _do_market_close = False
+                    if _atomic_fill:
+                        exit_price = _atomic_fill
+                    logger.info(
+                        f"[ForwardEngine] Alpaca atomic close: {trade.symbol} id={trade.id} "
+                        f"fill={_atomic_fill or 'pending'}"
+                    )
+                except Exception as _cbp_err:
+                    logger.warning(
+                        f"[ForwardEngine] Alpaca atomic close failed for {trade.symbol}: {_cbp_err} "
+                        f"— falling back to cancel+market"
+                    )
+                    # Fall through to the cancel+market-order path below
+                    _do_market_close = True
+
+            if _do_market_close:
+                # Cancel any standing bracket exit orders (SL guard, TP limit) so that
+                # the asset balance is fully freed before we issue the market close order.
+                # On Binance spot, open exit orders lock the full sell quantity — without
+                # cancellation, the market sell fails with "insufficient balance".
+                try:
+                    await broker.cancel_open_orders(trade.symbol)
+                except Exception as _coo_err:
+                    logger.debug(f"[ForwardEngine] pre-close cancel_open_orders failed: {_coo_err}")
             # F-108: After cancelling bracket orders, verify the actual free balance.
             # Binance spot deducts fees from the received base quantity, so trade.quantity
             # (what was ordered) may exceed what's actually free.  Also handles the case
@@ -1073,12 +1114,46 @@ class ForwardEngine:
                         or ("-2022" in _err_str and _broker_key == "binance")           # Binance
                     )
                     if _is_already_flat:
-                        # Position is gone at the broker — don't revert the DB guard.
-                        # Fall through to the PnL section which will mark FILLED at snapshot price.
+                        # "Already flat" guard: verify the position is actually gone before
+                        # trusting the error code.  Alpaca code 40310000 can also fire when a
+                        # standing limit/stop order is locking the full quantity — the position
+                        # is still open in that case.  A false positive here creates a stealth
+                        # orphan (DB says FILLED, broker still holds the position).
+                        try:
+                            _af_positions = await broker.get_positions()
+                            _af_still_open = any(
+                                abs(p.quantity) > 0 and p.symbol == _norm_sym
+                                for p in _af_positions
+                            )
+                        except Exception:
+                            _af_still_open = False  # can't verify; trust the error
+                        if _af_still_open:
+                            # Position is still there — the error is NOT a genuine "already flat".
+                            # Treat as a real failure so the next tick can retry.
+                            logger.error(
+                                f"[ForwardEngine] {trade.symbol} id={trade.id}: got '{_broker_key}' "
+                                f"already-flat error code BUT position still open at broker. "
+                                f"Treating as real close failure — guard reverted. Error: {_close_err}"
+                            )
+                            if db_session is not None and trade.id is not None:
+                                from sqlalchemy import update as _upd_revert2
+                                _TM2 = type(trade)
+                                try:
+                                    await db_session.execute(
+                                        _upd_revert2(_TM2)
+                                        .where(_TM2.id == trade.id, _TM2.status == OrderStatus.PENDING)
+                                        .values(status=OrderStatus.OPEN)
+                                    )
+                                    await db_session.flush()
+                                except Exception:
+                                    pass
+                            _closing_ids.discard(trade.id)
+                            raise
+                        # Position confirmed gone — fall through to mark FILLED.
                         logger.warning(
                             f"[ForwardEngine] {trade.symbol} id={trade.id}: broker reports position "
-                            f"already closed ({_broker_key} code in error) — marking FILLED at snapshot price. "
-                            f"Error: {_close_err}"
+                            f"already closed ({_broker_key} code in error), confirmed absent "
+                            f"\u2014 marking FILLED at snapshot price. Error: {_close_err}"
                         )
                     else:
                         # F-103b / BUG-6 FIX: revert the atomic guard (PENDING→OPEN) for ANY
@@ -2241,56 +2316,37 @@ class ForwardEngine:
                     )
                     linked_signal = _sig_q2.scalar_one_or_none()
 
-                # Guard: if this signal already has a trade record (any status),
+                # Guard: if this signal already has an OPEN/PENDING trade record,
                 # do NOT insert another row — that would violate uq_trades_signal_id
-                # and poison the DB session, blocking all subsequent signal runs.
-                # This happens when a position was manually closed but a new IBKR
-                # position appears for the same symbol within the 48-hour window.
+                # and poison the DB session.  But if the existing trade is already
+                # FILLED/CANCELLED the position at IBKR is genuinely untracked — we
+                # delink from the signal (signal_id=None) so the new record gets
+                # created without hitting the unique constraint.
                 if linked_signal is not None:
                     _existing_for_sig = await db_session.execute(
                         _sel(_TradeModel).where(_TradeModel.signal_id == linked_signal.id)
                     )
                     _existing_trade = _existing_for_sig.scalar_one_or_none()
                     if _existing_trade is not None:
-                        # If the existing trade is already FILLED/CANCELLED, the position
-                        # at IBKR has no DB tracking — emit a warning so the user can act.
-                        if _existing_trade.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
-                            logger.warning(
-                                f"[ForwardEngine] UNTRACKED IBKR POSITION: {full_sym} is open at broker "
-                                f"but all linked DB records are closed (latest id={_existing_trade.id}, "
-                                f"status={_existing_trade.status.value}). Manual review required."
-                            )
-                            try:
-                                from notifications.notifier import notifier as _untrack_notify
-                                _umode = "PAPER" if _ibkr_is_paper else "LIVE"
-                                await _untrack_notify.warning(
-                                    db_session,
-                                    title=f"⚠️ [{_umode}] Untracked IBKR Position — {full_sym}",
-                                    message=(
-                                        f"IBKR has an open {pos.side.upper()} {full_sym} position "
-                                        f"({pos.quantity:.2f} units @ ~{pos.entry_price}) "
-                                        f"but the DB record #{_existing_trade.id} is already {_existing_trade.status.value}. "
-                                        f"This position has no SL/TP and is not being monitored. "
-                                        f"Close it manually in IBKR TWS."
-                                    ),
-                                    category="trade",
-                                    metadata={
-                                        "symbol": full_sym, "side": pos.side,
-                                        "quantity": pos.quantity, "entry_price": pos.entry_price,
-                                        "broker": "ibkr", "is_paper": _ibkr_is_paper,
-                                        "existing_trade_id": _existing_trade.id,
-                                        "source": "untracked_position",
-                                    },
-                                )
-                            except Exception as _un_err:
-                                logger.debug(f"[ForwardEngine] Untracked position notification failed: {_un_err}")
-                        else:
+                        if _existing_trade.status in (OrderStatus.OPEN, OrderStatus.PENDING):
+                            # Active trade already tracked — skip
                             logger.debug(
                                 f"[ForwardEngine] Orphan sync: {full_sym} — "
-                                f"signal_id={linked_signal.id} already has a trade record; "
+                                f"signal_id={linked_signal.id} already has an OPEN/PENDING trade; "
                                 f"skipping duplicate INSERT"
                             )
-                        continue  # skip this position — trade record already exists
+                            continue
+                        else:
+                            # Existing trade is FILLED/CANCELLED — position still open at broker.
+                            # Delink from signal so we can create a fresh unlinked OPEN record
+                            # (NULL signal_id is exempt from the unique constraint).
+                            logger.warning(
+                                f"[ForwardEngine] Orphan sync (ibkr): {full_sym} — "
+                                f"signal_id={linked_signal.id} has a {_existing_trade.status.value} trade "
+                                f"(id={_existing_trade.id}) but position still open at broker. "
+                                f"Recovering as unlinked orphan trade."
+                            )
+                            linked_signal = None  # delink to avoid unique constraint
 
                 new_trade = _TradeModel(
                     symbol=full_sym,
@@ -2443,19 +2499,34 @@ class ForwardEngine:
 
                     _o_model = Trade if _orph_is_paper else LiveTrade
 
-                    # Guard: if this signal already has a trade (any status), skip.
-                    # Same check as IBKR orphan sync — prevents UniqueViolationError on
-                    # uq_trades_signal_id which poisons the session for the rest of the tick.
+                    # Guard: if this signal already has an OPEN/PENDING trade, skip to
+                    # avoid a duplicate INSERT that would violate uq_trades_signal_id
+                    # and poison the DB session.  If the existing trade is FILLED/CANCELLED,
+                    # the position still exists at the broker with no active DB record —
+                    # delink from the signal (signal_id=None) so a fresh OPEN record is
+                    # created without hitting the unique constraint.
                     if _osig is not None:
                         _ex_sig_q = await db_session.execute(
                             _sel(_o_model).where(_o_model.signal_id == _osig.id)
                         )
-                        if _ex_sig_q.scalar_one_or_none() is not None:
-                            logger.debug(
-                                f"[ForwardEngine] Orphan sync ({_orph_broker}): {_op.symbol} — "
-                                f"signal_id={_osig.id} already has a trade record; skipping"
-                            )
-                            continue
+                        _existing_osig_trade = _ex_sig_q.scalar_one_or_none()
+                        if _existing_osig_trade is not None:
+                            if _existing_osig_trade.status in (OrderStatus.OPEN, OrderStatus.PENDING):
+                                # Active trade already tracked — skip
+                                logger.debug(
+                                    f"[ForwardEngine] Orphan sync ({_orph_broker}): {_op.symbol} — "
+                                    f"signal_id={_osig.id} already has an OPEN/PENDING trade; skipping"
+                                )
+                                continue
+                            else:
+                                # Existing trade closed but position still at broker — recover unlinked
+                                logger.warning(
+                                    f"[ForwardEngine] Orphan sync ({_orph_broker}): {_op.symbol} — "
+                                    f"signal_id={_osig.id} has a {_existing_osig_trade.status.value} trade "
+                                    f"(id={_existing_osig_trade.id}) but position still open at broker. "
+                                    f"Recovering as unlinked orphan trade."
+                                )
+                                _osig = None  # delink to avoid unique constraint
 
                     # Validate SL/TP orientation — same guard as IBKR orphan sync.
                     # Stale signal SL/TP may be inverted relative to the recovered position's side.
@@ -2494,6 +2565,8 @@ class ForwardEngine:
                         opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
                     )
                     db_session.add(_onew)
+                    if _osig is not None and not _osig.acted_on:
+                        _osig.acted_on = True
                     orphan_count += 1
                     logger.info(
                         f"[ForwardEngine] ORPHAN SYNC ({_orph_broker}): created LiveTrade for "

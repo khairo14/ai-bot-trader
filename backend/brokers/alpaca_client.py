@@ -408,6 +408,67 @@ class AlpacaClient(AbstractBroker):
             effective_take_profit=_effective_tp,
         )
 
+    async def cancel_open_orders(self, symbol: str) -> None:
+        """Cancel all open orders for a symbol (overrides base no-op)."""
+        loop = asyncio.get_running_loop()
+        try:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            _norm = symbol.replace("/", "").upper()
+            open_orders: Any = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self.trading.get_orders(
+                        filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[_norm])
+                    ),
+                ),
+                timeout=10.0,
+            )
+            for o in open_orders:
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, lambda oid=str(o.id): self.trading.cancel_order_by_id(oid)),
+                        timeout=10.0,
+                    )
+                    logger.info(f"[Alpaca] Cancelled open order {o.id} for {symbol}")
+                except Exception as _ce:
+                    logger.debug(f"[Alpaca] cancel_open_orders: could not cancel {o.id}: {_ce}")
+        except Exception as exc:
+            logger.warning(f"[Alpaca] cancel_open_orders failed for {symbol}: {exc}")
+
+    async def close_broker_position(self, symbol: str) -> float:
+        """
+        Atomically close an Alpaca position for *symbol* using the
+        DELETE /v2/positions/{symbol}?cancel_orders=true endpoint.
+        This cancels all bracket/stop orders AND closes the position in one
+        API call, avoiding the 40310000 "held_for_orders" race condition.
+        Returns the fill price, or 0.0 if unavailable.
+        """
+        loop = asyncio.get_running_loop()
+        _norm = symbol.replace("/", "").upper()
+        try:
+            from alpaca.trading.requests import ClosePositionRequest
+            close_opts = ClosePositionRequest(cancel_orders=True)
+        except ImportError:
+            close_opts = None
+        try:
+            result: Any = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: self.trading.close_position(_norm, close_options=close_opts) if close_opts is not None
+                    else self.trading.close_position(_norm),
+                ),
+                timeout=15.0,
+            )
+            fill = 0.0
+            if result is not None:
+                fill = float(getattr(result, "filled_avg_price", None) or getattr(result, "limit_price", None) or 0)
+            logger.info(f"[Alpaca] close_broker_position: {symbol} closed @ {fill or 'pending'}")
+            return fill
+        except Exception as exc:
+            logger.warning(f"[Alpaca] close_broker_position failed for {symbol}: {exc}")
+            return 0.0
+
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
         loop = asyncio.get_running_loop()
         try:
