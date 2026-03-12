@@ -8,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from pydantic import BaseModel
 from typing import Optional
+from loguru import logger
 
 from db.database import get_db
 from db.models import Trade, LiveTrade, OrderStatus
+from core.auth import get_current_user, require_admin
 
 router = APIRouter()
 
@@ -37,7 +39,10 @@ def _trade_dict(t: Trade) -> dict:
 
 
 @router.get("/open")
-async def get_open_positions(db: AsyncSession = Depends(get_db)):
+async def get_open_positions(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """Get all currently open (paper or live) positions."""
     paper = (await db.execute(select(Trade).where(Trade.status == OrderStatus.OPEN))).scalars().all()
     live  = (await db.execute(select(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN))).scalars().all()
@@ -49,6 +54,7 @@ async def get_trade_history(
     limit: int = 200,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
 ):
     """Get completed trades, newest first. Defaults to last 200; use offset for pagination."""
     paper = (await db.execute(
@@ -64,7 +70,10 @@ async def get_trade_history(
 
 
 @router.get("/history/export")
-async def export_trade_history(db: AsyncSession = Depends(get_db)):
+async def export_trade_history(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """Download all completed trades as CSV."""
     paper = (await db.execute(
         select(Trade).where(Trade.status == OrderStatus.FILLED).order_by(desc(Trade.closed_at))
@@ -102,7 +111,11 @@ class ClosePositionRequest(BaseModel):
 
 
 @router.post("/close")
-async def close_position(request: ClosePositionRequest, db: AsyncSession = Depends(get_db)):
+async def close_position(
+    request: ClosePositionRequest,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """Manually close an open position at market price."""
     # Filter by OPEN status in both queries to avoid the ID-collision case:
     # if Trade.id=N exists (status=FILLED) and LiveTrade.id=N also exists
@@ -130,7 +143,10 @@ async def close_position(request: ClosePositionRequest, db: AsyncSession = Depen
 
 
 @router.post("/emergency-stop")
-async def emergency_stop(db: AsyncSession = Depends(get_db)):
+async def emergency_stop(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_admin),
+):
     """
     EMERGENCY STOP: Close all open positions and halt all strategies immediately.
     """
@@ -151,7 +167,10 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/sync-broker")
-async def sync_broker_positions(db: AsyncSession = Depends(get_db)):
+async def sync_broker_positions(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """
     Immediately pull all open positions from IBKR and create DB records for any
     that are not already tracked.  Also closes ghost DB positions that the broker
@@ -168,7 +187,7 @@ async def sync_broker_positions(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/settle-fx")
-async def settle_fx_now():
+async def settle_fx_now(_user=Depends(get_current_user)):
     """
     Immediately convert any non-USD cash balances at IBKR into USD via spot
     market orders.  Call this after a forex position closes to avoid T+2
@@ -188,7 +207,7 @@ async def settle_fx_now():
 
 
 @router.get("/live-pnl")
-async def get_live_pnl():
+async def get_live_pnl(_user=Depends(get_current_user)):
     """
     Fetch real-time unrealized P&L for open positions directly from each broker.
 
@@ -214,6 +233,7 @@ async def get_live_pnl():
             for p in positions
         ]
     except Exception as _e:
+        logger.debug(f"[live-pnl] Alpaca fetch error: {_e}")
         result["alpaca"] = []
 
     # IBKR — connect then fetch positions
@@ -232,6 +252,7 @@ async def get_live_pnl():
             for p in ibkr_positions
         ]
     except Exception as _e:
+        logger.debug(f"[live-pnl] IBKR fetch error: {_e}")
         result["ibkr"] = []
 
     return result

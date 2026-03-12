@@ -23,6 +23,7 @@ from db.models import (
     ExecutionMode,
 )
 from config import settings as _settings
+from core.auth import get_current_user as _get_current_user
 
 router = APIRouter()
 
@@ -492,7 +493,10 @@ async def list_paper_trades(
 
 
 @router.get("/trades/export")
-async def export_paper_trades(db: AsyncSession = Depends(get_db)):
+async def export_paper_trades(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(_get_current_user),
+):
     """Download all paper trades as CSV."""
     result = await db.execute(
         select(Trade)
