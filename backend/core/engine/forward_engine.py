@@ -2037,6 +2037,23 @@ class ForwardEngine:
                     )
                     linked_signal = _sig_q2.scalar_one_or_none()
 
+                # Guard: if this signal already has a trade record (any status),
+                # do NOT insert another row — that would violate uq_trades_signal_id
+                # and poison the DB session, blocking all subsequent signal runs.
+                # This happens when a position was manually closed but a new IBKR
+                # position appears for the same symbol within the 48-hour window.
+                if linked_signal is not None:
+                    _existing_for_sig = await db_session.execute(
+                        _sel(_TradeModel).where(_TradeModel.signal_id == linked_signal.id)
+                    )
+                    if _existing_for_sig.scalar_one_or_none() is not None:
+                        logger.debug(
+                            f"[ForwardEngine] Orphan sync: {full_sym} — "
+                            f"signal_id={linked_signal.id} already has a trade record; "
+                            f"skipping duplicate INSERT"
+                        )
+                        continue  # skip this position — trade record already exists
+
                 new_trade = _TradeModel(
                     symbol=full_sym,
                     side=pos.side,  # "long" | "short"
@@ -2072,7 +2089,11 @@ class ForwardEngine:
                 await db_session.commit()
                 logger.info(f"[ForwardEngine] Synced {orphan_count} orphan broker position(s) to DB.")
         except Exception as _oe:
-            logger.error(f"[ForwardEngine] Orphan broker sync failed: {_oe}", exc_info=True)
+            logger.error(f"[ForwardEngine] Orphan broker sync failed: {_oe}", exc_info=False)
+            try:
+                await db_session.rollback()
+            except Exception:
+                pass
 
         # BUG-LOW-03 FIX: extend orphan sync to Alpaca and Binance.
         # The original block only covered IBKR, so Alpaca/Binance positions created
