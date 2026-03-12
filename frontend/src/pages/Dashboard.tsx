@@ -172,6 +172,7 @@ export default function Dashboard() {
   const [actioning, setActioning] = useState<number | null>(null)
   const [mlStatus, setMlStatus] = useState<MLStatus | null>(null)
   const [regime, setRegime] = useState<RegimeInfo | null>(null)
+  const [regimeError, setRegimeError] = useState(false)
   const [portfolioWeights, setPortfolioWeights] = useState<WeightsData | null>(null)
   const [optimizing, setOptimizing] = useState(false)
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([])
@@ -245,7 +246,10 @@ export default function Dashboard() {
       const isBuy = p.side === 'buy' || p.side === 'long'
       const sign  = isBuy ? 1 : -1
       const pnl     = sign * (currentPrice - p.entry_price) * p.quantity
-      const pnl_pct = sign * (currentPrice / p.entry_price - 1) * 100
+      // M-5 FIX: guard against zero entry_price to avoid NaN/Infinity in pct
+      const pnl_pct = p.entry_price !== 0
+        ? sign * (currentPrice / p.entry_price - 1) * 100
+        : 0
       return { ...p, pnl: parseFloat(pnl.toFixed(4)), pnl_pct: parseFloat(pnl_pct.toFixed(4)) }
     })
   }, [])
@@ -291,8 +295,10 @@ export default function Dashboard() {
         `/api/regime?symbol=${encodeURIComponent(regimeSymbol)}&timeframe=${regimeTimeframe}&broker=${regimeBroker}`
       )
       setRegime(regimeRes.data)
+      setRegimeError(false)
     } catch {
       setRegime(null)
+      setRegimeError(true)
     }
   }
 
@@ -522,6 +528,13 @@ export default function Dashboard() {
                 </div>
               )
             })()}
+            {/* L-6 FIX: show error badge when regime fetch fails instead of blank */}
+            {!regime && regimeError && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border bg-dark-700 border-red-800">
+                <BarChart2 size={11} className="text-red-500" />
+                <span className="text-xs font-semibold text-red-400">Regime unavailable</span>
+              </div>
+            )}
             {mlStatus?.last_retrain && (
               <span className="text-xs text-gray-500">
                 Last retrain: {parseUtc(mlStatus.last_retrain)?.toLocaleDateString()}

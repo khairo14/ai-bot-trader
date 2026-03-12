@@ -1,5 +1,6 @@
 """Tasks: automated signal runner via Celery."""
 from celery_app import celery_app
+import hashlib
 import json
 import logging
 import math
@@ -43,20 +44,45 @@ _REGIME_SETTINGS_PATH = pathlib.Path(__file__).resolve().parent.parent / "runtim
 _REDIS_REGIME_HISTORY_KEY = "regime_hysteresis:history"
 _REDIS_STABLE_REGIME_KEY  = "regime_hysteresis:stable"
 
+# M-2 FIX: module-level Redis connection pool so _load/_save each re-use a
+# persistent connection instead of opening+closing a socket on every call.
+_redis_pool = None
+
+
+def _get_redis():
+    """Return a Redis client backed by the module-level connection pool."""
+    global _redis_pool
+    if _redis_pool is None:
+        try:
+            import redis as _sync_redis
+            from config import settings as _cfg_s
+            _redis_pool = _sync_redis.ConnectionPool.from_url(
+                _cfg_s.redis_url,
+                decode_responses=True,
+                max_connections=4,
+                socket_connect_timeout=2,
+            )
+        except Exception:
+            return None
+    try:
+        import redis as _sync_redis
+        return _sync_redis.Redis(connection_pool=_redis_pool)
+    except Exception:
+        return None
+
 
 def _load_regime_state_from_redis() -> None:
     """Restore _regime_history and _stable_regime from Redis on worker startup."""
     try:
-        import redis as _sync_redis
-        from config import settings as _cfg_s
-        _r = _sync_redis.from_url(_cfg_s.redis_url, decode_responses=True, socket_connect_timeout=2)
+        _r = _get_redis()
+        if _r is None:
+            return
         raw_history = _r.get(_REDIS_REGIME_HISTORY_KEY)
         raw_stable  = _r.get(_REDIS_STABLE_REGIME_KEY)
         if raw_history:
             _regime_history.update(json.loads(raw_history))
         if raw_stable:
             _stable_regime.update(json.loads(raw_stable))
-        _r.close()
     except Exception as _e:
         logger.debug(f"[signal_runner] Could not load regime state from Redis: {_e}")
 
@@ -64,12 +90,11 @@ def _load_regime_state_from_redis() -> None:
 def _save_regime_state_to_redis() -> None:
     """Persist _regime_history and _stable_regime to Redis after each update."""
     try:
-        import redis as _sync_redis
-        from config import settings as _cfg_s
-        _r = _sync_redis.from_url(_cfg_s.redis_url, decode_responses=True, socket_connect_timeout=2)
+        _r = _get_redis()
+        if _r is None:
+            return
         _r.set(_REDIS_REGIME_HISTORY_KEY, json.dumps(_regime_history))
         _r.set(_REDIS_STABLE_REGIME_KEY,  json.dumps(_stable_regime))
-        _r.close()
     except Exception as _e:
         logger.debug(f"[signal_runner] Could not save regime state to Redis: {_e}")
 
@@ -493,8 +518,12 @@ def run_signals(self):
                         # ── B3: Advisory lock prevents concurrent Celery workers from
                         # both passing the SELECT and double-inserting the same signal.
                         # pg_advisory_xact_lock is transaction-scoped and auto-released.
+                        # H-3 FIX: use SHA-256 (not Python's PYTHONHASHSEED-randomised
+                        # hash()) so the lock key is consistent across all worker processes.
                         _lock_key_str = f"{strategy_type}:{sig.symbol}:{timeframe}"
-                        _lock_key_int = abs(hash(_lock_key_str)) % (2 ** 31)
+                        _lock_key_int = int.from_bytes(
+                            hashlib.sha256(_lock_key_str.encode()).digest()[:4], "big"
+                        ) % (2 ** 31)
                         await session.execute(
                             __import__("sqlalchemy").text("SELECT pg_advisory_xact_lock(:k)"),
                             {"k": _lock_key_int},

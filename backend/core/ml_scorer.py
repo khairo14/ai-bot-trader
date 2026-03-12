@@ -106,11 +106,24 @@ class MLScorer:
             return None
 
     def _get_model(self, symbol: str, timeframe: str = "1d") -> Optional[dict]:
-        """Return cached model or load it."""
+        """Return cached model or load it (double-checked locking).
+
+        L-7 FIX: _load_model() does file I/O so it must NOT be called while
+        holding the lock — that would serialize all concurrent callers even
+        when the model is already cached.  Load outside the lock, then
+        re-check-and-cache under the lock so only one entry is stored.
+        """
         cache_key = f"{symbol}:{timeframe}"
+        # Fast path — already in cache
+        with self._lock:
+            if cache_key in self._models:
+                return self._models[cache_key]
+        # Slow path — load without holding the lock
+        model = self._load_model(symbol, timeframe)
+        # Store result; another thread may have beaten us — that's fine
         with self._lock:
             if cache_key not in self._models:
-                self._models[cache_key] = self._load_model(symbol, timeframe)
+                self._models[cache_key] = model
             return self._models[cache_key]
 
     def reload(self):

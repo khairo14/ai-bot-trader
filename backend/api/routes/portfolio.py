@@ -104,12 +104,13 @@ async def portfolio_summary(db: AsyncSession = Depends(get_db)):
     )
     open_count = int(open_result_paper.scalar() or 0) + int(open_result_live.scalar() or 0)
 
-    # Today's realised P&L (all trades closed since midnight UTC)
-    from datetime import timezone as _tz_mod
-    today_start = datetime.combine(
-        datetime.now(_tz_mod.utc).date(),
-        datetime.min.time(),
-    )
+    # Today's realised P&L window — aligned to daily_reset_hour_utc so the
+    # P&L window matches the circuit-breaker's daily reset boundary exactly.
+    from datetime import timezone as _tz_mod, timedelta as _td
+    _reset_hour = getattr(settings, "daily_reset_hour_utc", 0)
+    _now_utc = datetime.now(_tz_mod.utc).replace(tzinfo=None)
+    _today_reset = _now_utc.replace(hour=_reset_hour, minute=0, second=0, microsecond=0)
+    today_start = _today_reset if _now_utc >= _today_reset else _today_reset - _td(days=1)
     pnl_paper = await db.execute(
         select(func.coalesce(func.sum(Trade.pnl), 0.0))
         .where(Trade.status == OrderStatus.FILLED)

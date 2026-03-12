@@ -6,10 +6,11 @@ along with the raw indicator features used to classify it.
 """
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 
 from brokers import get_broker
+from core.auth import get_current_user
 from core.regime_classifier import regime_classifier, ALL_REGIMES
 
 router = APIRouter()
@@ -34,6 +35,7 @@ async def get_regime(
     symbol: str = Query("BTC/USDT", description="Trading pair, e.g. BTC/USDT"),
     timeframe: str = Query("1h", description="Candle timeframe, e.g. 1h, 4h, 1d"),
     broker: str = Query("binance", description="Broker / data source"),
+    _user=Depends(get_current_user),
 ):
     """
     Classify the current market regime for the given symbol and timeframe.

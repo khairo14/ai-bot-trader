@@ -71,7 +71,7 @@ class StrategyUpdate(BaseModel):
 
 
 @router.get("/")
-async def list_strategies(db: AsyncSession = Depends(get_db)):
+async def list_strategies(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """List all configured strategies."""
     result = await db.execute(select(Strategy))
     strategies = result.scalars().all()
@@ -248,5 +248,5 @@ async def delete_strategy(strategy_id: int, db: AsyncSession = Depends(get_db), 
         raise HTTPException(status_code=404, detail="Strategy not found")
     await db.delete(strategy)
     await db.commit()
-    audit("strategy.delete", strategy_id=strategy_id)
+    await audit("strategy.delete", strategy_id=strategy_id)
     return {"message": f"Strategy {strategy_id} deleted."}

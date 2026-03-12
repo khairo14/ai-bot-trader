@@ -94,7 +94,9 @@ async def _fetch_ohlcv_broker(
 
 _YF_INTERVAL_MAP: dict[str, str] = {
     "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
-    "1h": "60m", "1Hour": "60m", "4h": "60m", "1d": "1d", "1w": "1wk",
+    "1h": "60m", "1Hour": "60m",
+    "2h": "60m", "4h": "60m", "6h": "60m", "12h": "60m",  # L-4 FIX: added 2h/6h/12h
+    "1d": "1d", "1w": "1wk",
 }
 _REAL_FX = {
     "USD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
@@ -151,14 +153,12 @@ async def _fetch_ohlcv_yfinance(
         df.index = pd.to_datetime(df.index)
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_convert("UTC").tz_localize(None)
-        # BUG-13 FIX: resample 4h anchored to first available candle so windows
-        # align with market open (e.g. 09:30 ET for stocks) instead of UTC midnight.
-        # df.resample("4h") without `origin` defaults to "epoch" (1970-01-01 00:00 UTC),
-        # which produces candle boundaries at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
-        # — misaligned with NYSE open (14:30 UTC) and crypto 4h convention.
-        # Using origin=df.index[0] anchors the 4h windows to the first data point.
-        if timeframe == "4h" and yf_interval == "60m":
-            df = df.resample("4h", origin=df.index[0]).agg(
+        # Resample sub-day missing timeframes from 60m data.
+        # H-4 FIX: use origin='epoch' for 4h so boundaries land on
+        # 00:00/04:00/08:00... UTC (consistent across all symbols).
+        if timeframe in ("2h", "4h", "6h", "12h") and yf_interval == "60m":
+            resample_rule = {"2h": "2h", "4h": "4h", "6h": "6h", "12h": "12h"}[timeframe]
+            df = df.resample(resample_rule, origin="epoch").agg(
                 {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
             ).dropna()
         since_naive = since.replace(tzinfo=None)

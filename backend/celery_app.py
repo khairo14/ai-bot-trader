@@ -33,6 +33,10 @@ celery_app.conf.beat_schedule = {
     "run-signals-every-60s": {
         "task": "tasks.signal_runner.run_signals",
         "schedule": 60,   # every 60 seconds
+        # M-10 FIX: discard stale tasks queued during a worker outage.
+        # Without this, a 5-minute outage would fire 5 back-to-back runs the
+        # moment the worker comes back online, exhausting broker API rate limits.
+        "options": {"expires": 55},
     },
     # Resolve pending trade outcomes nightly at 01:30 UTC
     "resolve-outcomes-nightly": {

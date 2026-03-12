@@ -188,16 +188,16 @@ export default function SignalCard({ signal }: Props) {
       <div>
         <div className="flex justify-between text-xs text-gray-500 mb-1">
           <span>Confidence</span>
-          <span>{(signal.confidence * 100).toFixed(0)}%{rr ? ` · R:R ${rr.toFixed(2)}` : ''}</span>
+          <span>{((signal.confidence ?? 0) * 100).toFixed(0)}%{rr ? ` · R:R ${rr.toFixed(2)}` : ''}</span>
         </div>
         <div className="h-1.5 bg-dark-700 rounded-full overflow-hidden">
           <div
             className="h-full rounded-full transition-all duration-500"
             style={{
-              width: `${signal.confidence * 100}%`,
-              background: signal.confidence >= 0.75
+              width: `${(signal.confidence ?? 0) * 100}%`,
+              background: (signal.confidence ?? 0) >= 0.75
                 ? '#4ade80'
-                : signal.confidence >= 0.5 ? '#fbbf24' : '#f87171',
+                : (signal.confidence ?? 0) >= 0.5 ? '#fbbf24' : '#f87171',
             }}
           />
         </div>

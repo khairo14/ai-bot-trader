@@ -19,8 +19,9 @@ from config import settings as _cfg
 PAPER_INITIAL_CAPITAL: float = _cfg.paper_initial_balance
 
 # IMP-3: prevent concurrent monitor_sl_tp calls within the same FastAPI process.
-# Each ForwardEngine instance (heartbeat, signal_runner) gets its own lock; since
-# they run on the same event loop (FastAPI process) this stops double-ratcheting.
+# M-7 FIX: This is a MODULE-LEVEL lock shared across all ForwardEngine instances
+# in the same process — it serialises all concurrent monitor_sl_tp() calls that
+# run on the same event loop (FastAPI heartbeat + manual trigger).
 # Cross-process (Celery vs FastAPI) deduplication is handled by the DB advisory lock.
 _MONITOR_SL_TP_LOCK: asyncio.Lock = asyncio.Lock()
 

@@ -183,15 +183,17 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
             except Exception:
                 pass
 
-    # Sum closed paper trade P&L
+    # Sum closed paper trade P&L — cap at last 500 to avoid unbounded memory load
     closed = await db.execute(
         select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.FILLED)
+        .order_by(desc(Trade.closed_at)).limit(500)
     )
     closed_trades = closed.scalars().all()
 
     # Open paper trades
     open_q = await db.execute(
         select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.OPEN)
+        .limit(500)
     )
     open_trades = open_q.scalars().all()
 
@@ -265,7 +267,7 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         "brokers": active_brokers,
         "broker_breakdown": broker_breakdown,
         "paper_balance": round(total_balance, 2),
-        "initial_capital": total_balance,
+        "initial_capital": round(_settings.paper_initial_balance, 2),
         "open_positions": open_count,
         "realized_pnl": round(realized_pnl, 4),
         "unrealized_pnl": round(unrealized_pnl, 4),
@@ -360,7 +362,7 @@ async def get_market_status():
 
 
 @router.get("/status")
-async def get_status(db: AsyncSession = Depends(get_db)):
+async def get_status(db: AsyncSession = Depends(get_db), _user=Depends(_get_current_user)):
     """Aggregate paper trading stats."""
     return await _get_paper_stats(db)
 
@@ -371,6 +373,7 @@ async def list_paper_trades(
     status: Optional[str] = None,
     mode: str = "paper",
     db: AsyncSession = Depends(get_db),
+    _user=Depends(_get_current_user),
 ):
     """List trades, newest first.
 
@@ -531,6 +534,7 @@ async def export_paper_trades(
 async def trigger_run(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
+    _user=Depends(_get_current_user),
 ):
     """
     Manually trigger the signal engine for all active strategies right now.

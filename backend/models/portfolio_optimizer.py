@@ -47,12 +47,12 @@ def _std(vals: list[float]) -> float:
 
 
 def _pearson(a: list[float], b: list[float]) -> float:
-    """Pearson correlation of two equal-length lists."""
+    """Pearson correlation of two equal-length lists — uses the most recent N points."""
     n = min(len(a), len(b))
     if n < 3:
         return 0.0
-    a = a[:n]
-    b = b[:n]
+    a = a[-n:]  # most recent N samples so longer series is temporally aligned
+    b = b[-n:]
     std_a, std_b = _std(a), _std(b)
     # If either series is constant (zero variance), correlation is undefined.
     # Treat as uncorrelated (0.0) — don't apply a spurious correlation penalty.
@@ -94,7 +94,10 @@ def _compute_weights(strategy_returns: dict[str, list[float]]) -> dict[str, floa
     # Normalize
     weights: dict[str, float] = {n: v / total_raw for n, v in raw.items()}
 
-    # Correlation penalty: find pairs with high |correlation|, down-weight both
+    # Correlation penalty: find pairs with high |correlation|, down-weight both.
+    # Track which strategies have already been penalised so a strategy correlated
+    # with multiple others is only penalised once (not multiplied per pair).
+    penalized: set[str] = set()
     for i, na in enumerate(names):
         for j, nb in enumerate(names):
             if j <= i:
@@ -103,8 +106,12 @@ def _compute_weights(strategy_returns: dict[str, list[float]]) -> dict[str, floa
             rb = strategy_returns[nb]
             corr = abs(_pearson(ra, rb))
             if corr > CORR_THRESHOLD:
-                weights[na] *= CORR_PENALTY
-                weights[nb] *= CORR_PENALTY
+                if na not in penalized:
+                    weights[na] *= CORR_PENALTY
+                    penalized.add(na)
+                if nb not in penalized:
+                    weights[nb] *= CORR_PENALTY
+                    penalized.add(nb)
                 logger.info(f"[optimizer] {na} ↔ {nb} corr={corr:.2f} — applying penalty")
 
     # Re-normalize after penalty
@@ -128,6 +135,7 @@ async def optimize_portfolio() -> dict:
     from sqlalchemy import select
 
     now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=90)  # H-6 FIX: only last 90 days
 
     # 1. Load resolved outcomes
     async with AsyncSessionLocal() as session:
@@ -135,6 +143,7 @@ async def optimize_portfolio() -> dict:
             select(TradeOutcome).where(
                 TradeOutcome.resolved == True,   # noqa: E712
                 TradeOutcome.pnl_pct != None,    # noqa: E711
+                TradeOutcome.resolved_at >= cutoff,
             ).order_by(TradeOutcome.resolved_at)
         )
         outcomes = list(result.scalars().all())

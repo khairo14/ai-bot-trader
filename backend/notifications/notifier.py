@@ -95,18 +95,18 @@ async def dispatch(
     except Exception as exc:
         logger.error(f"[Notifier] DB persist failed: {exc}")
 
-    # ── 2. WebSocket broadcast ───────────────────────────────────────────────
-    # Include is_read and created_at so the frontend can render the notification
-    # immediately from the WS payload without a DB round-trip (the session is
-    # not yet committed at broadcast time, so a re-fetch would miss the row).
+    # ── 2. WebSocket broadcast — fire AFTER the caller's commit ────────────
+    # Register a once-only after_commit listener on the session so the WS
+    # event is sent only when the DB row is guaranteed to be visible.  This
+    # prevents ghost notifications if the caller rolls back after dispatch().
     try:
         import datetime as _dt_mod
+        from sqlalchemy import event as _sa_event
         _created_iso = (
             (notif.created_at.isoformat() + 'Z') if notif.created_at
             else (_dt_mod.datetime.utcnow().isoformat() + 'Z')
         )
-        from api.websocket import manager as ws_manager
-        await ws_manager.broadcast("notification", {
+        _payload = {
             "id": getattr(notif, "id", None),
             "level": level,
             "category": category,
@@ -115,9 +115,26 @@ async def dispatch(
             "is_read": False,
             "metadata": metadata or {},
             "created_at": _created_iso,
-        })
+        }
+
+        async def _do_broadcast():
+            try:
+                from api.websocket import manager as _ws_manager
+                await _ws_manager.broadcast("notification", _payload)
+            except Exception as _exc:
+                logger.debug(f"[Notifier] WS broadcast skipped: {_exc}")
+
+        def _on_after_commit(_session):
+            """Sync SQLAlchemy event — schedule the WS broadcast coroutine."""
+            try:
+                _loop = asyncio.get_running_loop()
+                _loop.create_task(_do_broadcast())
+            except RuntimeError:
+                pass  # Celery / non-async context — skip WS broadcast
+
+        _sa_event.listen(db.sync_session, "after_commit", _on_after_commit, once=True)
     except Exception as exc:
-        logger.debug(f"[Notifier] WS broadcast skipped: {exc}")
+        logger.debug(f"[Notifier] WS setup skipped: {exc}")
 
     # ── 3. Email (fire-and-forget) ───────────────────────────────────────────
     if send_email:

@@ -285,13 +285,17 @@ export default function ForwardTest() {
     }
   }, [tradeMode, enrichPositionsWithLivePnl])
 
-  // Real-time WebSocket updates
+  // Real-time WebSocket updates — debounced to avoid back-to-back duplicate fetches
+  const _wsFetchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null)
   useWebSocket(WS_URL, {
     onMessage: (raw) => {
       const msg = raw as WsMessage
       if (['signal', 'trade', 'emergency_stop', 'run_started', 'run_finished'].includes(msg.type)) {
         setWsEvents((prev) => [msg, ...prev].slice(0, 20))
-        fetchAll()
+        // M-4 FIX: debounce WS-triggered fetches — cancel the pending refresh and
+        // schedule a new one 500 ms out, so a burst of WS events causes only one fetch.
+        if (_wsFetchDebounce.current) clearTimeout(_wsFetchDebounce.current)
+        _wsFetchDebounce.current = setTimeout(() => { fetchAll() }, 500)
         if (msg.type === 'run_finished') {
           toast.success('Signal run complete.')
           setRunLoading(false)

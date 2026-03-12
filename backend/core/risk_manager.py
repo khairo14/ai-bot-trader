@@ -147,12 +147,23 @@ class RiskManager:
                     "per_broker": self._per_broker,
                 }
             )
-            # Write to a sibling temp file, then atomically rename
+            # Write to a sibling temp file, then atomically rename.
+            # M-3 FIX: on Windows, os.replace can raise PermissionError if the
+            # destination file is open; clean up the tmp file if rename fails.
             dir_ = os.path.dirname(_STATE_FILE)
-            with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False, suffix=".tmp") as tmp:
-                tmp.write(payload)
-                tmp_path = tmp.name
-            os.replace(tmp_path, _STATE_FILE)
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False, suffix=".tmp") as tmp:
+                    tmp.write(payload)
+                    tmp_path = tmp.name
+                os.replace(tmp_path, _STATE_FILE)
+            except Exception as _replace_err:
+                logger.warning(f"[RiskManager] Could not atomically save risk state: {_replace_err}")
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
         except Exception as exc:
             logger.warning(f"[RiskManager] Could not save risk state: {exc}")
 

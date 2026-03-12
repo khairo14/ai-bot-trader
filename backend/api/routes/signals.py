@@ -74,6 +74,7 @@ async def list_signals(
 async def dismiss_expired_signals(
     older_than_hours: int = Query(default=24, ge=1, le=168),
     db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
 ):
     """
     Dismiss signals that are no longer useful:
@@ -100,7 +101,7 @@ async def dismiss_expired_signals(
 
 
 @router.get("/pending")
-async def list_pending_signals(db: AsyncSession = Depends(get_db)):
+async def list_pending_signals(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """Return all semi-auto signals waiting for manual approval."""
     result = await db.execute(
         select(Signal)
@@ -115,7 +116,7 @@ async def list_pending_signals(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{signal_id}/approve")
-async def approve_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
+async def approve_signal(signal_id: int, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """
     DEPRECATED: Thin redirect to /api/forward-test/execute-signal/{id}.
     This endpoint is kept only for backwards compatibility with any external callers.
@@ -126,7 +127,7 @@ async def approve_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{signal_id}/reject")
-async def reject_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
+async def reject_signal(signal_id: int, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """
     Reject a pending semi-auto signal (mark as acted-on without placing a trade).
     """
@@ -142,7 +143,7 @@ async def reject_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{signal_id}")
-async def get_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
+async def get_signal(signal_id: int, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
     """Get a single signal by ID."""
     result = await db.execute(select(Signal).where(Signal.id == signal_id))
     signal = result.scalar_one_or_none()
