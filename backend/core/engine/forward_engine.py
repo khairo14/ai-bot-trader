@@ -898,6 +898,9 @@ class ForwardEngine:
             _close_result_cleanup_id = None
         _close_position_entered = True
 
+        _broker_name_close = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+        broker = get_broker(_broker_name_close, force_paper=trade.is_paper)
+
         try:
             await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
         except Exception as _conn_err:
