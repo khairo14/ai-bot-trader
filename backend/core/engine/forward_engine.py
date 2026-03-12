@@ -30,6 +30,11 @@ _MONITOR_SL_TP_LOCK: asyncio.Lock = asyncio.Lock()
 # separate if/elif branches, which could silently diverge on edits.
 _G1_DEFAULT_THRESHOLD: float = 0.75
 
+# Bug-9 FIX: per-trade in-progress guard for close_position when no DB session
+# is available (paper in-memory mode).  asyncio is cooperative — adding an id
+# before any await and removing it after is race-free within one process.
+_closing_ids: set[int] = set()
+
 
 class ForwardEngine:
     """
@@ -57,7 +62,7 @@ class ForwardEngine:
 
     def __init__(self):
         self.risk_manager = get_risk_manager()  # BUG-2 FIX: use process-wide singleton
-        self._paper_positions: dict = {}     # symbol → Trade (open positions, any mode)
+        self._paper_positions: dict = {}     # symbol:broker_key → Trade (open positions)
         self._paper_balance: dict[str, float] = {}   # broker_name → paper balance (F-028)
         self._emergency_stop_active: bool = False
         self._initialized: bool = False
@@ -83,7 +88,12 @@ class ForwardEngine:
             )
         )
         open_trades = open_q.scalars().all()
-        self._paper_positions = {t.symbol: t for t in open_trades}
+        # Key by symbol:broker so two brokers on the same symbol do not
+        # clobber each other's in-memory position.
+        self._paper_positions = {
+            f"{t.symbol}:{t.broker.value if hasattr(t.broker, 'value') else str(t.broker)}": t
+            for t in open_trades
+        }
 
         # Re-compute paper balance per broker from realised P&L (F-028)
         from sqlalchemy import distinct
@@ -101,8 +111,19 @@ class ForwardEngine:
                 )
             )
             realised_pnl: float = pnl_q.scalar_one()
+            # Include unrealized P&L from OPEN positions so the paper balance
+            # reflects current mark-to-market, not just closed trades.
+            unrealised_q = await db_session.execute(
+                select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
+                    Trade.is_paper == True,
+                    Trade.status == OrderStatus.OPEN,
+                    Trade.pnl.isnot(None),
+                    Trade.broker == broker_val,
+                )
+            )
+            unrealised_pnl: float = unrealised_q.scalar_one()
             key = broker_val.value if hasattr(broker_val, 'value') else str(broker_val)
-            self._paper_balance[key] = _cfg.paper_initial_balance + realised_pnl
+            self._paper_balance[key] = _cfg.paper_initial_balance + realised_pnl + unrealised_pnl
 
         self._initialized = True
         logger.info(
@@ -150,8 +171,12 @@ class ForwardEngine:
             except ValueError:
                 pass
 
+        # Bug-15 FIX: separate paper and live P&L so a large live loss does
+        # not trip the paper circuit-breaker and vice versa.  Only paper rows
+        # carry is_paper == True; LiveTrade rows are always live.
         q_realised_paper = await db_session.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
+                Trade.is_paper == True,
                 Trade.status == OrderStatus.FILLED,
                 Trade.closed_at >= today_start,
                 *broker_filter,
@@ -167,9 +192,10 @@ class ForwardEngine:
         realised: float = q_realised_paper.scalar_one() + q_realised_live.scalar_one()
         q_open_paper = await db_session.execute(
             select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
+                Trade.is_paper == True,
                 Trade.status == OrderStatus.OPEN,
                 Trade.pnl.isnot(None),
-                Trade.opened_at >= today_start,   # BUG-7 FIX: only count today's open positions
+                Trade.opened_at >= today_start,
                 *broker_filter,
             )
         )
@@ -177,7 +203,7 @@ class ForwardEngine:
             select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
                 LiveTrade.status == OrderStatus.OPEN,
                 LiveTrade.pnl.isnot(None),
-                LiveTrade.opened_at >= today_start,   # BUG-7 FIX: only count today's open positions
+                LiveTrade.opened_at >= today_start,
                 *live_broker_filter,
             )
         )
@@ -257,8 +283,8 @@ class ForwardEngine:
                 )
                 # GAP-3 FIX: count only same-mode (paper or live) open positions
                 # so that live positions don’t block paper strategies and vice-versa.
-                is_signal_paper = getattr(signal, 'is_paper', True)
-                if is_signal_paper:
+                # Use is_paper param from process_signal() — Signal has no is_paper attr.
+                if is_paper:
                     open_count = int(_oq_paper.scalar_one() or 0)
                 else:
                     open_count = int(_oq_live.scalar_one() or 0)
@@ -282,21 +308,26 @@ class ForwardEngine:
         asset_class_exposure = 0.0
         if db_session is not None:
             try:
-                _exp_paper = await db_session.execute(
-                    select(func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0)).where(
-                        Trade.status == OrderStatus.OPEN,
-                        Trade.asset_class == signal.asset_class,
-                        Trade.broker == signal.broker,
+                # Filter by is_paper so paper positions don't count against live
+                # exposure caps and vice-versa.
+                if is_paper:
+                    _exp_q = await db_session.execute(
+                        select(func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0)).where(
+                            Trade.status == OrderStatus.OPEN,
+                            Trade.asset_class == signal.asset_class,
+                            Trade.broker == signal.broker,
+                            Trade.is_paper == True,
+                        )
                     )
-                )
-                _exp_live = await db_session.execute(
-                    select(func.coalesce(func.sum(LiveTrade.quantity * LiveTrade.entry_price), 0.0)).where(
-                        LiveTrade.status == OrderStatus.OPEN,
-                        LiveTrade.asset_class == signal.asset_class,
-                        LiveTrade.broker == signal.broker,
+                else:
+                    _exp_q = await db_session.execute(
+                        select(func.coalesce(func.sum(LiveTrade.quantity * LiveTrade.entry_price), 0.0)).where(
+                            LiveTrade.status == OrderStatus.OPEN,
+                            LiveTrade.asset_class == signal.asset_class,
+                            LiveTrade.broker == signal.broker,
+                        )
                     )
-                )
-                asset_class_exposure = float(_exp_paper.scalar_one() or 0.0) + float(_exp_live.scalar_one() or 0.0)
+                asset_class_exposure = float(_exp_q.scalar_one() or 0.0)
             except Exception as _exp_err:
                 logger.debug(f"[ForwardEngine] Could not compute asset_class_exposure: {_exp_err}")
 
@@ -305,21 +336,25 @@ class ForwardEngine:
         asset_exposure = 0.0
         if db_session is not None:
             try:
-                _sym_paper = await db_session.execute(
-                    select(func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0)).where(
-                        Trade.status == OrderStatus.OPEN,
-                        Trade.symbol == signal.symbol,
-                        Trade.broker == signal.broker,
+                # Filter by is_paper to avoid mixing paper/live asset exposure.
+                if is_paper:
+                    _sym_q = await db_session.execute(
+                        select(func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0)).where(
+                            Trade.status == OrderStatus.OPEN,
+                            Trade.symbol == signal.symbol,
+                            Trade.broker == signal.broker,
+                            Trade.is_paper == True,
+                        )
                     )
-                )
-                _sym_live = await db_session.execute(
-                    select(func.coalesce(func.sum(LiveTrade.quantity * LiveTrade.entry_price), 0.0)).where(
-                        LiveTrade.status == OrderStatus.OPEN,
-                        LiveTrade.symbol == signal.symbol,
-                        LiveTrade.broker == signal.broker,
+                else:
+                    _sym_q = await db_session.execute(
+                        select(func.coalesce(func.sum(LiveTrade.quantity * LiveTrade.entry_price), 0.0)).where(
+                            LiveTrade.status == OrderStatus.OPEN,
+                            LiveTrade.symbol == signal.symbol,
+                            LiveTrade.broker == signal.broker,
+                        )
                     )
-                )
-                asset_exposure = float(_sym_paper.scalar_one() or 0.0) + float(_sym_live.scalar_one() or 0.0)
+                asset_exposure = float(_sym_q.scalar_one() or 0.0)
             except Exception as _ae_err:
                 logger.debug(f"[ForwardEngine] Could not compute asset_exposure: {_ae_err}")
 
@@ -413,6 +448,7 @@ class ForwardEngine:
         # NOTE: "long" is an alias for "buy" used by the DB rebuild script.
         _long_sides = {"buy", "cover", "long"}
         _new_is_long = signal.signal.upper() in ("BUY", "COVER")
+        _pp_key = f"{signal.symbol}:{broker_key}"  # Bug-14: composite key for in-memory lookup
         if db_session is not None:
             _TradeModel = _trade_model(is_paper)
             _existing_q = await db_session.execute(
@@ -463,7 +499,7 @@ class ForwardEngine:
                         # process and may have closed this position between the
                         # initial DB read and now.
                         if db_session is not None:
-                            _recheck = await db_session.get(Trade, _existing.id)
+                            _recheck = await db_session.get(type(_existing), _existing.id)
                             if _recheck is None or _recheck.status != OrderStatus.OPEN:
                                 logger.info(
                                     f"[ForwardEngine] G1 re-entry aborted: "
@@ -477,8 +513,8 @@ class ForwardEngine:
                             f"{signal.signal} {signal.symbol} — already {_existing.side.upper()} id={_existing.id}"
                         )
                         return None
-        elif signal.symbol in self._paper_positions:
-            _existing = self._paper_positions[signal.symbol]
+        elif _pp_key in self._paper_positions:
+            _existing = self._paper_positions[_pp_key]
             _existing_is_long = _existing.side in _long_sides
             if _new_is_long != _existing_is_long:
                 logger.info(
@@ -627,7 +663,7 @@ class ForwardEngine:
             trade.entry_price = round(confirmed_entry, 8)
             trade.status = OrderStatus.OPEN if result.fill_price else OrderStatus.PENDING
             if result.fill_price:
-                self._paper_positions[signal.symbol] = trade  # only track confirmed fills
+                self._paper_positions[f"{signal.symbol}:{broker_key}"] = trade  # only track confirmed fills
         except Exception as order_err:
             # Broker rejected or is unreachable — record FAILED trade for audit
             trade.status = OrderStatus.REJECTED
@@ -767,6 +803,17 @@ class ForwardEngine:
                     f"— already closing/closed by another caller (broker bracket or concurrent monitor)"
                 )
                 return
+        elif trade.id is not None:
+            # Bug-9 FIX: no DB session (paper in-memory) — use a process-level
+            # set of in-progress trade IDs.  asyncio cooperative scheduling
+            # means no interleaving can occur between non-await statements.
+            if trade.id in _closing_ids:
+                logger.warning(
+                    f"[ForwardEngine] close_position SKIPPED (in-progress) "
+                    f"for {trade.symbol} id={trade.id}"
+                )
+                return
+            _closing_ids.add(trade.id)
 
         _close_broker_key = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
         broker = get_broker(_close_broker_key, force_paper=trade.is_paper)
@@ -972,7 +1019,9 @@ class ForwardEngine:
         trade.status = OrderStatus.FILLED
         trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         # Remove from in-memory cache
-        self._paper_positions.pop(trade.symbol, None)
+        _trade_bk = trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker)
+        self._paper_positions.pop(f"{trade.symbol}:{_trade_bk}", None)
+        _closing_ids.discard(trade.id)  # Bug-9: release in-progress guard
 
         # F-082: cancel IBKR persistent bracket market-data subscription for this symbol.
         # For Alpaca/Binance this is a no-op (hasattr guard).
@@ -1123,7 +1172,8 @@ class ForwardEngine:
                 )
                 resolved += 1
                 # Remove from in-memory cache so it doesn't block the next strategy run
-                self._paper_positions.pop(t.symbol, None)
+                _t_bk = t.broker.value if hasattr(t.broker, 'value') else str(t.broker)
+                self._paper_positions.pop(f"{t.symbol}:{_t_bk}", None)
                 logger.warning(
                     f"[ForwardEngine] IMP-31: PENDING trade id={t.id} {t.symbol} "
                     f"exceeded {timeout_minutes}m timeout — marked REJECTED. "
@@ -1466,7 +1516,8 @@ class ForwardEngine:
             )
             try:
                 await self.close_position(trade, reason=reason, db_session=db_session)
-                self._paper_positions.pop(trade.symbol, None)
+                _sltp_bk = trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker)
+                self._paper_positions.pop(f"{trade.symbol}:{_sltp_bk}", None)
                 closed_count += 1
             except Exception as _ce:
                 logger.error(
@@ -1560,7 +1611,8 @@ class ForwardEngine:
                         if pos and getattr(pos, "entry_price", None):
                             trade.entry_price = round(pos.entry_price, 8)
                         trade.status = OrderStatus.OPEN
-                        self._paper_positions[trade.symbol] = trade
+                        _rec_bk = trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker)
+                        self._paper_positions[f"{trade.symbol}:{_rec_bk}"] = trade
                         ghost_count += 1
                         logger.info(
                             f"[ForwardEngine] F-105: PENDING {trade.symbol} id={trade.id} "
@@ -1683,7 +1735,8 @@ class ForwardEngine:
 
                     trade.status = OrderStatus.FILLED
                     trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-                    self._paper_positions.pop(trade.symbol, None)
+                    _mon_bk = trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker)
+                    self._paper_positions.pop(f"{trade.symbol}:{_mon_bk}", None)
 
                     # Record outcome for risk manager circuit breaker counters
                     if trade.pnl is not None:

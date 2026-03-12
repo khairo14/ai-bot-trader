@@ -15,7 +15,14 @@ def rebalance(self):
         import asyncio
         from models.portfolio_optimizer import optimize_portfolio
 
-        result = asyncio.run(optimize_portfolio())
+        # Bug-24 FIX: asyncio.run() fails with gevent/eventlet Celery workers
+        # because those workers already have a running event loop.  Use a fresh
+        # event loop instead so we don't depend on the worker's loop state.
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(optimize_portfolio())
+        finally:
+            loop.close()
         logger.info(f"[rebalancer] Complete: {result}")
         return result
     except Exception as exc:

@@ -239,7 +239,12 @@ class _IBKRManager:
     def _submit(self, coro, timeout: float = 30.0):
         """Run a coroutine on the background loop and block until done."""
         assert self._loop is not None
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
+        except RuntimeError as exc:
+            # Bug-20 FIX: loop may have been closed between the is_closed() check
+            # and this call during worker shutdown — treat as a connection error.
+            raise ConnectionError(f"[IBKR] Background event loop is closed: {exc}") from exc
         return fut.result(timeout=timeout)
 
     # ── connection helpers ────────────────────────────────────────────────────

@@ -199,13 +199,10 @@ class RegimeClassifier:
 
         # ── Decision tree ─────────────────────────────────────────────────
 
-        # High volatility always wins over trend labels
-        if atr_norm > self.ATR_NORM_HIGH_VOL:
-            return RegimeResult(regime=REGIME_HIGH_VOL, features=features)
-
-        # Low volatility / squeeze
-        if bb_width < self.BB_WIDTH_LOW_VOL:
-            return RegimeResult(regime=REGIME_LOW_VOL, features=features)
+        # Bug-16 FIX: check trending BEFORE high_volatility so that a strong
+        # uptrend/downtrend in a volatile market (e.g. a crypto breakout with
+        # elevated ATR) is labelled as trending, not just high_volatility.
+        # High volatility without a clear trend direction is still high_volatility.
 
         # Trending regimes (ADX strength + EMA slope direction)
         if adx_val >= adx_threshold:
@@ -213,6 +210,14 @@ class RegimeClassifier:
                 return RegimeResult(regime=REGIME_TRENDING_UP, features=features)
             else:
                 return RegimeResult(regime=REGIME_TRENDING_DOWN, features=features)
+
+        # High volatility — elevated ATR but no clear directional trend
+        if atr_norm > self.ATR_NORM_HIGH_VOL:
+            return RegimeResult(regime=REGIME_HIGH_VOL, features=features)
+
+        # Low volatility / squeeze
+        if bb_width < self.BB_WIDTH_LOW_VOL:
+            return RegimeResult(regime=REGIME_LOW_VOL, features=features)
 
         # Default: ranging / consolidation
         return RegimeResult(regime=REGIME_RANGING, features=features)

@@ -1,5 +1,6 @@
 """Tasks: automated signal runner via Celery."""
 from celery_app import celery_app
+import asyncio
 import hashlib
 import json
 import logging
@@ -197,14 +198,22 @@ async def _confluence_score(
     votes = [primary_signal]  # primary TF already voted
     for tf in higher_tfs:
         try:
-            sig = await engine.run(
-                strategy_name=strategy_type,
-                symbol=symbol,
-                broker_name=broker,
-                timeframe=tf,
-                limit=200,
+            # Bug-12 FIX: wrap each broker call in a timeout so a slow IBKR
+            # connection does not block the entire Celery task.
+            sig = await asyncio.wait_for(
+                engine.run(
+                    strategy_name=strategy_type,
+                    symbol=symbol,
+                    broker_name=broker,
+                    timeframe=tf,
+                    limit=200,
+                ),
+                timeout=15.0,
             )
             votes.append(sig.signal)
+        except asyncio.TimeoutError:
+            # Slow broker — skip this TF from denominator (same as network error).
+            logger.warning(f"[confluence] {strategy_type} {symbol} {tf} timed out (>15s) — skipping")
         except ValueError as exc:
             # No data / bad symbol on this TF — counts as a genuine HOLD vote
             logger.debug(f"[confluence] {strategy_type} {symbol} {tf} no-data: {exc}")
@@ -370,7 +379,7 @@ def run_signals(self):
                                 _regime_result = _rc.classify(_ohlcv, asset_class=_asset_class_str)
                                 _raw_regime = _regime_result.regime
                                 # Apply hysteresis — only switch after N stable candles
-                                _symbol_key = f"{symbol}:{timeframe}"
+                                _symbol_key = f"{strat.id}:{symbol}:{timeframe}"  # Bug-17 FIX: include strat.id
                                 _confirmed_regime = _update_regime_hysteresis(
                                     _symbol_key, _raw_regime, _hysteresis_n
                                 )
@@ -417,6 +426,7 @@ def run_signals(self):
                                                 f"regime={_confirmed_regime} → "
                                                 f"no suitable strategy found, holding"
                                             )
+                                            _last_candle_fired[strat.id] = _last_close_ts  # Bug-18 FIX
                                             continue  # no viable replacement — skip this candle
                                 else:
                                     # fixed mode: if mismatch, save HOLD and skip execution

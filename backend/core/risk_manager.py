@@ -355,7 +355,7 @@ class RiskManager:
             logger.debug(f"[RiskManager] Position capped to max_exposure_per_asset.")
 
         # ── Level 1: Minimum R:R check ────────────────────────────────────────
-        if signal.take_profit:
+        if signal.take_profit is not None:
             reward = abs(signal.take_profit - signal.entry_price)
             rr = round(reward / stop_distance, 2)  # round to 2dp to avoid floating-point edge cases
             if rr < self.default_rr_ratio:  # BUG-2 FIX: use config value, not hardcoded 1.5

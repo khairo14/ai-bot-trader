@@ -307,7 +307,7 @@ export default function Dashboard() {
     try {
       await axios.post('/api/positions/close', { trade_id: id, reason: 'manual_override' })
       toast.success('Position closed at market price.')
-      fetchAll()
+      await fetchAll()
     } catch (e: any) {
       toast.error(e?.response?.data?.detail ?? 'Close failed')
     } finally {

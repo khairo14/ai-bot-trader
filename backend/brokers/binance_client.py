@@ -92,7 +92,10 @@ class BinanceClient(AbstractBroker):
     async def get_price(self, symbol: str) -> float:
         await self._ensure_markets()
         ticker = await self.exchange.fetch_ticker(symbol)
-        return float(ticker["last"] or 0.0)  # type: ignore[arg-type]
+        price = float(ticker["last"]) if ticker and ticker.get("last") else 0.0
+        if price <= 0:
+            raise ValueError(f"[Binance] get_price returned zero/None for {symbol} — API may be unavailable")
+        return price
 
     async def get_bid_ask(self, symbol: str) -> tuple[float, float]:
         """Return current (bid, ask) from the full ticker. Falls back to (last, last)."""

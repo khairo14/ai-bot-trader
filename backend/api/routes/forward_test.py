@@ -183,7 +183,18 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
             except Exception:
                 pass
 
-    # Sum closed paper trade P&L — cap at last 500 to avoid unbounded memory load
+    # Bug-10 FIX: use SQL SUM() so the realized P&L is always exact regardless
+    # of how many closed trades exist (previously capped at 500 rows in Python).
+    closed_pnl_q = await db.execute(
+        select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
+            Trade.is_paper == True, Trade.status == OrderStatus.FILLED
+        )
+    )
+    _realized_pnl_total: float = float(closed_pnl_q.scalar_one() or 0.0)
+
+    # For per-broker breakdown we still need the trade list, but only open trades
+    # are needed for unrealized P&L; closed P&L comes from the SQL sum above.
+    # Keep the 500-row limit for open trades (there should never be that many).
     closed = await db.execute(
         select(Trade).where(Trade.is_paper == True, Trade.status == OrderStatus.FILLED)
         .order_by(desc(Trade.closed_at)).limit(500)
@@ -219,7 +230,7 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         })
 
     # ── Aggregates ────────────────────────────────────────────────────────────
-    realized_pnl   = sum(t.pnl or 0.0 for t in closed_trades)
+    realized_pnl   = _realized_pnl_total  # Bug-10 FIX: exact SQL sum, not truncated Python sum
     unrealized_pnl = sum(t.pnl or 0.0 for t in open_trades)
     open_count     = len(open_trades)
     # Total = sum of real API balances for active+connected brokers.
@@ -382,7 +393,7 @@ async def list_paper_trades(
     - ``live``  – live/real trades only (``is_paper == False``)
     - ``all``   – both paper and live
     """
-    q = select(Trade).order_by(desc(Trade.opened_at)).limit(limit)
+    q = select(Trade).where(Trade.is_paper == True).order_by(desc(Trade.opened_at)).limit(limit)
 
     if mode == "paper":
         pass  # Trade table is paper-only
@@ -1054,7 +1065,7 @@ async def get_pending_signals(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/execute-signal/{signal_id}")
-async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
+async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db), _user=Depends(_get_current_user)):
     """
     Manually execute a pending signal (suggestion or semi-auto mode).
     Forces full-auto execution regardless of the strategy's execution_mode setting.
@@ -1133,7 +1144,13 @@ async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db)):
     # Mark signal acted on (even for REJECTED — prevents duplicate execution attempts)
     db_signal.acted_on = True
     trade.signal_id = db_signal.id
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as _ie:
+        # Bug-23 FIX: signal_id unique constraint violation from a concurrent
+        # execute attempt that squeezed through acted_on check.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Signal already executed by a concurrent request.")
 
     # F-085: process_signal() already broadcasts the "trade" WS event internally.
     # Re-broadcasting here would send 2× events to the frontend on every manual execute.

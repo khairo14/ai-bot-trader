@@ -69,6 +69,10 @@ async def _fetch_ohlcv_broker(
     elapsed_secs = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - since).total_seconds()
     tf_secs = _TF_SECONDS.get(timeframe, 3600)
     limit = max(RESOLUTION_HORIZON + 10, int(elapsed_secs / tf_secs) + RESOLUTION_HORIZON + 10)
+    # Bug-13 FIX: cap at 1000 — most brokers (Binance, Alpaca, IBKR) refuse requests
+    # above 1000 candles per call, and 1000 1m candles covers 16.6 hours which is
+    # more than enough for intraday SL/TP resolution.
+    limit = min(limit, 1000)
 
     # GAP-8 FIX: use graduated fallback chain (e.g. 1m→5m→15m→30m→1h) so that
     # intraday SL hits visible in 5m/15m candles are not lost by jumping to 1h.

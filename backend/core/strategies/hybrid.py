@@ -150,8 +150,10 @@ class HybridStrategy(BaseStrategy):
 
         # ── Determine signal ─────────────────────────────
         min_score = kwargs.get("min_score", 4)
-        min_score_long  = kwargs.get("min_score_long",  min_score)
-        min_score_short = kwargs.get("min_score_short", min_score)
+        # Apply regime-based score adjustments so the classifier difficulty system
+        # actually affects signal generation (was computed but never used before).
+        min_score_long  = max(1, kwargs.get("min_score_long",  min_score) + score_adj.get("long_delta",  0))
+        min_score_short = max(1, kwargs.get("min_score_short", min_score) + score_adj.get("short_delta", 0))
         total_possible = 8
         # ML gate: if model exists, veto signals where it strongly disagrees
         ML_VETO_BUY  = 0.35   # if P(buy) < this, suppress BUY even if rules agree
