@@ -1059,32 +1059,50 @@ class ForwardEngine:
                     else:
                         raise RuntimeError("Close order unconfirmed and no price snapshot available")
                 except Exception as _close_err:
-                    # F-103b / BUG-6 FIX: revert the atomic guard (PENDING→OPEN) for ANY
-                    # exception — including RuntimeError — so the next scheduler tick can
-                    # retry instead of leaving the trade permanently stuck as PENDING.
-                    # Previously `except RuntimeError: raise` skipped this block, meaning
-                    # a RuntimeError (e.g. "no price snapshot") left the trade stuck forever.
-                    if db_session is not None and trade.id is not None:
-                        from sqlalchemy import update as _upd_revert
-                        _TradeModelRevert = type(trade)
-                        try:
-                            await db_session.execute(
-                                _upd_revert(_TradeModelRevert)
-                                .where(_TradeModelRevert.id == trade.id, _TradeModelRevert.status == OrderStatus.PENDING)
-                                .values(status=OrderStatus.OPEN)
-                            )
-                            await db_session.flush()
-                        except Exception:
-                            pass
-                    logger.error(
-                        f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
-                        "— guard reverted to OPEN for retry next tick"
+                    # ── "Already flat" detection (race between F-103 and place_order) ────
+                    # The position check (F-103) can pass but the broker closes the
+                    # position via its own bracket SL/TP before our market close lands.
+                    # Each broker has a distinct error code for this:
+                    #   Alpaca  : code 40310000 — "existing_qty … available: 0"
+                    #   IBKR    : RuntimeError "cancelled by broker" on a plain market close
+                    #   Binance : code -2022 (ReduceOnly rejected) — race past F-108 pre-check
+                    _err_str = str(_close_err)
+                    _is_already_flat = (
+                        "40310000" in _err_str                                          # Alpaca
+                        or ("cancelled by broker" in _err_str.lower() and _broker_key == "ibkr")  # IBKR
+                        or ("-2022" in _err_str and _broker_key == "binance")           # Binance
                     )
-                    # BUG-CRIT-02 FIX: release in-memory guard so the next tick can retry.
-                    # Without this, the trade is permanently stuck in _closing_ids when
-                    # an exception propagates before the discard at the end of the function.
-                    _closing_ids.discard(trade.id)
-                    raise
+                    if _is_already_flat:
+                        # Position is gone at the broker — don't revert the DB guard.
+                        # Fall through to the PnL section which will mark FILLED at snapshot price.
+                        logger.warning(
+                            f"[ForwardEngine] {trade.symbol} id={trade.id}: broker reports position "
+                            f"already closed ({_broker_key} code in error) — marking FILLED at snapshot price. "
+                            f"Error: {_close_err}"
+                        )
+                    else:
+                        # F-103b / BUG-6 FIX: revert the atomic guard (PENDING→OPEN) for ANY
+                        # real exception so the next scheduler tick can retry instead of leaving
+                        # the trade permanently stuck as PENDING.
+                        if db_session is not None and trade.id is not None:
+                            from sqlalchemy import update as _upd_revert
+                            _TradeModelRevert = type(trade)
+                            try:
+                                await db_session.execute(
+                                    _upd_revert(_TradeModelRevert)
+                                    .where(_TradeModelRevert.id == trade.id, _TradeModelRevert.status == OrderStatus.PENDING)
+                                    .values(status=OrderStatus.OPEN)
+                                )
+                                await db_session.flush()
+                            except Exception:
+                                pass
+                        logger.error(
+                            f"[ForwardEngine] Could not place closing order for {trade.symbol}: {_close_err} "
+                            "— guard reverted to OPEN for retry next tick"
+                        )
+                        # BUG-CRIT-02 FIX: release in-memory guard so the next tick can retry.
+                        _closing_ids.discard(trade.id)
+                        raise
 
         # F-108: when bracket filled the entire position (free=0 after cancel),
         # no market sell was sent — override exit_price with the bracket's fill price.
