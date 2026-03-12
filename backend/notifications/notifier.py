@@ -96,7 +96,15 @@ async def dispatch(
         logger.error(f"[Notifier] DB persist failed: {exc}")
 
     # ── 2. WebSocket broadcast ───────────────────────────────────────────────
+    # Include is_read and created_at so the frontend can render the notification
+    # immediately from the WS payload without a DB round-trip (the session is
+    # not yet committed at broadcast time, so a re-fetch would miss the row).
     try:
+        import datetime as _dt_mod
+        _created_iso = (
+            (notif.created_at.isoformat() + 'Z') if notif.created_at
+            else (_dt_mod.datetime.utcnow().isoformat() + 'Z')
+        )
         from api.websocket import manager as ws_manager
         await ws_manager.broadcast("notification", {
             "id": getattr(notif, "id", None),
@@ -104,7 +112,9 @@ async def dispatch(
             "category": category,
             "title": title,
             "message": message,
+            "is_read": False,
             "metadata": metadata or {},
+            "created_at": _created_iso,
         })
     except Exception as exc:
         logger.debug(f"[Notifier] WS broadcast skipped: {exc}")

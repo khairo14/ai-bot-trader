@@ -78,9 +78,31 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
   }, [fetchNotifications])
 
   // React to live WS "notification" events
+  // Directly insert the notification from the WS payload instead of re-fetching
+  // from the DB — the session hasn't been committed yet when the WS fires, so
+  // a DB round-trip would return stale data and the bell would appear empty.
   useEffect(() => {
     if (wsMessage?.type === 'notification') {
-      fetchNotifications()
+      const raw = wsMessage.data as Partial<Notif>
+      if (raw?.id) {
+        const incoming: Notif = {
+          id: raw.id,
+          level: raw.level ?? 'info',
+          category: raw.category ?? 'system',
+          title: raw.title ?? '',
+          message: raw.message ?? '',
+          is_read: false,
+          metadata: raw.metadata ?? {},
+          created_at: raw.created_at ?? new Date().toISOString(),
+        }
+        setNotifications(prev =>
+          prev.some(n => n.id === incoming.id) ? prev : [incoming, ...prev].slice(0, 25)
+        )
+        setUnread(prev => prev + 1)
+      } else {
+        // Fallback: no id in payload — re-fetch (next 30s poll will also catch it)
+        fetchNotifications()
+      }
     }
   }, [wsMessage, fetchNotifications])
 
