@@ -1892,6 +1892,7 @@ class ForwardEngine:
                     strategy_name=linked_signal.strategy_name if linked_signal else "unknown",
                     signal_id=linked_signal.id if linked_signal else None,
                     broker_order_id="orphan_sync",
+                    opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
                 db_session.add(new_trade)
 

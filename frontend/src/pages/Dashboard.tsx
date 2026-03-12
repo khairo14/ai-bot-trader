@@ -73,8 +73,8 @@ function fmtPrice(price: number | null): string {
   const abs = Math.abs(price)
   if (abs >= 1000) return price.toFixed(2)
   if (abs >= 10)   return price.toFixed(3)
-  if (abs >= 0.1)  return price.toFixed(4)
-  return price.toFixed(5)
+  if (abs >= 0.1)  return price.toFixed(5)  // 5 dp for forex range (1.33720 vs 1.33718 = 1 pip)
+  return price.toFixed(6)                    // 6 dp for sub-penny crypto
 }
 
 function formatBalance(total: number, currency: string): string {
@@ -264,7 +264,7 @@ export default function Dashboard() {
       axios.get('/api/ml/status'),
       axios.get('/api/portfolio-optimizer/weights'),
       axios.get('/api/positions/open'),
-      axios.get('/api/forward-test/trades?limit=100'),
+      axios.get('/api/forward-test/trades?limit=100&status=filled'),
     ])
     if (sigResult.status === 'fulfilled') setSignals(sigResult.value.data.signals || [])
     if (portResult.status === 'fulfilled') setPortfolio(portResult.value.data)
