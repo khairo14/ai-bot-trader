@@ -50,10 +50,25 @@ async def _safe_balance(broker_name: str) -> dict:
         # Use live runtime mode (respects toggles without needing a restart)
         is_paper = get_broker_modes().get(broker_name, "paper") == "paper"
 
+        _total = round(balance.total, 2)
+        _available = round(balance.available, 2)
+
+        # For paper-mode brokers, the broker-API balance reflects the testnet
+        # account's raw cash (which can be wildly inflated by TP-cycle profits
+        # on testnet or pre-seeded tokens). Use the DB-tracked paper balance
+        # instead — it is computed as: initial_capital + realised_pnl + unrealised_pnl.
+        if is_paper:
+            from core.engine.forward_engine import get_forward_engine
+            _fe = get_forward_engine()
+            _db_bal = _fe._paper_balance.get(broker_name.upper())
+            if _db_bal is not None:
+                _total = round(_db_bal, 2)
+                _available = round(_db_bal, 2)
+
         return {
             "broker": broker_name,
-            "total": round(balance.total, 2),
-            "available": round(balance.available, 2),
+            "total": _total,
+            "available": _available,
             "currency": balance.currency,
             "connected": True,
             "is_paper": is_paper,
