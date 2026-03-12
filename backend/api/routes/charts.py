@@ -8,7 +8,8 @@ from sqlalchemy import select, desc
 from loguru import logger
 
 from db.database import AsyncSessionLocal
-from db.models import Signal, Trade, LiveTrade, OrderStatus
+from sqlalchemy import or_, and_
+from db.models import Signal, Trade, LiveTrade, OrderStatus, BrokerName
 
 router = APIRouter()
 
@@ -477,20 +478,34 @@ async def get_chart_trades(
     since_dt = datetime.fromtimestamp(since / 1000, tz=timezone.utc).replace(tzinfo=None)
     until_dt = datetime.fromtimestamp(until / 1000, tz=timezone.utc).replace(tzinfo=None)
 
+    # Resolve broker to enum — handles both "ibkr" and "IBKR" safely.
+    try:
+        broker_enum = BrokerName(broker.lower())
+    except ValueError:
+        return {"trades": [], "symbol": symbol.upper(), "broker": broker.lower(), "count": 0}
+
+    # opened_at may be NULL on legacy rows — always include OPEN trades regardless.
+    _date_range_paper = or_(
+        Trade.opened_at.is_(None),
+        and_(Trade.opened_at >= since_dt, Trade.opened_at <= until_dt),
+    )
+    _date_range_live = or_(
+        LiveTrade.opened_at.is_(None),
+        and_(LiveTrade.opened_at >= since_dt, LiveTrade.opened_at <= until_dt),
+    )
+
     async with AsyncSessionLocal() as session:
         base_filters_paper = [
             Trade.symbol == symbol.upper(),
-            Trade.broker == broker.lower(),
+            Trade.broker == broker_enum,
             Trade.status.in_([OrderStatus.OPEN, OrderStatus.FILLED]),
-            Trade.opened_at >= since_dt,
-            Trade.opened_at <= until_dt,
+            _date_range_paper,
         ]
         base_filters_live = [
             LiveTrade.symbol == symbol.upper(),
-            LiveTrade.broker == broker.lower(),
+            LiveTrade.broker == broker_enum,
             LiveTrade.status.in_([OrderStatus.OPEN, OrderStatus.FILLED]),
-            LiveTrade.opened_at >= since_dt,
-            LiveTrade.opened_at <= until_dt,
+            _date_range_live,
         ]
         paper_result = await session.execute(
             select(Trade).where(*base_filters_paper).order_by(desc(Trade.opened_at)).limit(limit)
