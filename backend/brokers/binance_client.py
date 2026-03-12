@@ -220,6 +220,13 @@ class BinanceClient(AbstractBroker):
         for (symbol, total), price in zip(candidates, prices):
             if price is None:
                 continue
+            # Dust filter: positions whose notional value is below Binance's
+            # minimum order size ($5 NOTIONAL filter) cannot be closed via a
+            # normal market sell.  Exclude them from get_positions() so they
+            # don't get synced as orphan trades that then loop on NOTIONAL errors.
+            _notional = total * price
+            if _notional < 5.0:
+                continue
             positions.append(Position(
                 symbol=symbol,
                 side="long",

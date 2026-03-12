@@ -1122,6 +1122,30 @@ class ForwardEngine:
                     else:
                         raise RuntimeError("Close order unconfirmed and no price snapshot available")
                 except Exception as _close_err:
+                    # ── Binance NOTIONAL dust guard ──────────────────────────────────
+                    # Code -1013 (NOTIONAL filter) fires when position value < $5.
+                    # Retrying forever is useless — dust can never be closed via normal
+                    # market sell.  Mark CANCELLED and stop the loop.
+                    _err_str = str(_close_err)
+                    if "-1013" in _err_str and _broker_key == "binance":
+                        logger.warning(
+                            f"[ForwardEngine] {trade.symbol} id={trade.id}: Binance NOTIONAL "
+                            f"filter — dust position qty={trade.quantity} is un-closeable. "
+                            f"Marking CANCELLED to stop retry loop."
+                        )
+                        trade.status = OrderStatus.CANCELLED
+                        trade.notes = (
+                            (trade.notes or "") +
+                            f" Dust position below Binance minimum notional ($5) — marked CANCELLED."
+                        ).strip()
+                        trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                        if db_session is not None:
+                            try:
+                                await db_session.flush()
+                            except Exception:
+                                pass
+                        _closing_ids.discard(trade.id)
+                        return None
                     # ── "Already flat" detection (race between F-103 and place_order) ────
                     # The position check (F-103) can pass but the broker closes the
                     # position via its own bracket SL/TP before our market close lands.
@@ -1129,7 +1153,6 @@ class ForwardEngine:
                     #   Alpaca  : code 40310000 — "existing_qty … available: 0"
                     #   IBKR    : RuntimeError "cancelled by broker" on a plain market close
                     #   Binance : code -2022 (ReduceOnly rejected) — race past F-108 pre-check
-                    _err_str = str(_close_err)
                     _is_already_flat = (
                         "40310000" in _err_str                                          # Alpaca
                         or ("cancelled by broker" in _err_str.lower() and _broker_key == "ibkr")  # IBKR
@@ -2370,6 +2393,11 @@ class ForwardEngine:
                             )
                             linked_signal = None  # delink to avoid unique constraint
 
+                # Preserve strategy_name BEFORE potential delink (linked_signal=None).
+                _ibkr_orphan_strategy: str = (
+                    linked_signal.strategy_name if linked_signal and linked_signal.strategy_name else "unknown"
+                )
+
                 new_trade = _TradeModel(
                     symbol=full_sym,
                     side=pos.side,  # "long" | "short"
@@ -2384,7 +2412,7 @@ class ForwardEngine:
                     asset_class=AssetClass(pos.asset_class) if pos.asset_class in AssetClass._value2member_map_ else AssetClass.FOREX,
                     broker=BrokerName.IBKR,
                     is_paper=_ibkr_is_paper,
-                    strategy_name=linked_signal.strategy_name if linked_signal else "unknown",
+                    strategy_name=_ibkr_orphan_strategy,  # preserved before potential delink
                     signal_id=linked_signal.id if linked_signal else None,
                     broker_order_id="orphan_sync",
                     opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
@@ -2519,6 +2547,27 @@ class ForwardEngine:
                     except Exception:
                         _osig = None
 
+                    # Preserve strategy_name BEFORE any potential delink (osig=None).
+                    # If we later set _osig=None to avoid the unique constraint, we
+                    # still want the recovered trade to show the correct strategy.
+                    _orph_strategy_name: str = (
+                        _osig.strategy_name if _osig and _osig.strategy_name else "unknown"
+                    )
+
+                    # Dust guard: skip positions whose notional value is below the
+                    # broker's minimum order size.  Binance rejects SELL orders below
+                    # ~$5 notional (NOTIONAL filter), creating an infinite close-retry
+                    # loop.  Log as dust and move on — do NOT create a trade record.
+                    _orph_notional = (_op.entry_price or 0.0) * (_op.quantity or 0.0)
+                    _MIN_NOTIONAL = 6.0  # USD — above Binance $5 NOTIONAL minimum
+                    if _orph_notional < _MIN_NOTIONAL and _orph_notional > 0:
+                        logger.info(
+                            f"[ForwardEngine] Orphan sync ({_orph_broker}): {_op.symbol} — "
+                            f"position notional ${_orph_notional:.4f} below ${_MIN_NOTIONAL} "
+                            f"minimum — treating as dust, skipping trade creation."
+                        )
+                        continue
+
                     _o_model = Trade if _orph_is_paper else LiveTrade
 
                     # Guard: if this signal already has an OPEN/PENDING trade, skip to
@@ -2541,7 +2590,9 @@ class ForwardEngine:
                                 )
                                 continue
                             else:
-                                # Existing trade closed but position still at broker — recover unlinked
+                                # Existing trade closed but position still at broker — recover unlinked.
+                                # We keep _orph_strategy_name (captured above) so the recovered
+                                # trade doesn't lose its strategy attribution.
                                 logger.warning(
                                     f"[ForwardEngine] Orphan sync ({_orph_broker}): {_op.symbol} — "
                                     f"signal_id={_osig.id} has a {_existing_osig_trade.status.value} trade "
@@ -2581,7 +2632,7 @@ class ForwardEngine:
                         asset_class=AssetClass(_op.asset_class) if _op.asset_class in AssetClass._value2member_map_ else AssetClass.CRYPTO,
                         broker=_BN2(_orph_broker),
                         is_paper=_orph_is_paper,
-                        strategy_name=_osig.strategy_name if _osig else "unknown",
+                        strategy_name=_orph_strategy_name,  # preserved before potential delink
                         signal_id=_osig.id if _osig else None,
                         broker_order_id="orphan_sync",
                         opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
