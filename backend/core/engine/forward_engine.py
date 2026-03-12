@@ -1005,16 +1005,16 @@ class ForwardEngine:
             exit_price = _bracket_price
 
         # ── Compute realised PnL ──────────────────────────────────────────
-        if exit_price and trade.entry_price:
-            # Always use the full original trade.quantity for PnL — exit_price is
-            # already the weighted average across any bracket fill + remnant fill (F-108),
-            # so multiplying by the full qty gives the correct total realised P&L.
-            side_mult = 1.0 if trade.side in _long_sides else -1.0
-            raw_pnl = (exit_price - trade.entry_price) * trade.quantity * side_mult
+        # Always record exit_price when we have it — even if entry_price is 0/None
+        # (corrupted earlier), so the closed trade at least shows when it exited.
+        if exit_price:
             trade.exit_price = round(exit_price, 8)
-            trade.pnl = round(raw_pnl, 4)
-            cost_basis = trade.entry_price * trade.quantity
-            trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
+            if trade.entry_price:  # can only compute P&L when entry is known and non-zero
+                side_mult = 1.0 if trade.side in _long_sides else -1.0
+                raw_pnl = (exit_price - trade.entry_price) * trade.quantity * side_mult
+                trade.pnl = round(raw_pnl, 4)
+                cost_basis = trade.entry_price * trade.quantity
+                trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
 
         trade.status = OrderStatus.FILLED
         trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1600,6 +1600,17 @@ class ForwardEngine:
                 logger.debug(f"[ForwardEngine] reconcile: {broker_name} positions unavailable: {_e}")
                 continue
 
+            # For IBKR: pre-fetch open bracket SL/TP so we can patch PENDING→OPEN
+            # upgrades that are missing SL/TP (bracket created but DB record predated it).
+            _open_brackets: dict = {}
+            if broker_name == "ibkr":
+                try:
+                    _gob_r = getattr(broker, "get_open_brackets", None)
+                    if _gob_r:
+                        _open_brackets = await _gob_r()
+                except Exception as _br_err:
+                    logger.debug(f"[ForwardEngine] reconcile: bracket fetch failed: {_br_err}")
+
             for trade in trades:
                 _norm_key = _normalize(trade.symbol, broker_name)
                 if _norm_key in broker_symbols:
@@ -1608,8 +1619,28 @@ class ForwardEngine:
                         pos = next(
                             (p for p in broker_positions if p.symbol == _norm_key), None
                         )
-                        if pos and getattr(pos, "entry_price", None):
+                        # Only update entry_price from broker avgCost when it is > 0;
+                        # IBKR reports avgCost=0 while a fill is still settling, which
+                        # would corrupt the entry_price with a zero value.
+                        if pos and pos.entry_price:
                             trade.entry_price = round(pos.entry_price, 8)
+                        # Patch null SL/TP from open bracket orders (IBKR only).
+                        # This covers the case where the trade was created before the
+                        # bracket child orders were placed (race condition on fast fills).
+                        if trade.stop_loss is None and _open_brackets:
+                            _br = _open_brackets.get(_norm_key, {})
+                            if _br.get("sl"):
+                                trade.stop_loss = round(float(_br["sl"]), 8)
+                                logger.info(
+                                    f"[ForwardEngine] F-105: restored SL={trade.stop_loss} "
+                                    f"from bracket for {trade.symbol} id={trade.id}"
+                                )
+                            if _br.get("tp"):
+                                trade.take_profit = round(float(_br["tp"]), 8)
+                                logger.info(
+                                    f"[ForwardEngine] F-105: restored TP={trade.take_profit} "
+                                    f"from bracket for {trade.symbol} id={trade.id}"
+                                )
                         trade.status = OrderStatus.OPEN
                         _rec_bk = trade.broker.value if hasattr(trade.broker, 'value') else str(trade.broker)
                         self._paper_positions[f"{trade.symbol}:{_rec_bk}"] = trade
@@ -1724,14 +1755,16 @@ class ForwardEngine:
                             exit_price = trade.stop_loss
                         # reason == "broker_close" → no known bracket fired, keep snapshot
 
-                    # Compute PnL from exit price
-                    if exit_price and trade.entry_price:
-                        side_mult = 1.0 if is_long else -1.0
-                        raw_pnl = (exit_price - trade.entry_price) * trade.quantity * side_mult
+                    # Compute PnL from exit price — always record exit_price even
+                    # when entry_price is 0/corrupt so the dashboard shows the exit.
+                    if exit_price:
                         trade.exit_price = round(exit_price, 8)
-                        trade.pnl = round(raw_pnl, 4)
-                        cost_basis = trade.entry_price * trade.quantity
-                        trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
+                        if trade.entry_price:
+                            side_mult = 1.0 if is_long else -1.0
+                            raw_pnl = (exit_price - trade.entry_price) * trade.quantity * side_mult
+                            trade.pnl = round(raw_pnl, 4)
+                            cost_basis = trade.entry_price * trade.quantity
+                            trade.pnl_pct = round(raw_pnl / cost_basis * 100, 4) if cost_basis else 0.0
 
                     trade.status = OrderStatus.FILLED
                     trade.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1881,7 +1914,9 @@ class ForwardEngine:
                     symbol=full_sym,
                     side=pos.side,  # "long" | "short"
                     quantity=pos.quantity,
-                    entry_price=round(pos.entry_price, 8),
+                    # Guard against IBKR avgCost=0 (settling state) — store None so it
+                    # can be patched on the next reconcile tick when avgCost is available.
+                    entry_price=round(pos.entry_price, 8) if pos.entry_price else None,
                     stop_loss=round(sl_price, 8) if sl_price else (linked_signal.stop_loss if linked_signal else None),
                     take_profit=round(tp_price, 8) if tp_price else (linked_signal.take_profit if linked_signal else None),
                     status=OrderStatus.OPEN,

@@ -69,7 +69,7 @@ interface Trade {
 }
 
 function fmtPrice(price: number | null): string {
-  if (price == null) return '—'
+  if (price == null || price === 0) return '—'  // 0 is not a valid price, treat same as missing
   const abs = Math.abs(price)
   if (abs >= 1000) return price.toFixed(2)
   if (abs >= 10)   return price.toFixed(3)
