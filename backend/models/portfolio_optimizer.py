@@ -169,10 +169,13 @@ async def optimize_portfolio() -> dict:
 
         for strat in db_strategies:
             params = dict(strat.parameters or {})
-            # strategy_type key in parameters → strategy name in STRATEGY_REGISTRY
-            stype = params.get("strategy_type") or strat.name
-            # Try direct name match OR strategy_type match
-            matching_weight = weights.get(strat.name) or weights.get(stype)
+            # BUG-15 FIX: look up weight by strat.name only.
+            # Falling back to strategy_type (stype) caused weight collision — two
+            # strategies with the same strategy_type (e.g. "MeanReversion") would
+            # both receive the same weight regardless of their individual performance.
+            # TradeOutcome.strategy_name is always populated from signal.strategy_name
+            # which equals strat.name, so the direct lookup is always correct.
+            matching_weight = weights.get(strat.name)
             if matching_weight is not None:
                 params["weight"] = matching_weight
                 strat.parameters = params

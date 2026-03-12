@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from loguru import logger
 from sqlalchemy import select, func
@@ -7,7 +7,7 @@ from sqlalchemy import select, func
 from core.strategies.base import Signal
 from core.risk_manager import RiskManager, get_risk_manager  # BUG-2 FIX: import singleton factory
 from brokers import get_broker
-from db.models import Trade, LiveTrade, OrderStatus, ExecutionMode
+from db.models import Trade, LiveTrade, OrderStatus, ExecutionMode, AssetClass
 
 
 def _trade_model(is_paper: bool):
@@ -116,11 +116,21 @@ class ForwardEngine:
     @staticmethod
     async def _daily_pnl(db_session, broker: str | None = None) -> float:
         """Return today's realised + unrealized P&L, optionally filtered to one broker."""
+        # BUG-1 FIX: build today_start as a tz-naive UTC datetime so it matches
+        # the TIMESTAMP WITHOUT TIME ZONE columns in the DB.  Previously the code
+        # called datetime.now(utc).replace(..., tzinfo=None) which first creates a
+        # timezone-aware object and then strips the tzinfo, giving the correct UTC
+        # value but was fragile (would break if the host clock is not UTC).
+        # Using datetime.utcnow() directly is the canonical tz-naive UTC approach.
         from datetime import timezone as _tz
-        today_start = datetime.now(_tz.utc).replace(
-            hour=_cfg.daily_reset_hour_utc,  # BUG-3 FIX: configurable reset hour (default 0 = midnight UTC)
-            minute=0, second=0, microsecond=0, tzinfo=None
+        _now_utc = datetime.now(_tz.utc)
+        today_start = datetime(
+            _now_utc.year, _now_utc.month, _now_utc.day,
+            _cfg.daily_reset_hour_utc, 0, 0,  # configurable reset hour, always tz-naive
         )
+        # If reset hour > current UTC hour the reset boundary is still yesterday — go back one day
+        if _now_utc.hour < _cfg.daily_reset_hour_utc:
+            today_start -= timedelta(days=1)
         # Build optional broker filter
         broker_filter: list = []
         if broker:
@@ -158,6 +168,7 @@ class ForwardEngine:
             select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
                 Trade.status == OrderStatus.OPEN,
                 Trade.pnl.isnot(None),
+                Trade.opened_at >= today_start,   # BUG-7 FIX: only count today's open positions
                 *broker_filter,
             )
         )
@@ -165,6 +176,7 @@ class ForwardEngine:
             select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
                 LiveTrade.status == OrderStatus.OPEN,
                 LiveTrade.pnl.isnot(None),
+                LiveTrade.opened_at >= today_start,   # BUG-7 FIX: only count today's open positions
                 *live_broker_filter,
             )
         )
@@ -287,6 +299,29 @@ class ForwardEngine:
             except Exception as _exp_err:
                 logger.debug(f"[ForwardEngine] Could not compute asset_class_exposure: {_exp_err}")
 
+        # BUG-5 FIX: compute per-symbol asset exposure so validate() can enforce
+        # max_exposure_per_asset_pct as a hard gate, not just a position-size cap.
+        asset_exposure = 0.0
+        if db_session is not None:
+            try:
+                _sym_paper = await db_session.execute(
+                    select(func.coalesce(func.sum(Trade.quantity * Trade.entry_price), 0.0)).where(
+                        Trade.status == OrderStatus.OPEN,
+                        Trade.symbol == signal.symbol,
+                        Trade.broker == signal.broker,
+                    )
+                )
+                _sym_live = await db_session.execute(
+                    select(func.coalesce(func.sum(LiveTrade.quantity * LiveTrade.entry_price), 0.0)).where(
+                        LiveTrade.status == OrderStatus.OPEN,
+                        LiveTrade.symbol == signal.symbol,
+                        LiveTrade.broker == signal.broker,
+                    )
+                )
+                asset_exposure = float(_sym_paper.scalar_one() or 0.0) + float(_sym_live.scalar_one() or 0.0)
+            except Exception as _ae_err:
+                logger.debug(f"[ForwardEngine] Could not compute asset_exposure: {_ae_err}")
+
         # ── Load per-broker risk settings from DB ────────────────
         broker_settings: dict | None = None
         if db_session is not None:
@@ -324,6 +359,7 @@ class ForwardEngine:
             open_positions_count=open_count,
             daily_pnl=daily_pnl,
             asset_class_exposure=asset_class_exposure,
+            asset_exposure=asset_exposure,
             broker=broker_key,
             broker_settings=broker_settings,
         )
@@ -478,8 +514,11 @@ class ForwardEngine:
                     )
                     return None
 
-        # G5: IBKR forex minimum lot size pre-check (25,000 base currency units)
-        _IBKR_FOREX_MIN_LOT = 25_000.0
+        # G5: IBKR forex minimum lot size pre-check.
+        # IMP-27 FIX: IBKR IDEALPRO actual minimum is 20,000 base currency units,
+        # not 25,000 as was previously hardcoded.  Orders below this threshold are
+        # rejected by IBKR with error 200 "No security definition has been found".
+        _IBKR_FOREX_MIN_LOT = 20_000.0
         _broker_key_g5 = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
         _asset_cls_g5 = getattr(signal.asset_class, 'value', str(signal.asset_class or '')).upper()
         if _broker_key_g5 == 'ibkr' and _asset_cls_g5 == 'FOREX' and effective_size < _IBKR_FOREX_MIN_LOT:
@@ -542,6 +581,15 @@ class ForwardEngine:
                     f"[ForwardEngine] Multi-leg option ({meta.get('strategy_type', '?')}) for "
                     f"{signal.symbol} — live execution not supported; switch to paper mode."
                 )
+                if not is_paper:
+                    # BUG-20 FIX: in live mode, refuse execution entirely for multi-leg options
+                    # rather than silently placing a plain market order on the underlying,
+                    # which would create an unintended unhedged outright position.
+                    logger.error(
+                        f"[ForwardEngine] LIVE multi-leg option rejected for {signal.symbol} "
+                        "— use paper mode or reduce to a single-leg order."
+                    )
+                    return None
         mode_tag = "PAPER" if is_paper else "LIVE"
         try:
             result = await broker.place_order(
@@ -877,11 +925,12 @@ class ForwardEngine:
                         )
                     else:
                         raise RuntimeError("Close order unconfirmed and no price snapshot available")
-                except RuntimeError:
-                    raise
                 except Exception as _close_err:
-                    # F-103b: revert the atomic guard (PENDING→OPEN) so the next scheduler tick
-                    # can retry instead of leaving the trade permanently stuck as PENDING.
+                    # F-103b / BUG-6 FIX: revert the atomic guard (PENDING→OPEN) for ANY
+                    # exception — including RuntimeError — so the next scheduler tick can
+                    # retry instead of leaving the trade permanently stuck as PENDING.
+                    # Previously `except RuntimeError: raise` skipped this block, meaning
+                    # a RuntimeError (e.g. "no price snapshot") left the trade stuck forever.
                     if db_session is not None and trade.id is not None:
                         from sqlalchemy import update as _upd_revert
                         _TradeModelRevert = type(trade)
@@ -1034,11 +1083,75 @@ class ForwardEngine:
         logger.warning(f"[ForwardEngine] Emergency stop: {closed} positions closed.")
         return closed
 
+    async def cleanup_stale_pending_trades(self, db_session, timeout_minutes: int = 30) -> int:
+        """
+        IMP-31: Resolve PENDING trades that have been stuck too long.
+
+        A PENDING trade is one where the broker accepted the order but the
+        fill confirmation never arrived within the broker's poll timeout.
+        These trades block position slots indefinitely if never resolved.
+
+        Strategy:
+          1. Find all PENDING trades older than `timeout_minutes`.
+          2. Mark them as REJECTED (safe: the broker order may or may not have
+             filled, but we cannot confirm — the trade audit trail is preserved).
+          3. Dispatch an in-app warning notification so the operator is aware.
+
+        Returns the number of trades resolved.
+        """
+        from db.models import BrokerName as _BN
+        cutoff = datetime.utcnow() - timedelta(minutes=timeout_minutes)
+        resolved = 0
+
+        for _TradeModel in (Trade, LiveTrade):
+            _pending_q = await db_session.execute(
+                select(_TradeModel).where(
+                    _TradeModel.status == OrderStatus.PENDING,
+                    _TradeModel.opened_at <= cutoff,
+                )
+            )
+            stale = _pending_q.scalars().all()
+            for t in stale:
+                t.status = OrderStatus.REJECTED
+                t.notes = (
+                    (t.notes or "") +
+                    f" | IMP-31: auto-resolved as REJECTED after {timeout_minutes}m pending timeout"
+                )
+                resolved += 1
+                # Remove from in-memory cache so it doesn't block the next strategy run
+                self._paper_positions.pop(t.symbol, None)
+                logger.warning(
+                    f"[ForwardEngine] IMP-31: PENDING trade id={t.id} {t.symbol} "
+                    f"exceeded {timeout_minutes}m timeout — marked REJECTED. "
+                    f"broker_order_id={t.broker_order_id}"
+                )
+                try:
+                    from notifications.notifier import dispatch as _notif_dispatch
+                    await _notif_dispatch(
+                        db_session,
+                        title=f"⚠ PENDING Trade Timed Out — {t.symbol}",
+                        message=(
+                            f"Trade id={t.id} ({t.side.upper()} {t.symbol}) has been PENDING "
+                            f"for over {timeout_minutes} minutes without fill confirmation. "
+                            f"It has been auto-resolved as REJECTED. "
+                            f"broker_order_id={t.broker_order_id}"
+                        ),
+                        level="warning",
+                        category="trade",
+                        metadata={"trade_id": t.id, "symbol": t.symbol, "broker_order_id": t.broker_order_id},
+                    )
+                except Exception as _n_err:
+                    logger.debug(f"[ForwardEngine] PENDING timeout notification failed: {_n_err}")
+
+        if resolved:
+            await db_session.flush()
+            logger.info(f"[ForwardEngine] IMP-31: resolved {resolved} stale PENDING trade(s)")
+        return resolved
+
     async def monitor_sl_tp(self, db_session) -> int:
         """
         Software-side SL/TP enforcement — runs every scheduler tick as a
         safety net independent of broker bracket orders.
-
         Broker bracket orders (IBKR paper/live, Alpaca OTO/bracket, Binance OCO)
         are *also* placed at entry, but they can silently fail to fire due to:
           - IBKR paper account missing active market data subscription
@@ -1712,6 +1825,8 @@ class ForwardEngine:
                     stop_loss=round(sl_price, 8) if sl_price else (linked_signal.stop_loss if linked_signal else None),
                     take_profit=round(tp_price, 8) if tp_price else (linked_signal.take_profit if linked_signal else None),
                     status=OrderStatus.OPEN,
+                    execution_mode=linked_signal.execution_mode if linked_signal else ExecutionMode.FULL_AUTO,
+                    asset_class=AssetClass(pos.asset_class) if pos.asset_class in AssetClass._value2member_map_ else AssetClass.FOREX,
                     broker=BrokerName.IBKR,
                     is_paper=_ibkr_is_paper,
                     strategy_name=linked_signal.strategy_name if linked_signal else "unknown",

@@ -151,9 +151,14 @@ async def _fetch_ohlcv_yfinance(
         df.index = pd.to_datetime(df.index)
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_convert("UTC").tz_localize(None)
-        # Resample 4h since yfinance only offers 1h natively
+        # BUG-13 FIX: resample 4h anchored to first available candle so windows
+        # align with market open (e.g. 09:30 ET for stocks) instead of UTC midnight.
+        # df.resample("4h") without `origin` defaults to "epoch" (1970-01-01 00:00 UTC),
+        # which produces candle boundaries at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+        # — misaligned with NYSE open (14:30 UTC) and crypto 4h convention.
+        # Using origin=df.index[0] anchors the 4h windows to the first data point.
         if timeframe == "4h" and yf_interval == "60m":
-            df = df.resample("4h").agg(
+            df = df.resample("4h", origin=df.index[0]).agg(
                 {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
             ).dropna()
         since_naive = since.replace(tzinfo=None)

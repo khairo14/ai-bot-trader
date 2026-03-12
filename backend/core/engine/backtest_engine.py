@@ -16,6 +16,31 @@ class BacktestEngine:
     Outputs full performance metrics.
     """
 
+    # IMP-29: asset-class-aware default slippage values (one-way, in %).
+    # These approximate the half bid-ask spread + market impact for liquid symbols.
+    # Callers can still override via the slippage_pct argument.
+    _DEFAULT_SLIPPAGE: dict[str, float] = {
+        "crypto":  0.10,  # Binance taker fee ≈ 0.1 % + thin-book impact
+        "stock":   0.03,  # Alpaca/IBKR: 0.01 % commission + ~0.02 % half-spread
+        "options": 0.50,  # wide bid-ask spread on most single-leg options
+        "forex":   0.02,  # IBKR IDEALPRO: tight spread on majors
+        "default": 0.05,  # safe conservative default
+    }
+
+    @classmethod
+    def _broker_default_slippage(cls, broker: str, parameters: dict | None) -> float:
+        """Return a realistic default slippage % for the given broker / asset type."""
+        asset_class = (parameters or {}).get("asset_class", "").lower()
+        if asset_class in cls._DEFAULT_SLIPPAGE:
+            return cls._DEFAULT_SLIPPAGE[asset_class]
+        # Infer from broker name
+        b = broker.lower()
+        if "binance" in b:
+            return cls._DEFAULT_SLIPPAGE["crypto"]
+        if "alpaca" in b or "ibkr" in b:
+            return cls._DEFAULT_SLIPPAGE["stock"]
+        return cls._DEFAULT_SLIPPAGE["default"]
+
     def __init__(self):
         self.signal_engine = SignalEngine()
 
@@ -28,7 +53,7 @@ class BacktestEngine:
         end_date: datetime,
         initial_capital: float = 10000.0,
         commission_pct: float = 0.1,
-        slippage_pct: float = 0.05,
+        slippage_pct: Optional[float] = None,   # IMP-29: None → use broker-aware default
         risk_per_trade_pct: float = 2.0,
         broker: str = "binance",
         parameters: Optional[dict] = None,
@@ -36,6 +61,10 @@ class BacktestEngine:
         max_consecutive_losses: int = 3,
     ) -> dict:
         """Run a full backtest and return performance metrics."""
+        # IMP-29: apply asset-class-aware default slippage when not explicitly set
+        if slippage_pct is None:
+            slippage_pct = self._broker_default_slippage(broker, parameters)
+            logger.debug(f"[Backtest] Using broker-default slippage {slippage_pct:.2f}% for broker='{broker}'")
 
         logger.info(f"[Backtest] Starting: {strategy_name} | {symbol} | {timeframe} | {start_date.date()} → {end_date.date()}")
 

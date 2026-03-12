@@ -27,39 +27,55 @@ _LOGIN_MAX_ATTEMPTS = 10  # max failed attempts per IP in that window
 import collections, time as _time
 _login_attempts_fallback: dict[str, list[float]] = collections.defaultdict(list)
 
+# BUG-8 FIX: module-level Redis client reused across calls instead of creating a
+# new connection per request.  The old pattern opened AND closed a TCP connection
+# on every login check, adding latency and exhausting file descriptors under load.
+_redis_client = None
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        try:
+            import redis.asyncio as _aioredis
+            _redis_client = _aioredis.from_url(_cfg_auth.redis_url, decode_responses=True)
+        except Exception:
+            pass
+    return _redis_client
+
 
 async def _is_rate_limited(client_ip: str) -> bool:
     """Return True if the IP has exceeded the login failure threshold."""
     try:
-        import redis.asyncio as _aioredis
-        _redis = _aioredis.from_url(_cfg_auth.redis_url, decode_responses=True)
-        _key = f"login_fail:{client_ip}"
-        count = await _redis.get(_key)
-        await _redis.aclose()
-        return int(count or 0) >= _LOGIN_MAX_ATTEMPTS
+        _redis = _get_redis()
+        if _redis is not None:
+            _key = f"login_fail:{client_ip}"
+            count = await _redis.get(_key)
+            return int(count or 0) >= _LOGIN_MAX_ATTEMPTS
     except Exception:
-        # Fallback: in-process sliding window
-        now = _time.monotonic()
-        pruned = [t for t in _login_attempts_fallback[client_ip] if now - t < _LOGIN_WINDOW]
-        if pruned:
-            _login_attempts_fallback[client_ip] = pruned
-        else:
-            _login_attempts_fallback.pop(client_ip, None)
-        return len(pruned) >= _LOGIN_MAX_ATTEMPTS
+        pass
+    # Fallback: in-process sliding window
+    now = _time.monotonic()
+    pruned = [t for t in _login_attempts_fallback[client_ip] if now - t < _LOGIN_WINDOW]
+    if pruned:
+        _login_attempts_fallback[client_ip] = pruned
+    else:
+        _login_attempts_fallback.pop(client_ip, None)
+    return len(pruned) >= _LOGIN_MAX_ATTEMPTS
 
 
 async def _record_failure(client_ip: str) -> None:
     """Record a failed login attempt (increments Redis counter with TTL)."""
     try:
-        import redis.asyncio as _aioredis
-        _redis = _aioredis.from_url(_cfg_auth.redis_url, decode_responses=True)
-        _key = f"login_fail:{client_ip}"
-        await _redis.incr(_key)
-        await _redis.expire(_key, _LOGIN_WINDOW)
-        await _redis.aclose()
+        _redis = _get_redis()
+        if _redis is not None:
+            _key = f"login_fail:{client_ip}"
+            await _redis.incr(_key)
+            await _redis.expire(_key, _LOGIN_WINDOW)
+            return
     except Exception:
-        # Fallback: in-process
-        _login_attempts_fallback[client_ip].append(_time.monotonic())
+        pass
+    # Fallback: in-process
+    _login_attempts_fallback[client_ip].append(_time.monotonic())
 
 _JWT_COOKIE = "access_token"  # httpOnly cookie name (F-056)
 

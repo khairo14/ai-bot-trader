@@ -37,6 +37,46 @@ _stable_regime: dict[str, str] = {}  # symbol → confirmed stable regime
 
 _REGIME_SETTINGS_PATH = pathlib.Path(__file__).resolve().parent.parent / "runtime" / "regime_settings.json"
 
+# BUG-19 FIX: Redis keys for persisting regime hysteresis across worker restarts.
+# On cold start we load both dicts from Redis so hysteresis is never reset to
+# zero just because the Celery worker was restarted or replaced.
+_REDIS_REGIME_HISTORY_KEY = "regime_hysteresis:history"
+_REDIS_STABLE_REGIME_KEY  = "regime_hysteresis:stable"
+
+
+def _load_regime_state_from_redis() -> None:
+    """Restore _regime_history and _stable_regime from Redis on worker startup."""
+    try:
+        import redis as _sync_redis
+        from config import settings as _cfg_s
+        _r = _sync_redis.from_url(_cfg_s.redis_url, decode_responses=True, socket_connect_timeout=2)
+        raw_history = _r.get(_REDIS_REGIME_HISTORY_KEY)
+        raw_stable  = _r.get(_REDIS_STABLE_REGIME_KEY)
+        if raw_history:
+            _regime_history.update(json.loads(raw_history))
+        if raw_stable:
+            _stable_regime.update(json.loads(raw_stable))
+        _r.close()
+    except Exception as _e:
+        logger.debug(f"[signal_runner] Could not load regime state from Redis: {_e}")
+
+
+def _save_regime_state_to_redis() -> None:
+    """Persist _regime_history and _stable_regime to Redis after each update."""
+    try:
+        import redis as _sync_redis
+        from config import settings as _cfg_s
+        _r = _sync_redis.from_url(_cfg_s.redis_url, decode_responses=True, socket_connect_timeout=2)
+        _r.set(_REDIS_REGIME_HISTORY_KEY, json.dumps(_regime_history))
+        _r.set(_REDIS_STABLE_REGIME_KEY,  json.dumps(_stable_regime))
+        _r.close()
+    except Exception as _e:
+        logger.debug(f"[signal_runner] Could not save regime state to Redis: {_e}")
+
+
+# Load persisted regime state at module import time (worker startup)
+_load_regime_state_from_redis()
+
 
 def _load_regime_settings() -> dict:
     """Load global regime router settings from disk."""
@@ -67,6 +107,10 @@ def _update_regime_hysteresis(symbol: str, new_regime: str, n: int) -> str:
     if len(history) >= n and len(set(history[-n:])) == 1:
         # Regime has been stable for N candles — confirm the switch
         _stable_regime[symbol] = new_regime
+
+    # BUG-19 FIX: persist state after every update so Celery worker restarts
+    # don't reset hysteresis to zero (which would cause premature regime switches).
+    _save_regime_state_to_redis()
 
     # Return confirmed stable regime, or fall back to new_regime on cold start
     return _stable_regime.get(symbol, new_regime)
@@ -218,6 +262,15 @@ def run_signals(self):
                 except Exception as _mon_err:
                     logger.debug(f"[signal_runner] SL/TP monitor error (non-fatal): {_mon_err}")
 
+                # IMP-31: resolve stale PENDING trades before running strategies
+                # so they don't hold position slots indefinitely.
+                try:
+                    _pending_resolved = await forward_engine.cleanup_stale_pending_trades(session)
+                    if _pending_resolved:
+                        logger.info(f"[signal_runner] IMP-31: resolved {_pending_resolved} stale PENDING trade(s)")
+                except Exception as _pend_err:
+                    logger.debug(f"[signal_runner] PENDING cleanup error (non-fatal): {_pend_err}")
+
                 # F-083: Commit monitor/reconcile changes before the strategy loop.
                 # If the first strategy below raises and triggers session.rollback(),
                 # WITHOUT this commit the SL/TP closing orders already sent to the
@@ -281,7 +334,10 @@ def run_signals(self):
                                 _broker_obj = _get_broker(strat.broker.value)
                                 await _broker_obj.connect()
                                 _ohlcv = await _broker_obj.get_ohlcv(symbol, timeframe, limit=200)
-                                _regime_result = _rc.classify(_ohlcv)
+                                # IMP-30: pass asset_class so classify() selects the
+                                # appropriate ADX threshold for this instrument type
+                                _asset_class_str = params.get("asset_class", "")
+                                _regime_result = _rc.classify(_ohlcv, asset_class=_asset_class_str)
                                 _raw_regime = _regime_result.regime
                                 # Apply hysteresis — only switch after N stable candles
                                 _symbol_key = f"{symbol}:{timeframe}"
@@ -663,6 +719,17 @@ def run_signals(self):
                             # Removing the redundant block here prevents 2× WS events,
                             # 2× DB notification rows, and 2× emails per live trade fill.
                         await session.commit()
+
+                        # BUG-18 FIX: re-hydrate ForwardEngine in-memory state after
+                        # each per-strategy commit.  Without this, _paper_balance and
+                        # _paper_positions can drift from DB reality across strategies
+                        # in the same Celery tick (e.g. a trade opened by Strategy A
+                        # reduces available balance, but Strategy B's fallback balance
+                        # still reads the pre-A value stored at initialization time).
+                        try:
+                            await forward_engine.initialize(session)
+                        except Exception as _rh_err:
+                            logger.debug(f"[signal_runner] ForwardEngine re-hydrate failed (non-fatal): {_rh_err}")
 
                         logger.info(
                             f"[signal_runner] ✓ {strat.name} | {symbol} | {sig.signal} "

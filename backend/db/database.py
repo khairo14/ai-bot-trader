@@ -10,10 +10,17 @@ async_db_url = settings.database_url.replace(
     "postgresql://", "postgresql+asyncpg://"
 )
 
+# IMP-28: pass ssl='require' to asyncpg when db_ssl=true in settings so that
+# production deployments (RDS, Supabase, managed Postgres) encrypt the DB link.
+_connect_args: dict = {}
+if settings.db_ssl:
+    _connect_args["ssl"] = "require"
+
 engine = create_async_engine(
     async_db_url,
     echo=settings.debug,
     pool_pre_ping=True,
+    connect_args=_connect_args,
 )
 
 AsyncSessionLocal = async_sessionmaker(

@@ -104,7 +104,16 @@ class RegimeClassifier:
     """
 
     # Thresholds (class-level, easily tunable)
-    ADX_TREND_THRESHOLD:   float = 25.0   # ADX above this → trending
+    # IMP-30: per-asset-class ADX thresholds replace the single global value.
+    # Crypto / FX trend more aggressively and need a lower threshold to catch
+    # early trend entries; equities follow the textbook 25-level.
+    ADX_TREND_THRESHOLD:   float = 25.0   # fallback (used when asset_class unknown)
+    ADX_THRESHOLD_BY_CLASS: dict[str, float] = {
+        "crypto":  20.0,   # fast-trending, high ADX sensitivity
+        "forex":   22.0,   # trending but mean-reverts faster than equities
+        "stock":   25.0,   # textbook threshold for equities
+        "options": 25.0,   # options premium decays; use equity threshold
+    }
     ATR_NORM_HIGH_VOL:     float = 0.035  # ATR/price above this → high volatility
     BB_WIDTH_LOW_VOL:      float = 0.02   # BB width ((upper-lower)/middle) below → squeeze
     EMA_SLOPE_PERIODS:     int   = 15     # candles used to compute EMA slope
@@ -115,7 +124,7 @@ class RegimeClassifier:
         self._bb  = BollingerBands()
         self._ma  = MovingAverages()
 
-    def classify(self, data: pd.DataFrame) -> RegimeResult:
+    def classify(self, data: pd.DataFrame, asset_class: str = "") -> RegimeResult:
         """
         Classify the current market regime from OHLCV data.
 
@@ -124,6 +133,9 @@ class RegimeClassifier:
         data : pd.DataFrame
             OHLCV DataFrame with columns: open, high, low, close, volume.
             Minimum 50 rows recommended; falls back to ``ranging`` if too short.
+        asset_class : str
+            Asset class hint for per-class ADX threshold selection.
+            One of 'crypto', 'forex', 'stock', 'options', or '' (global default).
 
         Returns
         -------
@@ -134,14 +146,18 @@ class RegimeClassifier:
             return RegimeResult(regime=REGIME_RANGING, features={}, confidence=0.0)
 
         try:
-            return self._classify(data)
+            return self._classify(data, asset_class=asset_class)
         except Exception as exc:
             logger.warning(f"[Regime] Classification error — defaulting to 'ranging': {exc}")
             return RegimeResult(regime=REGIME_RANGING, features={}, confidence=0.0)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
-    def _classify(self, data: pd.DataFrame) -> RegimeResult:
+    def _classify(self, data: pd.DataFrame, asset_class: str = "") -> RegimeResult:
+        # IMP-30: select ADX threshold based on asset class
+        _ac = asset_class.lower() if asset_class else ""
+        adx_threshold = self.ADX_THRESHOLD_BY_CLASS.get(_ac, self.ADX_TREND_THRESHOLD)
+
         # ── Compute indicators ────────────────────────────────────────────
         atr_out = self._atr.calculate(data)
         adx_out = self._adx.calculate(data)
@@ -192,7 +208,7 @@ class RegimeClassifier:
             return RegimeResult(regime=REGIME_LOW_VOL, features=features)
 
         # Trending regimes (ADX strength + EMA slope direction)
-        if adx_val >= self.ADX_TREND_THRESHOLD:
+        if adx_val >= adx_threshold:
             if ema_slope >= 0:
                 return RegimeResult(regime=REGIME_TRENDING_UP, features=features)
             else:

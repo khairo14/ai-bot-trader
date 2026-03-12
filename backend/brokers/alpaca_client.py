@@ -62,9 +62,16 @@ class AlpacaClient(AbstractBroker):
             "1Hour": TimeFrame.Hour,
             "4h":    TimeFrame(4, TimeFrameUnit.Hour),  # type: ignore[arg-type]
             "1d":    TimeFrame.Day,
-            "3d":    TimeFrame.Day,    # Alpaca has no native 3-day bar — use 1d
+            # BUG-4 FIX: "3d" is not a native Alpaca timeframe. Alpaca only supports
+            # 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w.  Raising here prevents strategies
+            # from silently receiving incorrect 1d bars and computing wrong signals.
             "1w":    TimeFrame.Week,
         }
+        if tf == "3d":
+            raise ValueError(
+                "Alpaca does not support a native 3-day bar. "
+                "Use '1d' and resample manually, or switch to a supported timeframe."
+            )
         return mapping.get(tf, TimeFrame.Hour)
 
     async def get_price(self, symbol: str) -> float:
@@ -90,11 +97,16 @@ class AlpacaClient(AbstractBroker):
         price = await self.get_price(symbol)
         return price, price
 
-    # Minutes per timeframe string � used to compute start date from limit
+    # Minutes per timeframe string – used to compute start date from limit.
+    # BUG-9 FIX: "1w" was 1440 (1 trading day) instead of 7200 (5 trading
+    # days × 1440 min/day). With limit=200, that only requested ~1041 calendar
+    # days but 200 weekly bars require ~1400 calendar days (~3.85 years).
+    # "3d" entry removed — Alpaca doesn't support a 3-day bar (_map_timeframe
+    # now raises ValueError for "3d" so this path is never reached for it).
     _TF_MINUTES: dict[str, int] = {
         "1m": 1, "5m": 5, "15m": 15, "30m": 30,
         "1h": 60, "1Hour": 60, "4h": 240, "1d": 1440,
-        "3d": 1440, "1w": 1440,  # use daily minutes for start-date calculation
+        "1w": 7200,   # 5 trading days × 1440 min/day (correct weekly look-back)
     }
 
     async def get_ohlcv(

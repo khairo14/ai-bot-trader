@@ -185,3 +185,53 @@ async def settle_fx_now():
         "message": "FX settlement triggered.",
         "conversions": conversions,
     }
+
+
+@router.get("/live-pnl")
+async def get_live_pnl():
+    """
+    Fetch real-time unrealized P&L for open positions directly from each broker.
+
+    Returns a dict keyed by broker name, each containing a list of
+    {symbol, unrealized_pnl, entry_price, current_price} dicts.
+    Falls back to an empty list for any broker that errors (e.g. market closed,
+    no connection).
+    """
+    result: dict = {}
+
+    # Alpaca — broker positions include real-time unrealized_pl
+    try:
+        from brokers.alpaca_client import AlpacaClient
+        alpaca = AlpacaClient()
+        positions = await alpaca.get_positions()
+        result["alpaca"] = [
+            {
+                "symbol": p.symbol,
+                "entry_price": p.entry_price,
+                "current_price": p.current_price,
+                "unrealized_pnl": p.unrealized_pnl,
+            }
+            for p in positions
+        ]
+    except Exception as _e:
+        result["alpaca"] = []
+
+    # IBKR — connect then fetch positions
+    try:
+        from brokers.ibkr_client import IBKRClient as _IBKRClient
+        ibkr = _IBKRClient()
+        await ibkr.connect()
+        ibkr_positions = await ibkr.get_positions()
+        result["ibkr"] = [
+            {
+                "symbol": p.symbol,
+                "entry_price": p.entry_price,
+                "current_price": p.current_price,
+                "unrealized_pnl": p.unrealized_pnl,
+            }
+            for p in ibkr_positions
+        ]
+    except Exception as _e:
+        result["ibkr"] = []
+
+    return result

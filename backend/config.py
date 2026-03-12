@@ -91,8 +91,10 @@ class Settings(BaseSettings):
     # by browsers on plain HTTP connections, which breaks the login flow.
     cookie_secure: bool = False
 
-    # OpenAI (optional — not used by core trading engine; reserved for future LLM features)
-    openai_api_key: str = ""
+    # IMP-28: PostgreSQL SSL.  Set db_ssl=true in .env when the database is remote
+    # (e.g. a managed RDS / Supabase instance) to encrypt the DB connection.
+    # Leave False for local Docker Compose setups where DB is on the same network.
+    db_ssl: bool = False
 
     # Gmail notifications
     gmail_user: str = ""                  # your Gmail address

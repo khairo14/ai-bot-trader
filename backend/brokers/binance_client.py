@@ -183,7 +183,7 @@ class BinanceClient(AbstractBroker):
         else:
             items = ((b["asset"], b) for b in raw_balances if isinstance(b, dict))
 
-        positions = []
+        candidates: list[tuple[str, float]] = []
         for asset, info in items:
             free = float(info.get("free", 0))
             locked = float(info.get("locked", 0))
@@ -193,20 +193,36 @@ class BinanceClient(AbstractBroker):
             # incorrectly sees "no position" and skips the cancel+sell flow, causing
             # the trade to stay open or close at the wrong price.
             if total > 0 and asset != "USDT":
-                symbol = f"{asset}/USDT"
-                try:
-                    price = await self.get_price(symbol)
-                    positions.append(Position(
-                        symbol=symbol,
-                        side="long",
-                        quantity=total,
-                        entry_price=price,  # spot has no tracked entry; use current price → PnL = 0
-                        current_price=price,
-                        unrealized_pnl=0.0,
-                        asset_class="crypto",
-                    ))
-                except Exception:
-                    pass
+                candidates.append((f"{asset}/USDT", total))
+
+        if not candidates:
+            return []
+
+        # BUG-10 FIX: fetch all prices in parallel (asyncio.gather) with a per-call
+        # timeout instead of N serial calls with no timeout. Previously, each call
+        # blocked the next; with 10+ assets this could stall the event loop for
+        # several seconds or hang indefinitely if a single ticker call timed out.
+        async def _safe_price(sym: str) -> float | None:
+            try:
+                return await asyncio.wait_for(self.get_price(sym), timeout=5.0)
+            except Exception:
+                return None
+
+        prices = await asyncio.gather(*[_safe_price(sym) for sym, _ in candidates])
+
+        positions = []
+        for (symbol, total), price in zip(candidates, prices):
+            if price is None:
+                continue
+            positions.append(Position(
+                symbol=symbol,
+                side="long",
+                quantity=total,
+                entry_price=price,  # spot has no tracked entry; use current price → PnL = 0
+                current_price=price,
+                unrealized_pnl=0.0,
+                asset_class="crypto",
+            ))
         return positions
 
     async def _normalize_qty(self, symbol: str, qty: float) -> float:
@@ -272,7 +288,7 @@ class BinanceClient(AbstractBroker):
             # placing two separate exit orders achieves the same protection.
             result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
             exit_side = "sell" if side == "buy" else "buy"
-            # BUG-1 FIX: place TP limit order FIRST, then SL STOP_LOSS order.
+            # BUG-2 FIX: place TP limit order FIRST, then SL STOP_LOSS order.
             # Binance spot locks the full base asset when a STOP_LOSS (sell) order is placed.
             # Placing SL first means free balance = 0 when TP tries to place, causing a
             # silent "insufficient balance" failure.  A limit sell order does NOT lock
@@ -300,7 +316,13 @@ class BinanceClient(AbstractBroker):
                     if _attempt == 0:
                         await asyncio.sleep(0.5)
                     else:
-                        logger.error(f"[Binance] SL guard (bracket) failed after retry: {_sl_err}")
+                        # BUG-2 FIX: raise instead of silently continuing — a position
+                        # without a stop-loss is unprotected. The caller (ForwardEngine)
+                        # will catch this, revert the PENDING guard back to OPEN, and
+                        # retry on the next tick rather than leaving capital at risk.
+                        raise RuntimeError(
+                            f"[Binance] SL guard (bracket) permanently failed for {symbol}: {_sl_err}"
+                        )
             order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif stop_price and not take_profit_price:
@@ -321,7 +343,12 @@ class BinanceClient(AbstractBroker):
                     if _attempt == 0:
                         await asyncio.sleep(0.5)
                     else:
-                        logger.error(f"[Binance] SL guard order failed after retry: {_sl_err}")
+                        # BUG-2 FIX: raise instead of silently continuing — a position
+                        # without a stop-loss is unprotected. Caller will revert the
+                        # order state and retry rather than leaving capital at risk.
+                        raise RuntimeError(
+                            f"[Binance] SL guard order permanently failed for {symbol}: {_sl_err}"
+                        )
             order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif take_profit_price and not stop_price:

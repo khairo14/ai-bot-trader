@@ -182,23 +182,64 @@ export default function Dashboard() {
 
   const enrichPositionsWithLivePnl = useCallback(async (positions: OpenPosition[]): Promise<OpenPosition[]> => {
     if (positions.length === 0) return positions
-    const pairs = [...new Set(positions.map(p => `${p.symbol}|${p.broker}`))]
+
+    // Priority 1: broker live-pnl (works outside market hours, no SIP restriction)
+    const brokerPnlMap: Record<string, { unrealized_pnl: number; current_price: number }> = {}
+    try {
+      const res = await axios.get('/api/positions/live-pnl')
+      const data: Record<string, { symbol: string; unrealized_pnl: number; current_price: number }[]> = res.data
+      for (const [broker, bPositions] of Object.entries(data)) {
+        for (const bp of bPositions) {
+          brokerPnlMap[`${bp.symbol}|${broker}`] = {
+            unrealized_pnl: bp.unrealized_pnl,
+            current_price: bp.current_price,
+          }
+        }
+      }
+    } catch { /* fall through to candle enrichment */ }
+
+    // Priority 2: candle fallback for positions not covered by broker API
+    const uncoveredPairs = [...new Set(
+      positions
+        .filter(p => p.pnl == null && !brokerPnlMap[`${p.symbol}|${p.broker}`])
+        .map(p => `${p.symbol}|${p.broker}`)
+    )]
     const now = Date.now()
     const priceMap: Record<string, number> = {}
-    await Promise.allSettled(
-      pairs.map(async (key) => {
-        const [symbol, broker] = key.split('|')
-        try {
-          const res = await axios.get('/api/charts/candles', {
-            params: { symbol, broker, timeframe: '1m', since: now - 10 * 60_000, until: now }
-          })
-          const candles: { close: number }[] = res.data.candles ?? []
-          if (candles.length > 0) priceMap[key] = candles[candles.length - 1].close
-        } catch { /* silently skip */ }
-      })
-    )
+    if (uncoveredPairs.length > 0) {
+      await Promise.allSettled(
+        uncoveredPairs.map(async (key) => {
+          const [symbol, broker] = key.split('|')
+          try {
+            const res = await axios.get('/api/charts/candles', {
+              params: { symbol, broker, timeframe: '1m', since: now - 10 * 60_000, until: now }
+            })
+            const candles: { close: number }[] = res.data.candles ?? []
+            if (candles.length > 0) priceMap[key] = candles[candles.length - 1].close
+          } catch { /* silently skip */ }
+        })
+      )
+    }
+
     return positions.map(p => {
       if (p.pnl != null) return p
+
+      // Use broker live-pnl if available
+      const brokerData = brokerPnlMap[`${p.symbol}|${p.broker}`]
+      if (brokerData && p.entry_price) {
+        const isBuy = p.side === 'buy' || p.side === 'long'
+        const sign  = isBuy ? 1 : -1
+        const pnl_pct = p.entry_price !== 0
+          ? sign * (brokerData.current_price / p.entry_price - 1) * 100
+          : 0
+        return {
+          ...p,
+          pnl: parseFloat(brokerData.unrealized_pnl.toFixed(4)),
+          pnl_pct: parseFloat(pnl_pct.toFixed(4)),
+        }
+      }
+
+      // Fall back to candle-derived price
       const currentPrice = priceMap[`${p.symbol}|${p.broker}`]
       if (!currentPrice || !p.entry_price) return p
       const isBuy = p.side === 'buy' || p.side === 'long'

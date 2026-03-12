@@ -117,11 +117,14 @@ async def dispatch(
             if email_enabled:
                 emailer = _email()
                 if emailer and emailer.enabled:
-                    # Run as background task — don't let email delay execution
-                    asyncio.create_task(
-                        emailer.send(title=title, message=message, level=level, metadata=metadata)
-                    )
-                    notif.email_sent = True
+                    # IMP-23 FIX: await the email directly instead of using
+                    # asyncio.create_task().  create_task() spawns a background
+                    # task that is cancelled when asyncio.run() returns in Celery
+                    # workers — emails were silently dropped on every Celery tick.
+                    # emailer.send() uses asyncio.to_thread() internally so it is
+                    # already non-blocking and safe to await here.
+                    ok = await emailer.send(title=title, message=message, level=level, metadata=metadata)
+                    notif.email_sent = ok
         except Exception as exc:
             logger.warning(f"[Notifier] Email dispatch skipped: {exc}")
 
@@ -147,8 +150,11 @@ class _NotifierFacade:
         return await dispatch(db, title, message, level="error", category="emergency",
                               metadata=metadata, send_email=True)
 
-    async def warning(self, db, title: str, message: str, metadata: Optional[dict] = None) -> Notification:
-        return await dispatch(db, title, message, level="warning", category="system",
+    async def warning(self, db, title: str, message: str, metadata: Optional[dict] = None, category: str = "system") -> Notification:
+        # BUG-12 FIX: accept an optional category so callers can distinguish
+        # risk warnings, broker warnings, etc. from generic system events.
+        # Defaults to "system" for backward compatibility.
+        return await dispatch(db, title, message, level="warning", category=category,
                               metadata=metadata, send_email=True)
 
     async def ml(self, db, title: str, message: str, metadata: Optional[dict] = None) -> Notification:

@@ -100,12 +100,8 @@ class _IBKRManager:
     _CONNECT_RETRY_DELAY = 8.0  # seconds between connect retries
 
     def __init__(self, client_id: int | None = None) -> None:
-        # Use the Celery-specific clientId when running inside a worker process
-        # so it doesn't collide with the FastAPI singleton connection (IBKR Error 326).
         if client_id is not None:
             self._client_id: int = client_id
-        elif os.environ.get("CELERY_WORKER_PROCESS") == "1":
-            self._client_id = settings.ibkr_client_id_celery
         else:
             self._client_id = settings.ibkr_client_id
         self._ib: Optional[IB] = None
@@ -183,8 +179,6 @@ class _IBKRManager:
                         )
                         await asyncio.sleep(min(remaining + 1.0, _BACKOFF_MAX))
                         continue
-
-                    # ── Normal reconnect attempt ─────────────────────────────
                     logger.info("[IBKR] Connection lost — attempting auto-reconnect …")
                     reconnected = await self._ensure_connected()
 
@@ -285,9 +279,9 @@ class _IBKRManager:
                 if errorCode == 326:
                     logger.warning(
                         f"[IBKR] clientId {_self_ref._client_id} already in use (Error 326) "
-                        "— backing off 120s for stale TWS socket to release"
+                        "— backing off 180s for stale TWS socket to release"
                     )
-                    _self_ref._hard_rejected_until = time.time() + 120.0
+                    _self_ref._hard_rejected_until = time.time() + 180.0
                     # Push an in-app notification so the operator knows trading is suspended.
                     # Scheduled on the IBKR background loop (this callback is synchronous).
                     if _self_ref._loop and not _self_ref._loop.is_closed():
@@ -295,7 +289,7 @@ class _IBKRManager:
                             _dispatch_ibkr_notif(
                                 "IBKR Trading Suspended — clientId Conflict",
                                 f"Error 326: clientId {_self_ref._client_id} is already in use by "
-                                "another TWS/Gateway session. IBKR trading is suspended for ~120s "
+                                "another TWS/Gateway session. IBKR trading is suspended for ~180s "
                                 "while the stale socket times out.",
                             ),
                             _self_ref._loop,
@@ -923,12 +917,15 @@ class _IBKRManager:
 
 
 _manager = _IBKRManager(client_id=settings.ibkr_client_id)
-# Celery workers use a separate clientId to avoid kicking the FastAPI connection
-_celery_manager = _IBKRManager(client_id=settings.ibkr_client_id_celery)
+# Celery workers derive a PID-based clientId (range 10-97) so each worker
+# process uses a unique ID and avoids Error 326 (clientId already in use).
+# PID is stable for the lifetime of the process, so the singleton is consistent.
+_celery_client_id: int = 10 + (os.getpid() % 88)
+_celery_manager = _IBKRManager(client_id=_celery_client_id)
 
 
 def _get_manager() -> "_IBKRManager":
-    """Return the correct IBKR singleton — clientId 2 in Celery workers, clientId 1 in FastAPI."""
+    """Return the correct IBKR singleton — PID-based clientId in Celery workers, clientId 1 in FastAPI."""
     if os.environ.get("CELERY_WORKER_PROCESS") == "1":
         return _celery_manager
     return _manager
@@ -1165,6 +1162,8 @@ class IBKRClient(AbstractBroker):
             full_sym = f"{sym}/{currency}" if sec_type == "CASH" else sym
             asset_class = "stock" if sec_type == "STK" else ("forex" if sec_type == "CASH" else "option")
             qty = abs(p.position)
+            if qty == 0:
+                continue  # IBKR emits zero-qty entries for recently closed positions; skip them
             entry_price = float(p.avgCost)
             # Derive current price from market value provided by IB Gateway
             current_price = (

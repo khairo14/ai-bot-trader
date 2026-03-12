@@ -1,7 +1,7 @@
 """
 Shared feature engineering for ML training and inference.
 
-Single source of truth for the 6-feature vector used by both
+Single source of truth for the feature vector used by both
 ModelTrainer (training) and MLScorer (inference) so they never drift apart.
 """
 
@@ -9,12 +9,24 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-FEATURE_COLS = ["rsi", "macd_hist", "atr_norm", "vol_ratio", "bb_pct", "log_ret"]
+FEATURE_COLS = [
+    "rsi",
+    "macd_hist",
+    "atr_norm",
+    "vol_ratio",
+    "bb_pct",
+    "log_ret",
+    # IMP-22: additional features for richer multi-asset signal quality
+    "stoch_k",      # Stochastic %K (14,3) — momentum oscillator, complements RSI
+    "williams_r",   # Williams %R (14) — overbought/oversold, independent of RSI
+    "roc_10",       # Rate of Change over 10 periods — trend momentum
+    "vwap_ratio",   # close / VWAP — price relative to volume-weighted mean (NaN for forex)
+]
 
 
 def compute_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     """
-    Compute the 6-feature vector for ML training and inference.
+    Compute the feature vector for ML training and inference.
 
     Parameters
     ----------
@@ -72,11 +84,37 @@ def compute_features(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     # 1-period log return
     log_ret = np.log(close / close.shift(1))
 
+    # IMP-22 — Stochastic %K (14,3): (close − low14) / (high14 − low14) smoothed over 3
+    low14  = low.rolling(14).min()
+    high14 = high.rolling(14).max()
+    raw_k  = (close - low14) / (high14 - low14).replace(0, np.nan) * 100
+    stoch_k = raw_k.rolling(3).mean()   # fast %K smoothed → %K
+
+    # IMP-22 — Williams %R (14): (high14 − close) / (high14 − low14) × −100
+    williams_r = (high14 - close) / (high14 - low14).replace(0, np.nan) * -100
+
+    # IMP-22 — Rate of Change (10 periods): captures trend momentum independently
+    # of oscillator-based features already present (RSI, Stoch).
+    roc_10 = (close / close.shift(10).replace(0, np.nan) - 1) * 100
+
+    # IMP-22 — VWAP ratio: close relative to the volume-weighted average price
+    # over the trailing 20 periods. Proxy for "is price above/below the fair-value
+    # anchor that institutions use?"  For forex (volume=0) this produces NaN,
+    # which XGBoost handles natively.
+    typical_price = (high + low + close) / 3
+    tpv = typical_price * volume
+    vwap = tpv.rolling(20).sum() / volume.rolling(20).sum().replace(0, np.nan)
+    vwap_ratio = close / vwap.replace(0, np.nan)
+
     return pd.DataFrame({
-        "rsi": rsi,
-        "macd_hist": macd_hist,
-        "atr_norm": atr_norm,
-        "vol_ratio": vol_ratio,
-        "bb_pct": bb_pct,
-        "log_ret": log_ret,
+        "rsi":        rsi,
+        "macd_hist":  macd_hist,
+        "atr_norm":   atr_norm,
+        "vol_ratio":  vol_ratio,
+        "bb_pct":     bb_pct,
+        "log_ret":    log_ret,
+        "stoch_k":    stoch_k,
+        "williams_r": williams_r,
+        "roc_10":     roc_10,
+        "vwap_ratio": vwap_ratio,
     })

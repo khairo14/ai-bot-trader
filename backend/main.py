@@ -50,6 +50,13 @@ async def _sl_tp_heartbeat():
                         logger.info(f"[SL/TP Heartbeat] Software SL/TP closed {closed} position(s)")
                 except Exception as _me:
                     logger.debug(f"[SL/TP Heartbeat] Monitor error: {_me}")
+                # IMP-31: resolve PENDING trades that never got fill confirmation
+                try:
+                    _pending_resolved = await _engine.cleanup_stale_pending_trades(session)
+                    if _pending_resolved:
+                        logger.info(f"[SL/TP Heartbeat] Resolved {_pending_resolved} stale PENDING trade(s)")
+                except Exception as _pe:
+                    logger.debug(f"[SL/TP Heartbeat] PENDING cleanup error: {_pe}")
                 try:
                     await session.commit()
                 except Exception as _ce:
@@ -85,6 +92,8 @@ async def _forward_test_scheduler():
     """
     import math
     import time
+    from datetime import datetime, timezone as _tz   # BUG-11 FIX: import once here, not inside loop
+    from zoneinfo import ZoneInfo as _ZoneInfo        # BUG-11 FIX: import once, not via __import__ each tick
     from utils import timeframe_to_seconds
     from api.routes.forward_test import (
         _run_one_strategy, is_market_open,
@@ -146,9 +155,8 @@ async def _forward_test_scheduler():
                 # each minute until the session opens (covers overnight + weekends).
                 _asset_cls_str = getattr(strat.asset_class, "value", None)
                 if not is_market_open(broker_name, _asset_cls_str):
-                    from datetime import datetime, timezone
                     now_et_str = datetime.now(
-                        tz=__import__('zoneinfo').ZoneInfo('America/New_York')
+                        tz=_ZoneInfo('America/New_York')
                     ).strftime("%a %H:%M ET")
                     logger.debug(
                         f"[Scheduler] {strat.name} ({tf}) — "
@@ -167,9 +175,8 @@ async def _forward_test_scheduler():
                     )
                     continue
 
-                from datetime import datetime, timezone
                 close_dt = datetime.fromtimestamp(
-                    last_close, tz=timezone.utc
+                    last_close, tz=_tz.utc
                 ).strftime("%H:%M UTC")
                 logger.info(
                     f"[Scheduler] {strat.name} ({tf}) — "
@@ -199,7 +206,7 @@ async def _forward_test_scheduler():
                             "active": True,
                             "strategy": s.name,
                             "trigger": "scheduler",
-                            "started_at": datetime.now(timezone.utc),
+                            "started_at": datetime.now(_tz.utc),
                         })
                         try:
                             from api.websocket import manager as _ws_mgr
@@ -238,24 +245,10 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     logger.info("Starting AI Bot Trader backend...")
 
-    # Run pending Alembic migrations automatically on startup
-    try:
-        import subprocess, sys
-        result = subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip()
-            logger.error(f"Alembic migration FAILED (rc={result.returncode}): {err}")
-            raise RuntimeError(f"Alembic upgrade head failed: {err}")
-        else:
-            logger.info("Alembic: schema up to date.")
-    except RuntimeError:
-        raise
-    except Exception as e:
-        logger.warning(f"Alembic auto-upgrade skipped: {e}")
-
+    # BUG-17 FIX: Alembic migrations are run by Docker CMD (docker-compose.yml)
+    # before uvicorn starts, so re-running them here caused a double-migration
+    # race condition on every container start.  For local dev, start-dev.ps1
+    # runs 'alembic upgrade head' before launching uvicorn.
     await init_db()
     logger.info("Database initialized.")
 

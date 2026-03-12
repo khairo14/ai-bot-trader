@@ -146,14 +146,19 @@ class MLScorer:
         if row.empty:
             return None
 
+        # Use the feature list saved with this model (may be a subset of FEATURE_COLS
+        # when the model was trained on an asset class that lacks some features, e.g.
+        # forex has no volume → vwap_ratio is always NaN and may be excluded).
+        model_features: list = model_data.get("features") or FEATURE_COLS
+
         # Validate all required columns are present
-        missing = [c for c in FEATURE_COLS if c not in row.columns]
+        missing = [c for c in model_features if c not in row.columns]
         if missing:
             return None
 
         try:
             model = model_data["model"]
-            X = row[FEATURE_COLS].values
+            X = row[model_features].values
             prob = float(model.predict_proba(X)[0, 1])
             return round(prob, 4)
         except Exception as exc:

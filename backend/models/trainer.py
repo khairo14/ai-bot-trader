@@ -279,7 +279,6 @@ class ModelTrainer:
             feat_df = _compute_features(df)
             feat_df = feat_df.dropna()
 
-            FEATURE_COLS = ["rsi", "macd_hist", "atr_norm", "vol_ratio", "bb_pct", "log_ret"]
             live_rows = []
 
             for o in outcomes:
@@ -292,9 +291,13 @@ class ModelTrainer:
                 if not mask.any():
                     continue
                 row = feat_df[mask].iloc[-1]
-                if row[FEATURE_COLS].isna().any():
+                # Only require the columns that actually exist in feat_df
+                # (some features like vwap_ratio may be NaN for forex — that is OK,
+                #  XGBoost handles NaN natively).
+                available = [c for c in FEATURE_COLS if c in row.index]
+                if not available:
                     continue
-                row_dict = {c: row[c] for c in FEATURE_COLS}
+                row_dict = {c: row[c] for c in available}
                 row_dict["label"] = int(o.ml_label)
                 # Upweight live labels by repeating rows
                 for _ in range(self.LIVE_LABEL_WEIGHT):
@@ -349,8 +352,8 @@ class ModelTrainer:
         live_df = await self._fetch_live_labels(symbol, df)
         if live_df is not None and not live_df.empty:
             import pandas as pd
-            FEATURE_COLS_LABEL = ["rsi", "macd_hist", "atr_norm", "vol_ratio", "bb_pct", "log_ret", "label"]
-            base_df = feat_df[FEATURE_COLS_LABEL].copy()
+            FEATURE_COLS_LABEL = FEATURE_COLS + ["label"]
+            base_df = feat_df[[c for c in FEATURE_COLS_LABEL if c in feat_df.columns]].copy()
             feat_df = pd.concat([base_df, live_df], ignore_index=True)
             logger.info(f"[trainer] {symbol}: combined {len(base_df)} historical + {len(live_df)} live rows")
 
@@ -362,8 +365,11 @@ class ModelTrainer:
                 "auc": None,
             }
 
-        FEATURE_COLS = ["rsi", "macd_hist", "atr_norm", "vol_ratio", "bb_pct", "log_ret"]
-        X = feat_df[FEATURE_COLS].values
+        # Use the full shared FEATURE_COLS (10 features) — same as MLScorer inference.
+        # Only keep columns that are actually present in feat_df; missing ones (e.g.
+        # vwap_ratio for forex) will be NaN-filled so XGBoost handles them natively.
+        active_features = [c for c in FEATURE_COLS if c in feat_df.columns]
+        X = feat_df[active_features].values
         y = feat_df["label"].values.astype(int)
 
         # ── 3. Holdout split ─────────────────────────────────────────────────
@@ -469,7 +475,7 @@ class ModelTrainer:
         safe_tf  = timeframe.replace("/", "_")
         # G8: filename encodes timeframe so same symbol can have separate models per TF
         model_path = self.MODEL_DIR / f"{safe_sym}_{safe_tf}_{today}.pkl"
-        joblib.dump({"model": model, "features": FEATURE_COLS, "symbol": symbol,
+        joblib.dump({"model": model, "features": active_features, "symbol": symbol,
                      "timeframe": timeframe, "trained_at": today},
                     model_path)
         logger.info(f"[trainer] Model saved → {model_path}")

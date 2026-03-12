@@ -182,27 +182,69 @@ export default function ForwardTest() {
     }, 90_000)
   }, [stopAggressivePoll])
 
-  /** Fetch latest 1-minute close for each unique (symbol, broker) pair and
-   *  compute unrealized P&L for open positions that the DB has no P&L for. */
+  /** Fetch unrealized P&L for open positions.
+   *  Priority: 1) broker live-pnl endpoint (real-time, works outside market hours)
+   *             2) latest 1m candle close (fallback for brokers not covered above) */
   const enrichPositionsWithLivePnl = useCallback(async (positions: OpenPosition[]): Promise<OpenPosition[]> => {
     if (positions.length === 0) return positions
-    const pairs = [...new Set(positions.map(p => `${p.symbol}|${p.broker}`))]
+
+    // Build a map: "SYMBOL|broker" → { unrealized_pnl, entry_price, current_price }
+    const brokerPnlMap: Record<string, { unrealized_pnl: number; current_price: number }> = {}
+    try {
+      const res = await axios.get(`${API}/api/positions/live-pnl`)
+      const data: Record<string, { symbol: string; unrealized_pnl: number; current_price: number }[]> = res.data
+      for (const [broker, bPositions] of Object.entries(data)) {
+        for (const bp of bPositions) {
+          brokerPnlMap[`${bp.symbol}|${broker}`] = {
+            unrealized_pnl: bp.unrealized_pnl,
+            current_price: bp.current_price,
+          }
+        }
+      }
+    } catch { /* fall through to candle enrichment */ }
+
+    // For any position not covered by broker live-pnl, try the candles fallback
+    const uncoveredPairs = [...new Set(
+      positions
+        .filter(p => p.pnl == null && !brokerPnlMap[`${p.symbol}|${p.broker}`])
+        .map(p => `${p.symbol}|${p.broker}`)
+    )]
     const now = Date.now()
     const priceMap: Record<string, number> = {}
-    await Promise.allSettled(
-      pairs.map(async (key) => {
-        const [symbol, broker] = key.split('|')
-        try {
-          const res = await axios.get(`${API}/api/charts/candles`, {
-            params: { symbol, broker, timeframe: '1m', since: now - 10 * 60_000, until: now }
-          })
-          const candles: { close: number }[] = res.data.candles ?? []
-          if (candles.length > 0) priceMap[key] = candles[candles.length - 1].close
-        } catch { /* silently skip price enrichment */ }
-      })
-    )
+    if (uncoveredPairs.length > 0) {
+      await Promise.allSettled(
+        uncoveredPairs.map(async (key) => {
+          const [symbol, broker] = key.split('|')
+          try {
+            const res = await axios.get(`${API}/api/charts/candles`, {
+              params: { symbol, broker, timeframe: '1m', since: now - 10 * 60_000, until: now }
+            })
+            const candles: { close: number }[] = res.data.candles ?? []
+            if (candles.length > 0) priceMap[key] = candles[candles.length - 1].close
+          } catch { /* silently skip */ }
+        })
+      )
+    }
+
     return positions.map(p => {
       if (p.pnl != null) return p   // already has a realised PnL — leave untouched
+
+      // 1. Prefer broker live-pnl
+      const brokerData = brokerPnlMap[`${p.symbol}|${p.broker}`]
+      if (brokerData && p.entry_price) {
+        const isBuy = p.side === 'buy' || p.side === 'long'
+        const sign  = isBuy ? 1 : -1
+        const pnl_pct = p.entry_price !== 0
+          ? sign * (brokerData.current_price / p.entry_price - 1) * 100
+          : 0
+        return {
+          ...p,
+          pnl: parseFloat(brokerData.unrealized_pnl.toFixed(4)),
+          pnl_pct: parseFloat(pnl_pct.toFixed(4)),
+        }
+      }
+
+      // 2. Fall back to candle-derived price
       const currentPrice = priceMap[`${p.symbol}|${p.broker}`]
       if (!currentPrice || !p.entry_price) return p
       const isBuy = p.side === 'buy' || p.side === 'long'

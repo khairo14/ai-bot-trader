@@ -163,6 +163,7 @@ class RiskManager:
         open_positions_count: int,
         daily_pnl: float,
         asset_class_exposure: float = 0.0,
+        asset_exposure: float = 0.0,          # BUG-5 FIX: existing open value for THIS symbol
         broker: str | None = None,
         broker_settings: dict | None = None,
     ) -> RiskValidation:
@@ -172,6 +173,8 @@ class RiskManager:
 
         broker_settings: dict fetched from the broker_risk_settings DB table.
         Any None value in broker_settings falls back to the global config default.
+        asset_exposure: total notional of already-open positions in signal.symbol,
+        used to enforce max_exposure_per_asset_pct as a hard gate (not just a cap).
         """
         # ── Resolve effective risk parameters ─────────────────────────────────
         # Per-broker DB overrides take precedence; NULL fields use global config.
@@ -293,6 +296,21 @@ class RiskManager:
                 approved=False,
                 position_size=0, position_value=0, risk_amount=0, stop_distance=0,
                 reason=f"Max exposure for {signal.asset_class} reached."
+            )
+
+        # ── Level 3: Per-asset exposure gate (BUG-5 FIX) ─────────────────────
+        # Reject outright if existing open value in THIS symbol already meets or
+        # exceeds the per-asset cap. The position-sizing cap below handles NEW
+        # orders within budget, but this gate prevents pyramiding past the limit.
+        if asset_exposure / (account_balance + 1e-10) >= _max_asset_exp:
+            return RiskValidation(
+                approved=False,
+                position_size=0, position_value=0, risk_amount=0, stop_distance=0,
+                reason=(
+                    f"Per-asset exposure limit reached for {signal.symbol} "
+                    f"({asset_exposure / (account_balance + 1e-10) * 100:.1f}% "
+                    f">= {_max_asset_exp * 100:.1f}%)."
+                ),
             )
 
         # ── Level 1: Check stop loss exists ──────────────────────────────────

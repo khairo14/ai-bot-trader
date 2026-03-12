@@ -32,6 +32,15 @@ if (-not (Test-Path (Join-Path $Frontend "node_modules"))) {
 }
 
 # ── Start services ───────────────────────────────────────────────────────────
+# BUG-17 FIX: run Alembic migrations before uvicorn so the schema is up to date
+# (Production uses Docker CMD 'alembic upgrade head && uvicorn ...' instead)
+Write-Host "  Running Alembic migrations..." -ForegroundColor Yellow
+& $Python -m alembic upgrade head 2>&1 | Write-Host
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  [ERROR] Alembic migration failed — aborting." -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "  Starting Uvicorn (API)..." -ForegroundColor Green
 $uvicorn = Start-Process -PassThru -NoNewWindow -FilePath $Python `
     -ArgumentList "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000", "--reload" `
