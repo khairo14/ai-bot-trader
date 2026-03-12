@@ -392,6 +392,7 @@ def run_signals(self):
                                                 f"regime={_confirmed_regime} → "
                                                 f"no suitable strategy found, holding"
                                             )
+                                            continue  # no viable replacement — skip this candle
                                 else:
                                     # fixed mode: if mismatch, save HOLD and skip execution
                                     if strategy_type not in _allowed:
@@ -470,6 +471,10 @@ def run_signals(self):
                                 f"auto-switched from {strategy_type} "
                                 f"(regime: {_confirmed_regime if _regime_enabled else 'n/a'})"
                             ]
+                            # Restore the configured strategy name so DB dedup, advisory lock,
+                            # and TradeOutcome all key on the same identity.  The reasons list
+                            # above already records which strategy actually ran.
+                            sig.strategy_name = strategy_type
 
                         # ── Persist signal to DB ─────────────────────────────────
                         # Coerce enums safely
