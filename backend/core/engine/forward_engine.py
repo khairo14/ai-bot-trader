@@ -6,7 +6,7 @@ from sqlalchemy import select, func
 
 from core.strategies.base import Signal
 from core.risk_manager import RiskManager, get_risk_manager  # BUG-2 FIX: import singleton factory
-from brokers import get_broker
+from brokers import get_broker, get_broker_modes
 from db.models import Trade, LiveTrade, OrderStatus, ExecutionMode, AssetClass
 
 
@@ -2008,7 +2008,6 @@ class ForwardEngine:
                 # Find the most recent signal for this symbol/broker to link strategy info.
                 # We check both acted_on=False (DB save failed) and acted_on=True (saved but
                 # trade record missing) in the last 48 hours.
-                from datetime import timedelta
                 _cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=48)
                 _sig_q = await db_session.execute(
                     _sel(SignalModel)
@@ -2105,13 +2104,14 @@ class ForwardEngine:
         ):
             try:
                 from db.models import BrokerName as _BN2, AssetClass as _AC2, ExecutionMode as _EM2
-                _orph_is_paper: bool = False  # Alpaca/Binance orphan sync always checks live endpoint
+                # Respect runtime paper/live toggle — never force live when paper is enabled.
+                _orph_is_paper: bool = get_broker_modes().get(_orph_broker, "paper") == "paper"
                 _orph_key = (_orph_broker, _orph_is_paper)
                 _orph_tracked = {
                     _normalize(t.symbol, _orph_broker)
                     for t in by_broker.get(_orph_key, [])
                 }
-                _o_broker_obj = get_broker(_orph_broker, force_paper=False)
+                _o_broker_obj = get_broker(_orph_broker)  # no force_paper — honours runtime mode
                 await _o_broker_obj.connect()
                 _o_positions = await _o_broker_obj.get_positions()
 
@@ -2137,7 +2137,7 @@ class ForwardEngine:
                     except Exception:
                         _osig = None
 
-                    _o_model = LiveTrade  # Alpaca/Binance orphans are always live
+                    _o_model = Trade if _orph_is_paper else LiveTrade
                     _onew = _o_model(
                         symbol=_op.symbol,
                         side=_op.side,
@@ -2149,7 +2149,7 @@ class ForwardEngine:
                         execution_mode=_osig.execution_mode if _osig else ExecutionMode.FULL_AUTO,
                         asset_class=AssetClass(_op.asset_class) if _op.asset_class in AssetClass._value2member_map_ else AssetClass.CRYPTO,
                         broker=_BN2(_orph_broker),
-                        is_paper=False,
+                        is_paper=_orph_is_paper,
                         strategy_name=_osig.strategy_name if _osig else "unknown",
                         signal_id=_osig.id if _osig else None,
                         broker_order_id="orphan_sync",

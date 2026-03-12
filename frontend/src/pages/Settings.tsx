@@ -314,7 +314,7 @@ export default function Settings() {
 
       {/* Broker Connection & Mode */}
       <section className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">
-        <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Broker Accounts</h2>
+        <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Broker Accounts — Balance Source</h2>
 
         {brokers.map(b => {
           const currentMode = modes[b.name] ?? (b.paper ? 'paper' : 'live')
@@ -340,7 +340,7 @@ export default function Settings() {
               </div>
               <div className="flex items-center gap-3">
                 <span className={`text-xs font-medium ${isPaper ? 'text-blue-400' : 'text-yellow-400'}`}>
-                  {isPaper ? 'Paper' : 'Live'}
+                  {isPaper ? 'Balance: Paper' : 'Balance: Live'}
                 </span>
                 <Toggle checked={isPaper} onChange={() => toggleBrokerMode(b.name, isPaper)} disabled={isToggling} />
                 {!isPaper && (
@@ -354,8 +354,9 @@ export default function Settings() {
         })}
 
         <div className="pt-1 space-y-1 text-xs text-gray-600">
-          <p>{'- '}<span className="text-blue-400">Paper</span>{' — uses paper/testnet credentials. No real money at risk.'}</p>
-          <p>{'- '}<span className="text-yellow-400">Live</span>{' — uses live credentials from '}<code className="text-gray-400">.env</code>{'. Real orders are placed.'}</p>
+          <p>{'- '}<span className="text-blue-400">Paper</span>{' — dashboard shows paper/testnet balance; orphan sync queries testnet positions.'}</p>
+          <p>{'- '}<span className="text-yellow-400">Live</span>{' — dashboard shows live account balance; orphan sync queries live positions.'}</p>
+          <p className="text-gray-700">{'Trade execution mode is set per-strategy on the Strategies page.'}</p>
         </div>
       </section>
 

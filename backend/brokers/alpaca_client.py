@@ -44,9 +44,15 @@ class AlpacaClient(AbstractBroker):
             secret_key=api_secret,
             paper=paper,
         )
+        # Market data always uses live credentials so we get the SIP feed
+        # (full NBBO) regardless of whether this client instance is paper or live.
+        # Paper account keys only provide the IEX feed (free, delayed) which is
+        # insufficient for reliable signal generation.
+        _data_key    = settings.alpaca_api_key_live or settings.alpaca_api_key
+        _data_secret = settings.alpaca_api_secret_live or settings.alpaca_api_secret
         self.data = StockHistoricalDataClient(
-            api_key=api_key,
-            secret_key=api_secret,
+            api_key=_data_key,
+            secret_key=_data_secret,
         )
         mode = "PAPER" if self._paper else "LIVE"
         logger.info(f"AlpacaClient initialized in {mode} mode.")
