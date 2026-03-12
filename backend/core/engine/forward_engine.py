@@ -1289,7 +1289,40 @@ class ForwardEngine:
                     except Exception as _chk_err:
                         logger.debug(
                             f"[ForwardEngine] IMP-31: broker status check failed for "
-                            f"id={t.id} {t.symbol}: {_chk_err} — proceeding with REJECTED"
+                            f"id={t.id} {t.symbol}: {_chk_err} — will try position poll"
+                        )
+
+                # ── Position-level fallback ──────────────────────────────────────
+                # get_order_status() can't confirm a fill for synthetic IDs like
+                # "orphan_sync", and IBKR paper routinely delays/drops fill events.
+                # Before rejecting, verify whether the broker still has an OPEN
+                # position for this symbol — if yes, the fill happened and the DB
+                # record just missed the confirmation.
+                if not _broker_confirmed_filled:
+                    try:
+                        _chk_broker2 = get_broker(_t_bk, force_paper=t.is_paper)
+                        await _chk_broker2.connect()
+                        _live_positions = await _chk_broker2.get_positions()
+                        _t_norm = t.symbol.replace("/", "").split(":")[0].upper()
+                        for _lp in _live_positions:
+                            _lp_norm = _lp.symbol.replace("/", "").split(":")[0].upper()
+                            if _lp_norm == _t_norm:
+                                _broker_confirmed_filled = True
+                                t.status = OrderStatus.OPEN
+                                if _lp.entry_price and t.entry_price is None:
+                                    t.entry_price = round(_lp.entry_price, 8)
+                                if _lp.quantity and t.quantity is None:
+                                    t.quantity = _lp.quantity
+                                self._paper_positions[f"{t.symbol}:{_t_bk}"] = t
+                                logger.info(
+                                    f"[ForwardEngine] IMP-31: PENDING trade id={t.id} "
+                                    f"{t.symbol} confirmed via position poll — upgraded to OPEN."
+                                )
+                                break
+                    except Exception as _pos_err:
+                        logger.debug(
+                            f"[ForwardEngine] IMP-31: position poll fallback failed for "
+                            f"id={t.id} {t.symbol}: {_pos_err}"
                         )
 
                 if not _broker_confirmed_filled:
