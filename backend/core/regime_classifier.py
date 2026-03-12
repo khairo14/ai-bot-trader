@@ -81,7 +81,7 @@ REGIME_ATR_MULTIPLIERS: dict[str, dict[str, float]] = {
     REGIME_TRENDING_DOWN: {"sl": 2.0, "tp": 4.0},
     REGIME_RANGING:       {"sl": 1.5, "tp": 2.5},
     REGIME_HIGH_VOL:      {"sl": 2.5, "tp": 3.5},  # wider SL; reduced TP
-    REGIME_LOW_VOL:       {"sl": 1.5, "tp": 3.0},
+    REGIME_LOW_VOL:       {"sl": 2.0, "tp": 3.0},  # raised from 1.5 — 1.5×ATR too easily swept by Forex intra-candle wicks
 }
 
 

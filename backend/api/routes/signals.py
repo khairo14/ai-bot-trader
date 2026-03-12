@@ -51,6 +51,7 @@ async def list_signals(
     query = (
         select(Signal)
         .where(Signal.dismissed == False)  # noqa: E712
+        .where(Signal.signal != SignalType.HOLD)  # HOLDs are never actionable; cleared by dismiss-expired
         .order_by(desc(Signal.created_at))
         .limit(limit)
     )
