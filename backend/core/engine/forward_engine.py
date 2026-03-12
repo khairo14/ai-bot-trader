@@ -2250,12 +2250,46 @@ class ForwardEngine:
                     _existing_for_sig = await db_session.execute(
                         _sel(_TradeModel).where(_TradeModel.signal_id == linked_signal.id)
                     )
-                    if _existing_for_sig.scalar_one_or_none() is not None:
-                        logger.debug(
-                            f"[ForwardEngine] Orphan sync: {full_sym} — "
-                            f"signal_id={linked_signal.id} already has a trade record; "
-                            f"skipping duplicate INSERT"
-                        )
+                    _existing_trade = _existing_for_sig.scalar_one_or_none()
+                    if _existing_trade is not None:
+                        # If the existing trade is already FILLED/CANCELLED, the position
+                        # at IBKR has no DB tracking — emit a warning so the user can act.
+                        if _existing_trade.status in (OrderStatus.FILLED, OrderStatus.CANCELLED):
+                            logger.warning(
+                                f"[ForwardEngine] UNTRACKED IBKR POSITION: {full_sym} is open at broker "
+                                f"but all linked DB records are closed (latest id={_existing_trade.id}, "
+                                f"status={_existing_trade.status.value}). Manual review required."
+                            )
+                            try:
+                                from notifications.notifier import notifier as _untrack_notify
+                                _umode = "PAPER" if _ibkr_is_paper else "LIVE"
+                                await _untrack_notify.warning(
+                                    db_session,
+                                    title=f"⚠️ [{_umode}] Untracked IBKR Position — {full_sym}",
+                                    message=(
+                                        f"IBKR has an open {pos.side.upper()} {full_sym} position "
+                                        f"({pos.quantity:.2f} units @ ~{pos.entry_price}) "
+                                        f"but the DB record #{_existing_trade.id} is already {_existing_trade.status.value}. "
+                                        f"This position has no SL/TP and is not being monitored. "
+                                        f"Close it manually in IBKR TWS."
+                                    ),
+                                    category="trade",
+                                    metadata={
+                                        "symbol": full_sym, "side": pos.side,
+                                        "quantity": pos.quantity, "entry_price": pos.entry_price,
+                                        "broker": "ibkr", "is_paper": _ibkr_is_paper,
+                                        "existing_trade_id": _existing_trade.id,
+                                        "source": "untracked_position",
+                                    },
+                                )
+                            except Exception as _un_err:
+                                logger.debug(f"[ForwardEngine] Untracked position notification failed: {_un_err}")
+                        else:
+                            logger.debug(
+                                f"[ForwardEngine] Orphan sync: {full_sym} — "
+                                f"signal_id={linked_signal.id} already has a trade record; "
+                                f"skipping duplicate INSERT"
+                            )
                         continue  # skip this position — trade record already exists
 
                 new_trade = _TradeModel(
@@ -2423,13 +2457,32 @@ class ForwardEngine:
                             )
                             continue
 
+                    # Validate SL/TP orientation — same guard as IBKR orphan sync.
+                    # Stale signal SL/TP may be inverted relative to the recovered position's side.
+                    _orph_entry = _op.entry_price or 0.0
+                    _orph_is_long = _op.side in ("long", "buy", "cover")
+                    _raw_orph_sl = _osig.stop_loss if _osig else None
+                    _raw_orph_tp = _osig.take_profit if _osig else None
+                    _valid_orph_sl: Optional[float] = None
+                    _valid_orph_tp: Optional[float] = None
+                    if _raw_orph_sl is not None and _orph_entry:
+                        if (_orph_is_long and _raw_orph_sl < _orph_entry) or (not _orph_is_long and _raw_orph_sl > _orph_entry):
+                            _valid_orph_sl = _raw_orph_sl
+                        else:
+                            logger.warning(f"[ForwardEngine] orphan-sync ({_orph_broker}): discarding inverted SL={_raw_orph_sl} for {_op.side} {_op.symbol} (entry={_orph_entry})")
+                    if _raw_orph_tp is not None and _orph_entry:
+                        if (_orph_is_long and _raw_orph_tp > _orph_entry) or (not _orph_is_long and _raw_orph_tp < _orph_entry):
+                            _valid_orph_tp = _raw_orph_tp
+                        else:
+                            logger.warning(f"[ForwardEngine] orphan-sync ({_orph_broker}): discarding inverted TP={_raw_orph_tp} for {_op.side} {_op.symbol} (entry={_orph_entry})")
+
                     _onew = _o_model(
                         symbol=_op.symbol,
                         side=_op.side,
                         quantity=_op.quantity,
                         entry_price=round(_op.entry_price, 8) if _op.entry_price else None,
-                        stop_loss=_osig.stop_loss if _osig else None,
-                        take_profit=_osig.take_profit if _osig else None,
+                        stop_loss=_valid_orph_sl,
+                        take_profit=_valid_orph_tp,
                         status=OrderStatus.OPEN,
                         execution_mode=_osig.execution_mode if _osig else ExecutionMode.FULL_AUTO,
                         asset_class=AssetClass(_op.asset_class) if _op.asset_class in AssetClass._value2member_map_ else AssetClass.CRYPTO,
