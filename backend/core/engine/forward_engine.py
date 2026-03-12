@@ -196,7 +196,7 @@ class ForwardEngine:
         db_session=None,
         position_size_multiplier: float = 1.0,
         strategy_params: dict | None = None,
-    ) -> Optional[Trade]:
+    ) -> Trade | LiveTrade | None:
         """
         Process a signal based on execution mode.
         Returns a Trade record if an order was placed, else None.
@@ -223,7 +223,7 @@ class ForwardEngine:
             bal = await broker.get_balance()
             balance = bal.available
         except Exception as _bal_err:
-            broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
+            broker_key = getattr(signal.broker, 'value', str(signal.broker))
             if not is_paper:
                 # Never guess balance for a live strategy — incorrect sizing can mean
                 # a significantly oversized position with real money.  Refuse the trade.
@@ -240,7 +240,7 @@ class ForwardEngine:
         # includes pre-funded testnet assets unrelated to bot trades, causing false
         # "Max open positions" rejections across brokers.  When no DB session is
         # available, fall back to in-memory paper positions filtered by broker.
-        broker_key = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
+        broker_key = getattr(signal.broker, 'value', str(signal.broker))
         if db_session is not None:
             try:
                 _oq_paper = await db_session.execute(
@@ -520,7 +520,7 @@ class ForwardEngine:
         # not 25,000 as was previously hardcoded.  Orders below this threshold are
         # rejected by IBKR with error 200 "No security definition has been found".
         _IBKR_FOREX_MIN_LOT = 20_000.0
-        _broker_key_g5 = signal.broker.value if hasattr(signal.broker, 'value') else str(signal.broker)
+        _broker_key_g5 = getattr(signal.broker, 'value', str(signal.broker))
         _asset_cls_g5 = getattr(signal.asset_class, 'value', str(signal.asset_class or '')).upper()
         if _broker_key_g5 == 'ibkr' and _asset_cls_g5 == 'FOREX' and effective_size < _IBKR_FOREX_MIN_LOT:
             logger.warning(
@@ -741,7 +741,7 @@ class ForwardEngine:
     # Position management
     # ──────────────────────────────────────────────────────────────────────────
 
-    async def close_position(self, trade: Trade, reason: str = "manual", db_session=None):
+    async def close_position(self, trade: Trade | LiveTrade, reason: str = "manual", db_session=None):
         """Close an open position and compute exit price + realised PnL."""
         # ── Atomic DB guard: prevent double-close from concurrent callers ─────
         # Each strategy spawns its own ForwardEngine() instance, so in-memory
@@ -838,9 +838,10 @@ class ForwardEngine:
             # Binance spot deducts fees from the received base quantity, so trade.quantity
             # (what was ordered) may exceed what's actually free.  Also handles the case
             # where the exchange's own bracket SL/TP already executed the position (free=0).
-            if hasattr(broker, "exchange"):
+            _exch = getattr(broker, "exchange", None)
+            if _exch is not None:
                 try:
-                    _fb = await broker.exchange.fetch_balance()
+                    _fb = await _exch.fetch_balance()
                     _asset = trade.symbol.split("/")[0]
                     _free_now = float((_fb.get(_asset) or {}).get("free", 0) or 0)
                     if _free_now == 0.0:
@@ -851,7 +852,7 @@ class ForwardEngine:
                         _do_market_close = False
                         # Try to recover bracket fill price from recent closed orders
                         try:
-                            _closed = await broker.exchange.fetch_closed_orders(trade.symbol, limit=10)
+                            _closed = await _exch.fetch_closed_orders(trade.symbol, limit=10)
                             _sl_fills = [
                                 o for o in _closed
                                 if str(o.get("type", "")).upper() in ("STOP_LOSS", "STOP_LOSS_LIMIT", "STOP_MARKET")
@@ -872,7 +873,7 @@ class ForwardEngine:
                         _bracket_qty = round(trade.quantity - _free_now, 8)
                         # Try to get actual bracket fill price
                         try:
-                            _closed = await broker.exchange.fetch_closed_orders(trade.symbol, limit=10)
+                            _closed = await _exch.fetch_closed_orders(trade.symbol, limit=10)
                             _sl_fills = [
                                 o for o in _closed
                                 if str(o.get("type", "")).upper() in ("STOP_LOSS", "STOP_LOSS_LIMIT", "STOP_MARKET")
@@ -976,8 +977,9 @@ class ForwardEngine:
         # F-082: cancel IBKR persistent bracket market-data subscription for this symbol.
         # For Alpaca/Binance this is a no-op (hasattr guard).
         try:
-            if hasattr(broker, "cancel_bracket_subscription"):
-                broker.cancel_bracket_subscription(trade.symbol)
+            _cbs = getattr(broker, "cancel_bracket_subscription", None)
+            if _cbs:
+                _cbs(trade.symbol)
         except Exception as _sub_err:
             logger.debug(f"[ForwardEngine] cancel_bracket_subscription failed for {trade.symbol}: {_sub_err}")
 
@@ -1036,9 +1038,10 @@ class ForwardEngine:
         # Auto-convert residual FX to USD immediately after closing an IBKR forex position.
         # This prevents T+2 balance fluctuation from unsettled foreign-currency proceeds.
         try:
-            _close_broker_str2 = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+            _close_broker_str2 = getattr(trade.broker, "value", str(trade.broker))
             if _close_broker_str2 == "ibkr" and "/" in trade.symbol:
-                _fx_result = await broker.auto_convert_fx()
+                _atf = getattr(broker, "auto_convert_fx", None)
+                _fx_result = await _atf() if _atf else None
                 if _fx_result:
                     logger.info(f"[ForwardEngine] FX auto-converted after {trade.symbol} close: {_fx_result}")
         except Exception as _fx_err:
@@ -1219,7 +1222,7 @@ class ForwardEngine:
         # multiple trades share the same symbol on the same broker (e.g. scaled entries).
         # F-090: cache bid/ask tuples so SL/TP checks use the directionally-correct
         # price: SHORT exits buy at the ask, LONG exits sell at the bid.
-        _price_cache: dict[tuple[str, str], tuple[float, float]] = {}
+        _price_cache: dict[tuple[str, bool, str], tuple[float, float | None]] = {}
 
         # Use streamed prices (sub-second) where available; fall back to REST.
         from core.engine.price_stream import price_stream_manager as _psm
@@ -1599,9 +1602,10 @@ class ForwardEngine:
                     # (same F-108 logic used in close_position) before falling back to a
                     # current market snapshot that may be stale by minutes or hours.
                     _imp3_resolved = False
-                    if hasattr(broker, "exchange"):
+                    _exch2 = getattr(broker, "exchange", None)
+                    if _exch2 is not None:
                         try:
-                            _closed = await broker.exchange.fetch_closed_orders(trade.symbol, limit=10)
+                            _closed = await _exch2.fetch_closed_orders(trade.symbol, limit=10)
                             _tp_types = {"TAKE_PROFIT", "TAKE_PROFIT_LIMIT", "TAKE_PROFIT_MARKET"}
                             _sl_types = {"STOP_LOSS", "STOP_LOSS_LIMIT", "STOP_MARKET"}
                             _tp_fills = [
@@ -1727,9 +1731,10 @@ class ForwardEngine:
 
                     # Auto-convert residual FX to USD when reconcile-closing an IBKR forex ghost.
                     try:
-                        _rec_broker_str = trade.broker.value if hasattr(trade.broker, "value") else str(trade.broker)
+                        _rec_broker_str = getattr(trade.broker, "value", str(trade.broker))
                         if _rec_broker_str == "ibkr" and "/" in trade.symbol:
-                            _rec_fx = await broker.auto_convert_fx()
+                            _atf3 = getattr(broker, "auto_convert_fx", None)
+                            _rec_fx = await _atf3() if _atf3 else None
                             if _rec_fx:
                                 logger.info(f"[ForwardEngine] FX auto-converted after reconcile of {trade.symbol}: {_rec_fx}")
                     except Exception as _fx_rec_err:
@@ -1765,7 +1770,8 @@ class ForwardEngine:
             ibkr_broker = get_broker("ibkr", force_paper=_ibkr_is_paper)
             await ibkr_broker.connect()
             ibkr_positions = await ibkr_broker.get_positions()
-            brackets = await ibkr_broker.get_open_brackets()
+            _gob = getattr(ibkr_broker, "get_open_brackets", None)
+            brackets = await _gob() if _gob else {}
 
             # Build the set of short symbols already tracked in DB (normalised)
             tracked_symbols = {
