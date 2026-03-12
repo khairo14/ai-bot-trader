@@ -2115,10 +2115,30 @@ class ForwardEngine:
                 await _o_broker_obj.connect()
                 _o_positions = await _o_broker_obj.get_positions()
 
+                # Only orphan-sync symbols that have an active strategy on this broker.
+                # Without this guard the Binance testnet account (which holds hundreds of
+                # pre-seeded dust positions) would flood the DB with "unknown" trade records
+                # every time the engine restarts.
+                from db.models import Strategy as _StratModel2
+                _active_strats_q = await db_session.execute(
+                    _sel(_StratModel2).where(
+                        _StratModel2.broker == _BN2(_orph_broker),
+                        _StratModel2.is_active == True,
+                    )
+                )
+                _active_orphan_syms = {
+                    _normalize(s.symbol, _orph_broker)
+                    for s in _active_strats_q.scalars().all()
+                }
+
                 for _op in _o_positions:
                     _op_norm = _normalize(_op.symbol, _orph_broker)
                     if _op_norm in _orph_tracked:
                         continue  # already in DB — handled by ghost-close loop
+
+                    # Skip positions with no active strategy — avoids testnet garbage
+                    if _op_norm not in _active_orphan_syms:
+                        continue
 
                     # Look up a recent signal for strategy info
                     _cutoff2 = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=48)
