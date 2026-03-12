@@ -144,6 +144,7 @@ export default function ForwardTest() {
   const [status, setStatus] = useState<ForwardStatus | null>(null)
   const [trades, setTrades] = useState<PaperTrade[]>([])
   const [tradeMode, setTradeMode] = useState<'paper' | 'live' | 'all'>('paper')
+  const [tradeStatus, setTradeStatus] = useState<'all' | 'open' | 'filled' | 'closed'>('all')
   const [tradePage, setTradePage] = useState(0)
   const [pendingSignals, setPendingSignals] = useState<PendingSignal[]>([])
   const [executingSignal, setExecutingSignal] = useState<number | null>(null)
@@ -730,10 +731,10 @@ export default function ForwardTest() {
       <div className="grid grid-cols-3 gap-4">
         {/* Paper Trades Table */}
         <div className="col-span-2 bg-dark-800 border border-dark-600 rounded-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-dark-600 flex items-center justify-between">
-            <div className="flex items-center gap-3">
+          <div className="px-4 py-3 border-b border-dark-600 flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-medium text-white">Trades</span>
-              {/* Paper / Live / All filter tabs */}
+              {/* Paper / Live / All filter */}
               <div className="flex text-xs rounded-lg overflow-hidden border border-dark-500">
                 {(['paper', 'live', 'all'] as const).map((m) => (
                   <button
@@ -745,9 +746,21 @@ export default function ForwardTest() {
                   >{m}</button>
                 ))}
               </div>
+              {/* Status filter */}
+              <div className="flex text-xs rounded-lg overflow-hidden border border-dark-500">
+                {([['all', 'All'], ['open', 'Open'], ['filled', 'Filled'], ['closed', 'Closed']] as const).map(([val, label]) => (
+                  <button
+                    key={val}
+                    onClick={() => { setTradeStatus(val); setTradePage(0) }}
+                    className={`px-2.5 py-1 transition-colors ${
+                      tradeStatus === val ? 'bg-dark-600 text-white' : 'text-gray-500 hover:text-gray-300'
+                    }`}
+                  >{label}</button>
+                ))}
+              </div>
             </div>
             <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500">{trades.length} trade{trades.length !== 1 ? 's' : ''}</span>
+              <span className="text-xs text-gray-500">{trades.filter(t => tradeStatus === 'all' || t.status === tradeStatus).length} trade{trades.filter(t => tradeStatus === 'all' || t.status === tradeStatus).length !== 1 ? 's' : ''}</span>
               <a
                 href="/api/forward-test/trades/export"
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-dark-700 text-gray-400 hover:text-green-400 hover:bg-green-500/10 text-xs transition-all"
@@ -764,18 +777,21 @@ export default function ForwardTest() {
               </a>
             </div>
           </div>
-          {trades.length === 0 ? (
-            <div className="p-12 text-center">
-              <Activity size={36} className="text-gray-600 mx-auto mb-3 opacity-30" />
-              <p className="text-gray-500 text-sm">
-                {tradeMode === 'paper' ? 'No paper trades yet.' : tradeMode === 'live' ? 'No live trades recorded.' : 'No trades recorded.'}
-              </p>
-              {tradeMode === 'paper' && <p className="text-gray-600 text-xs mt-1">Enable a strategy in paper mode and click "Run Now".</p>}
-            </div>
-          ) : (() => {
-            const totalPages = Math.ceil(trades.length / TRADES_PAGE_SIZE)
+          {(() => {
+            const filteredTrades = tradeStatus === 'all' ? trades : trades.filter(t => t.status === tradeStatus)
+            if (filteredTrades.length === 0) return (
+              <div className="p-12 text-center">
+                <Activity size={36} className="text-gray-600 mx-auto mb-3 opacity-30" />
+                <p className="text-gray-500 text-sm">
+                  {tradeStatus !== 'all' ? `No ${tradeStatus} trades.` : tradeMode === 'paper' ? 'No paper trades yet.' : tradeMode === 'live' ? 'No live trades recorded.' : 'No trades recorded.'}
+                </p>
+                {tradeMode === 'paper' && tradeStatus === 'all' && <p className="text-gray-600 text-xs mt-1">Enable a strategy in paper mode and click "Run Now".</p>}
+              </div>
+            )
+            return (() => {
+            const totalPages = Math.ceil(filteredTrades.length / TRADES_PAGE_SIZE)
             const page = Math.min(tradePage, totalPages - 1)
-            const pageRows = trades.slice(page * TRADES_PAGE_SIZE, (page + 1) * TRADES_PAGE_SIZE)
+            const pageRows = filteredTrades.slice(page * TRADES_PAGE_SIZE, (page + 1) * TRADES_PAGE_SIZE)
             return (
               <>
                 <div className="overflow-hidden">
@@ -841,7 +857,7 @@ export default function ForwardTest() {
                 {/* Pagination footer */}
                 <div className="px-4 py-2.5 border-t border-dark-600 flex items-center justify-between">
                   <span className="text-xs text-gray-500">
-                    {page * TRADES_PAGE_SIZE + 1}–{Math.min((page + 1) * TRADES_PAGE_SIZE, trades.length)} of {trades.length} trade{trades.length !== 1 ? 's' : ''}
+                    {page * TRADES_PAGE_SIZE + 1}–{Math.min((page + 1) * TRADES_PAGE_SIZE, filteredTrades.length)} of {filteredTrades.length} trade{filteredTrades.length !== 1 ? 's' : ''}
                   </span>
                   {totalPages > 1 && (
                     <div className="flex items-center gap-1">
@@ -875,7 +891,9 @@ export default function ForwardTest() {
                 </div>
               </>
             )
-          })()}
+          })()
+          })()
+          }
         </div>
 
         {/* Activity Feed — Live WS Events + Persistent Signal Log */}

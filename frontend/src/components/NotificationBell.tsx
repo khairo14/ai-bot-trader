@@ -254,12 +254,16 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
             <div className="px-4 py-2 border-t border-dark-600 text-center">
               <button
                 onClick={async () => {
+                  // Mark all as read first, then delete — ensures "clear all" always works
+                  // even if the user hasn't manually clicked individual notifications.
+                  await axios.post('/api/notifications/read-all').catch(() => null)
                   await axios.delete('/api/notifications/clear/read').catch(() => null)
-                  await fetchNotifications()
+                  setNotifications([])
+                  setUnread(0)
                 }}
                 className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
               >
-                Clear read notifications
+                Clear all notifications
               </button>
             </div>
           )}
