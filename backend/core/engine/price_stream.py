@@ -36,6 +36,10 @@ class PriceStreamManager:
     def __init__(self) -> None:
         # symbol → latest streamed mid-price (updated from callback)
         self._prices: dict[str, float] = {}
+        # symbol → latest streamed bid price
+        self._bid_prices: dict[str, float] = {}
+        # symbol → latest streamed ask price
+        self._ask_prices: dict[str, float] = {}
         # broker_name → running stream Task
         self._tasks: dict[str, asyncio.Task] = {}
         # broker_name → current subscribed symbol set (detect changes)
@@ -44,16 +48,28 @@ class PriceStreamManager:
     # ──────────────────────────────────────────────────────────────────────────
 
     def get_price(self, symbol: str) -> Optional[float]:
-        """Return the latest streamed mid-price, or None if not yet received.
-
-        GAP-9 NOTE: this returns the mid-price (midpoint of bid/ask).
-        For tight SL triggers on illiquid instruments the bid/ask spread means
-        the actual fill may differ by half-spread.  In practice this is < 0.05%
-        for liquid crypto/FX pairs and is acceptable.  If sub-pip SL precision
-        is required, replace with actual bid (short) or ask (long) via REST
-        get_bid_ask() calls rather than the streamed mid-price.
-        """
+        """Return the latest streamed mid-price, or None if not yet received."""
         return self._prices.get(symbol)
+
+    def get_bid_ask(self, symbol: str) -> Optional[tuple[float, float]]:
+        """
+        BUG-MED-05 FIX: return (bid, ask) from the stream cache when available.
+
+        Falls back to (mid, mid) when only a mid-price has been streamed so far
+        (e.g. before the broker sends a bid/ask update, or for brokers that only
+        stream last-trade prices).  Returns None if no price has been received.
+
+        monitor_sl_tp uses bid for short-entry SL triggers and ask for long-entry
+        SL triggers to model realistic fill prices on illiquid instruments.
+        """
+        bid = self._bid_prices.get(symbol)
+        ask = self._ask_prices.get(symbol)
+        if bid and ask:
+            return bid, ask
+        mid = self._prices.get(symbol)
+        if mid:
+            return mid, mid  # graceful fallback — half-spread not modelled
+        return None
 
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -159,6 +175,15 @@ class PriceStreamManager:
                 async def _on_price(symbol: str, price: float) -> None:
                     if price > 0:
                         self._prices[symbol] = price
+
+                async def _on_bid_ask(symbol: str, bid: float, ask: float) -> None:
+                    """Optional callback — populated when broker.stream_prices() emits bid/ask."""
+                    if bid > 0:
+                        self._bid_prices[symbol] = bid
+                    if ask > 0:
+                        self._ask_prices[symbol] = ask
+                    if bid > 0 and ask > 0:
+                        self._prices[symbol] = (bid + ask) / 2.0  # keep mid in sync
 
                 await broker.stream_prices(symbols, _on_price)
 

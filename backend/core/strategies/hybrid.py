@@ -215,61 +215,13 @@ class HybridStrategy(BaseStrategy):
             take_profit = None
             reasons = ["Conditions not met for entry"]
 
-        logger.debug(
-            f"[{self.name}] {symbol} {timeframe} → {signal_type} "
-            f"(long: {long_score}/{min_score_long}, short: {short_score}/{min_score_short}, "
-            f"conf: {confidence}, ml: {ml_prob}, regime: {regime_name})"
-        )
-
-        # ── Feature 3: Confirmation candle ────────────────────────────────────
-        # The previous *closed* candle must close in the direction of the signal.
-        # A forming candle (last bar) is never green/red enough to trust alone.
-        if signal_type in ("BUY", "SHORT") and len(data) >= 2:
-            prev_close = float(data["close"].iloc[-2])
-            prev_open  = float(data["open"].iloc[-2])
-            if signal_type == "BUY" and prev_close <= prev_open:
-                logger.info(
-                    f"[{self.name}] {symbol} BUY → HOLD: prev candle bearish "
-                    f"(close={prev_close:.5f} <= open={prev_open:.5f})"
-                )
-                signal_type = "HOLD"
-                confidence  = 0.0
-                stop_loss   = None
-                take_profit = None
-                reasons     = reasons + ["Awaiting confirmation candle (prev candle bearish)"]
-            elif signal_type == "SHORT" and prev_close >= prev_open:
-                logger.info(
-                    f"[{self.name}] {symbol} SHORT → HOLD: prev candle bullish "
-                    f"(close={prev_close:.5f} >= open={prev_open:.5f})"
-                )
-                signal_type = "HOLD"
-                confidence  = 0.0
-                stop_loss   = None
-                take_profit = None
-                reasons     = reasons + ["Awaiting confirmation candle (prev candle bullish)"]
-
-        # ── Feature 1: Snap TP to nearest support / resistance level ─────────
-        # For BUY: if a pivot resistance exists closer than the ATR TP, prefer it.
-        # For SHORT: if a pivot support exists closer (higher) than the ATR TP, prefer it.
-        if signal_type == "BUY" and take_profit is not None:
-            resistance = self._find_resistance(data, current_price)
-            if resistance is not None and resistance < take_profit:
-                take_profit = round(resistance * 0.9998, 4)  # 2-pip buffer below resistance
-                reasons = reasons + [f"TP snapped to resistance {resistance:.5f}"]
-        elif signal_type == "SHORT" and take_profit is not None:
-            support = self._find_support(data, current_price)
-            if support is not None and support > take_profit:
-                take_profit = round(support * 1.0002, 4)  # 2-pip buffer above support
-                reasons = reasons + [f"TP snapped to support {support:.5f}"]
-
-        # ── Feature 2: Trailing stop percentage ──────────────────────────────
-        # Express as % of current price using 1.5× ATR so it adapts to volatility.
-        # monitor_sl_tp reads this field and ratchets stop_loss with every tick.
-        trailing_stop_pct: Optional[float] = None
-        if signal_type in ("BUY", "SHORT") and atr_value and current_price:
-            trailing_stop_pct = round(atr_value * 1.5 / current_price * 100, 4)
-
-        return Signal(
+        # BUG-MED-02 FIX: remove inline confirmation candle / S/R snap / trailing stop
+        # — all three are already implemented in BaseStrategy._enhance_signal().
+        # Keeping them here as well causes the confirmation candle to run twice (once
+        # here before building the Signal, once inside _enhance_signal), and the S/R
+        # snap + trailing_stop_pct to diverge from the shared base implementation.
+        # Delegate to _enhance_signal() which handles all three features consistently.
+        return self._enhance_signal(Signal(
             symbol=symbol,
             signal=signal_type,
             entry_price=current_price,
@@ -282,7 +234,4 @@ class HybridStrategy(BaseStrategy):
             broker=self.broker,
             reasons=reasons,
             regime=regime_name,
-            trailing_stop_pct=trailing_stop_pct,
-        )
-
-    # S/R helpers (_find_resistance, _find_support) live in BaseStrategy and are inherited.
+        ), data, atr_value)

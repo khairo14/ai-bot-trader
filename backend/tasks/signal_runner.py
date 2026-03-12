@@ -490,6 +490,10 @@ def run_signals(self):
                                 _confirmed_regime = None
 
                         # ── Generate signal ──────────────────────────────────────
+                        # BUG-MED-01 FIX: pass the already-fetched OHLCV DataFrame so
+                        # signal_engine.run() skips its own broker.get_ohlcv() call.
+                        # Without data=, every strategy fetches OHLCV a second time —
+                        # unnecessary broker round-trips and rate-limit consumption.
                         sig = await signal_engine.run(
                             strategy_name=_active_strategy_type,
                             symbol=symbol,
@@ -497,6 +501,7 @@ def run_signals(self):
                             timeframe=timeframe,
                             limit=limit,
                             asset_class=getattr(strat.asset_class, "value", None),
+                            data=_ohlcv if _ohlcv is not None else None,
                         )
                         # Tag the signal with the original configured strategy name
                         # so the DB always reflects what the user configured,

@@ -627,6 +627,43 @@ class ForwardEngine:
                         "— use paper mode or reduce to a single-leg order."
                     )
                     return None
+                # BUG-CRIT-02 FIX: Paper mode multi-leg options — simulate execution without
+                # calling broker.place_order() (no broker supports multi-leg paper orders).
+                # Mark OPEN directly so the position is tracked and monitor_sl_tp can apply
+                # software-side SL/TP on the net premium.
+                trade.entry_price = signal.entry_price
+                trade.status = OrderStatus.OPEN
+                trade.broker_order_id = (
+                    f"paper_multileg_{signal.symbol}_{int(datetime.now(timezone.utc).timestamp())}"
+                )
+                if db_session:
+                    db_session.add(trade)
+                    await db_session.commit()
+                    await db_session.refresh(trade)
+                self._paper_positions[f"{signal.symbol}:{broker_key}"] = trade
+                logger.info(
+                    f"[ForwardEngine] ✅ PAPER multi-leg option simulated: "
+                    f"{signal.signal} {signal.symbol} @ {signal.entry_price} "
+                    f"(broker_order_id={trade.broker_order_id})"
+                )
+                try:
+                    from notifications.notifier import notifier as _notifier
+                    await _notifier.trade(
+                        db_session,
+                        title=f"[PAPER] Multi-leg Option Opened — {signal.symbol}",
+                        message=(
+                            f"{signal.signal} {signal.symbol} @ {signal.entry_price} "
+                            f"({meta.get('strategy_type', 'options')}) — paper simulated"
+                        ),
+                        metadata={
+                            "symbol": signal.symbol, "side": signal.signal,
+                            "broker": broker_key, "is_paper": True,
+                            "strategy": signal.strategy_name,
+                        },
+                    )
+                except Exception:
+                    pass
+                return trade
         mode_tag = "PAPER" if is_paper else "LIVE"
         try:
             result = await broker.place_order(
@@ -1153,7 +1190,9 @@ class ForwardEngine:
         Returns the number of trades resolved.
         """
         from db.models import BrokerName as _BN
-        cutoff = datetime.utcnow() - timedelta(minutes=timeout_minutes)
+        # BUG-LOW-01 FIX: datetime.utcnow() is deprecated in Python 3.12+; use
+        # datetime.now(timezone.utc).replace(tzinfo=None) for tz-naive UTC instead.
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=timeout_minutes)
         resolved = 0
 
         for _TradeModel in (Trade, LiveTrade):
@@ -1165,37 +1204,66 @@ class ForwardEngine:
             )
             stale = _pending_q.scalars().all()
             for t in stale:
-                t.status = OrderStatus.REJECTED
-                t.notes = (
-                    (t.notes or "") +
-                    f" | IMP-31: auto-resolved as REJECTED after {timeout_minutes}m pending timeout"
-                )
-                resolved += 1
-                # Remove from in-memory cache so it doesn't block the next strategy run
+                # BUG-HIGH-03 FIX: before marking REJECTED, check the broker for the
+                # actual order status.  A slow network or exchange delay can leave a
+                # legitimate fill in PENDING state — marking it REJECTED would
+                # incorrectly orphan a real open position.
                 _t_bk = t.broker.value if hasattr(t.broker, 'value') else str(t.broker)
-                self._paper_positions.pop(f"{t.symbol}:{_t_bk}", None)
-                logger.warning(
-                    f"[ForwardEngine] IMP-31: PENDING trade id={t.id} {t.symbol} "
-                    f"exceeded {timeout_minutes}m timeout — marked REJECTED. "
-                    f"broker_order_id={t.broker_order_id}"
-                )
-                try:
-                    from notifications.notifier import dispatch as _notif_dispatch
-                    await _notif_dispatch(
-                        db_session,
-                        title=f"⚠ PENDING Trade Timed Out — {t.symbol}",
-                        message=(
-                            f"Trade id={t.id} ({t.side.upper()} {t.symbol}) has been PENDING "
-                            f"for over {timeout_minutes} minutes without fill confirmation. "
-                            f"It has been auto-resolved as REJECTED. "
-                            f"broker_order_id={t.broker_order_id}"
-                        ),
-                        level="warning",
-                        category="trade",
-                        metadata={"trade_id": t.id, "symbol": t.symbol, "broker_order_id": t.broker_order_id},
+                _broker_confirmed_filled = False
+                if t.broker_order_id and not t.broker_order_id.startswith("rejected_"):
+                    try:
+                        _chk_broker = get_broker(_t_bk, force_paper=t.is_paper)
+                        await _chk_broker.connect()
+                        _order_result = await _chk_broker.get_order_status(
+                            t.broker_order_id, t.symbol
+                        )
+                        if _order_result and str(_order_result.status).lower() in ("filled", "closed"):
+                            _broker_confirmed_filled = True
+                            t.status = OrderStatus.OPEN
+                            if _order_result.fill_price:
+                                t.entry_price = _order_result.fill_price
+                            self._paper_positions[f"{t.symbol}:{_t_bk}"] = t
+                            logger.info(
+                                f"[ForwardEngine] IMP-31: PENDING trade id={t.id} {t.symbol} "
+                                f"confirmed FILLED at broker — upgraded to OPEN."
+                            )
+                    except Exception as _chk_err:
+                        logger.debug(
+                            f"[ForwardEngine] IMP-31: broker status check failed for "
+                            f"id={t.id} {t.symbol}: {_chk_err} — proceeding with REJECTED"
+                        )
+
+                if not _broker_confirmed_filled:
+                    t.status = OrderStatus.REJECTED
+                    t.notes = (
+                        (t.notes or "") +
+                        f" | IMP-31: auto-resolved as REJECTED after {timeout_minutes}m pending timeout"
                     )
-                except Exception as _n_err:
-                    logger.debug(f"[ForwardEngine] PENDING timeout notification failed: {_n_err}")
+                    # Remove from in-memory cache so it doesn't block the next strategy run
+                    self._paper_positions.pop(f"{t.symbol}:{_t_bk}", None)
+                    logger.warning(
+                        f"[ForwardEngine] IMP-31: PENDING trade id={t.id} {t.symbol} "
+                        f"exceeded {timeout_minutes}m timeout — marked REJECTED. "
+                        f"broker_order_id={t.broker_order_id}"
+                    )
+                    try:
+                        from notifications.notifier import dispatch as _notif_dispatch
+                        await _notif_dispatch(
+                            db_session,
+                            title=f"⚠ PENDING Trade Timed Out — {t.symbol}",
+                            message=(
+                                f"Trade id={t.id} ({t.side.upper()} {t.symbol}) has been PENDING "
+                                f"for over {timeout_minutes} minutes without fill confirmation. "
+                                f"It has been auto-resolved as REJECTED. "
+                                f"broker_order_id={t.broker_order_id}"
+                            ),
+                            level="warning",
+                            category="trade",
+                            metadata={"trade_id": t.id, "symbol": t.symbol, "broker_order_id": t.broker_order_id},
+                        )
+                    except Exception as _n_err:
+                        logger.debug(f"[ForwardEngine] PENDING timeout notification failed: {_n_err}")
+                resolved += 1
 
         if resolved:
             await db_session.flush()
@@ -1977,6 +2045,78 @@ class ForwardEngine:
                 logger.info(f"[ForwardEngine] Synced {orphan_count} orphan broker position(s) to DB.")
         except Exception as _oe:
             logger.error(f"[ForwardEngine] Orphan broker sync failed: {_oe}", exc_info=True)
+
+        # BUG-LOW-03 FIX: extend orphan sync to Alpaca and Binance.
+        # The original block only covered IBKR, so Alpaca/Binance positions created
+        # after a DB-commit failure would never be recovered and stayed permanently
+        # orphaned (real capital at risk with no SL/TP tracking in the DB).
+        for _orph_broker, _orph_broker_name, _orph_bn_enum in (
+            ("alpaca", False, "alpaca"),
+            ("binance", False, "binance"),
+        ):
+            try:
+                from db.models import BrokerName as _BN2, AssetClass as _AC2, ExecutionMode as _EM2
+                _orph_is_paper: bool = False  # Alpaca/Binance orphan sync always checks live endpoint
+                _orph_key = (_orph_broker, _orph_is_paper)
+                _orph_tracked = {
+                    _normalize(t.symbol, _orph_broker)
+                    for t in by_broker.get(_orph_key, [])
+                }
+                _o_broker_obj = get_broker(_orph_broker, force_paper=False)
+                await _o_broker_obj.connect()
+                _o_positions = await _o_broker_obj.get_positions()
+
+                for _op in _o_positions:
+                    _op_norm = _normalize(_op.symbol, _orph_broker)
+                    if _op_norm in _orph_tracked:
+                        continue  # already in DB — handled by ghost-close loop
+
+                    # Look up a recent signal for strategy info
+                    _cutoff2 = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=48)
+                    try:
+                        _osig_q = await db_session.execute(
+                            _sel(SignalModel)
+                            .where(
+                                SignalModel.symbol == _op.symbol,
+                                SignalModel.broker == _BN2(_orph_broker),
+                                SignalModel.created_at >= _cutoff2,
+                            )
+                            .order_by(SignalModel.created_at.desc())
+                            .limit(1)
+                        )
+                        _osig = _osig_q.scalar_one_or_none()
+                    except Exception:
+                        _osig = None
+
+                    _o_model = LiveTrade  # Alpaca/Binance orphans are always live
+                    _onew = _o_model(
+                        symbol=_op.symbol,
+                        side=_op.side,
+                        quantity=_op.quantity,
+                        entry_price=round(_op.entry_price, 8) if _op.entry_price else None,
+                        stop_loss=_osig.stop_loss if _osig else None,
+                        take_profit=_osig.take_profit if _osig else None,
+                        status=OrderStatus.OPEN,
+                        execution_mode=_osig.execution_mode if _osig else ExecutionMode.FULL_AUTO,
+                        asset_class=AssetClass(_op.asset_class) if _op.asset_class in AssetClass._value2member_map_ else AssetClass.CRYPTO,
+                        broker=_BN2(_orph_broker),
+                        is_paper=False,
+                        strategy_name=_osig.strategy_name if _osig else "unknown",
+                        signal_id=_osig.id if _osig else None,
+                        broker_order_id="orphan_sync",
+                        opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    )
+                    db_session.add(_onew)
+                    orphan_count += 1
+                    logger.info(
+                        f"[ForwardEngine] ORPHAN SYNC ({_orph_broker}): created LiveTrade for "
+                        f"{_op.symbol} entry={_op.entry_price} (signal_id={_osig.id if _osig else None})"
+                    )
+
+                if orphan_count:
+                    await db_session.commit()
+            except Exception as _o2e:
+                logger.debug(f"[ForwardEngine] Orphan sync skipped for {_orph_broker}: {_o2e}")
 
         return ghost_count + orphan_count
 

@@ -296,39 +296,55 @@ class BinanceClient(AbstractBroker):
             # Placing SL first means free balance = 0 when TP tries to place, causing a
             # silent "insufficient balance" failure.  A limit sell order does NOT lock
             # the asset as reserved collateral, so the TP must come first.
-            # TP guard
-            for _attempt in range(2):
-                try:
-                    await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
-                    break
-                except Exception as _tp_err:
-                    if _attempt == 0:
-                        await asyncio.sleep(0.5)
-                    else:
-                        logger.error(f"[Binance] TP guard (bracket) failed after retry: {_tp_err}")
-                        raise RuntimeError(
-                            f"[Binance] TP guard (bracket) permanently failed for {symbol}: {_tp_err}"
+            # BUG-CRIT-01 FIX: wrap bracket placement in a single try/except so that if
+            # either the TP or SL guard fails after retries, we place an emergency market
+            # close to flatten the already-filled entry position before re-raising.
+            try:
+                # TP guard
+                for _attempt in range(2):
+                    try:
+                        await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
+                        break
+                    except Exception as _tp_err:
+                        if _attempt == 0:
+                            await asyncio.sleep(0.5)
+                        else:
+                            logger.error(f"[Binance] TP guard (bracket) failed after retry: {_tp_err}")
+                            raise RuntimeError(
+                                f"[Binance] TP guard (bracket) permanently failed for {symbol}: {_tp_err}"
+                            )
+                # SL guard — use STOP_LOSS (market-on-trigger) not STOP_LOSS_LIMIT so the
+                # full quantity is guaranteed to fill even when price gaps through the level.
+                for _attempt in range(2):
+                    try:
+                        await self.exchange.create_order(
+                            symbol, "STOP_LOSS", exit_side, quantity,
+                            params={"stopPrice": stop_price}
                         )
-            # SL guard — use STOP_LOSS (market-on-trigger) not STOP_LOSS_LIMIT so the
-            # full quantity is guaranteed to fill even when price gaps through the level.
-            for _attempt in range(2):
+                        break
+                    except Exception as _sl_err:
+                        if _attempt == 0:
+                            await asyncio.sleep(0.5)
+                        else:
+                            raise RuntimeError(
+                                f"[Binance] SL guard (bracket) permanently failed for {symbol}: {_sl_err}"
+                            )
+            except Exception as _bracket_err:
+                # Emergency close: flatten the entry fill to avoid an unprotected position.
+                logger.critical(
+                    f"[Binance] Bracket placement failed for {symbol} after fill — "
+                    f"placing emergency market close to avoid orphaned position. Error: {_bracket_err}"
+                )
                 try:
-                    await self.exchange.create_order(
-                        symbol, "STOP_LOSS", exit_side, quantity,
-                        params={"stopPrice": stop_price}
+                    _qty_filled = float(result.get("filled") or result.get("amount") or quantity)
+                    await self.exchange.create_market_order(symbol, exit_side, _qty_filled)  # type: ignore[arg-type]
+                    logger.info(f"[Binance] Emergency market close placed for {symbol} qty={_qty_filled}")
+                except Exception as _emergency_err:
+                    logger.critical(
+                        f"[Binance] Emergency market close FAILED for {symbol}: {_emergency_err} "
+                        "— manual intervention required to close the open position."
                     )
-                    break
-                except Exception as _sl_err:
-                    if _attempt == 0:
-                        await asyncio.sleep(0.5)
-                    else:
-                        # BUG-2 FIX: raise instead of silently continuing — a position
-                        # without a stop-loss is unprotected. The caller (ForwardEngine)
-                        # will catch this, revert the PENDING guard back to OPEN, and
-                        # retry on the next tick rather than leaving capital at risk.
-                        raise RuntimeError(
-                            f"[Binance] SL guard (bracket) permanently failed for {symbol}: {_sl_err}"
-                        )
+                raise _bracket_err
             order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif stop_price and not take_profit_price:

@@ -155,6 +155,7 @@ class CoveredCallStrategy(BaseStrategy):
                 "expiry": expiry,
                 "strike": strike,
                 "right": "C",
+                "lot_size": 100,       # 1 equity option contract = 100 shares
                 "legs": [{"action": "SELL", "right": "C", "strike": strike, "premium": round(premium, 4)}],
                 "underlying_price": round(current_price, 4),
             },

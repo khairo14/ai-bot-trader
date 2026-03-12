@@ -343,19 +343,51 @@ class RiskManager:
                 reason="Invalid stop distance (zero or negative)."
             )
 
-        position_size = risk_amount / stop_distance
-        position_value = position_size * signal.entry_price
+        # BUG-CRIT-03 FIX: options position sizing.
+        # entry_price for options is the per-share premium (e.g. $2.50).
+        # Using risk_amount / stop_distance gives 40 contracts for a 1% risk on $10k,
+        # which equals $10,000 premium cost — 100% of account.
+        # Correct sizing: use max_loss per CONTRACT (premium × lot_size = $250/contract),
+        # so position_size comes out in contracts and position_value in dollars.
+        options_meta = getattr(signal, "options_meta", None)
+        _is_options = bool(options_meta) or getattr(signal, "asset_class", None) == "option"
+
+        if _is_options and isinstance(options_meta, dict):
+            _lot_size = options_meta.get("lot_size", 100)
+            _max_loss_per_share = (
+                options_meta.get("max_loss")       # iron condor / bull call spread
+                or options_meta.get("net_debit")    # debit spread fallback
+                or stop_distance                    # generic fallback
+            )
+            _max_loss_per_contract = float(_max_loss_per_share) * float(_lot_size)
+            if _max_loss_per_contract <= 0:
+                return RiskValidation(
+                    approved=False,
+                    position_size=0, position_value=0, risk_amount=0, stop_distance=0,
+                    reason="Options max_loss per contract is zero or negative."
+                )
+            position_size = risk_amount / _max_loss_per_contract  # number of contracts
+            position_value = position_size * _max_loss_per_contract  # total dollars at risk
+        else:
+            position_size = risk_amount / stop_distance
+            position_value = position_size * signal.entry_price
 
         # Cap at effective max-per-asset of account in one asset
         max_position_value = account_balance * _max_asset_exp
         if position_value > max_position_value:
             position_value = max_position_value
-            position_size = position_value / signal.entry_price
+            if _is_options and isinstance(options_meta, dict) and _max_loss_per_contract > 0:
+                position_size = position_value / _max_loss_per_contract
+            else:
+                position_size = position_value / signal.entry_price
             risk_amount = position_size * stop_distance
             logger.debug(f"[RiskManager] Position capped to max_exposure_per_asset.")
 
         # ── Level 1: Minimum R:R check ────────────────────────────────────────
-        if signal.take_profit is not None:
+        # Skip for options strategies: premium-selling has inverted R:R by design
+        # (iron condor, covered call) and debit spreads use max_profit/net_debit
+        # rather than price distance, so the standard check gives misleading results.
+        if signal.take_profit is not None and not _is_options:
             reward = abs(signal.take_profit - signal.entry_price)
             rr = round(reward / stop_distance, 2)  # round to 2dp to avoid floating-point edge cases
             if rr < self.default_rr_ratio:  # BUG-2 FIX: use config value, not hardcoded 1.5

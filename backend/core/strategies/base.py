@@ -138,8 +138,13 @@ class BaseStrategy(ABC):
                     signal.take_profit = round(support * 1.0002, 6)
                     signal.reasons = reasons + [f"TP snapped to support {support:.5f}"]
 
-        # Feature 2: Trailing stop (non-options only)
-        if atr_val and current_price:
+        # Feature 2: Trailing stop (non-options, non-mean-reversion only)
+        # BUG-HIGH-01 FIX: mean_reversion_bb is a counter-trend strategy — the target
+        # is the middle Bollinger Band, not an open-ended trend.  A trailing stop would
+        # ratchet away from that fixed target and prevent the trade from reaching it.
+        # Options signals also skip trailing stop (handled above via is_options guard).
+        _is_mean_rev = getattr(self, "name", "") == "mean_reversion_bb"
+        if atr_val and current_price and not _is_mean_rev:
             signal.trailing_stop_pct = round(atr_val * 1.5 / current_price * 100, 4)
 
         return signal

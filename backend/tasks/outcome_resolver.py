@@ -174,6 +174,131 @@ async def _fetch_ohlcv_yfinance(
         return None
 
 
+def _resolve_options_outcome(
+    entry_price: float,
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+    signal_type: str,
+    df,
+    horizon: int,
+    options_meta: dict,
+) -> dict:
+    """
+    BUG-HIGH-02 FIX: options outcome resolution based on underlying price vs strikes.
+
+    Standard _resolve_outcome() compares entry/SL/TP in *premium space* (e.g. $1.50)
+    against OHLCV in *underlying price space* (e.g. $400).  This causes immediate
+    spurious "loss" labels for every options trade because the underlying price is
+    always >= any realistic premium stop_loss level.
+
+    Each options strategy type uses underlying price to determine profit/loss:
+      iron_condor   — win if underlying stays within [short_put, short_call] wings
+      covered_call  — win if underlying closes below the short call strike at expiry
+      bull_call_spread — win if underlying ends above the sell_strike (max profit)
+    """
+    strategy_type = options_meta.get("strategy_type", "")
+    legs = options_meta.get("legs", [])
+    rows = list(df.iterrows())[:horizon]
+    if not rows:
+        return {}
+
+    if strategy_type == "iron_condor":
+        short_call = next(
+            (float(l["strike"]) for l in legs if l.get("action") == "SELL" and l.get("right") == "C"),
+            None
+        )
+        short_put = next(
+            (float(l["strike"]) for l in legs if l.get("action") == "SELL" and l.get("right") == "P"),
+            None
+        )
+        if short_call is None or short_put is None:
+            return {}
+
+        for i, (_, row) in enumerate(rows):
+            high = float(row["high"])
+            low  = float(row["low"])
+            if high >= short_call or low <= short_put:
+                return {
+                    "outcome": "loss",
+                    "pnl_pct": round(-(stop_loss / entry_price) * 100, 4) if (stop_loss and entry_price) else -100.0,
+                    "exit_price": float(row["close"]),
+                    "candles_held": i + 1,
+                    "ml_label": 0,
+                }
+        # No breach: position expired within wings — full premium kept
+        return {
+            "outcome": "win",
+            "pnl_pct": round((take_profit or entry_price) / entry_price * 100, 4) if entry_price else 50.0,
+            "exit_price": entry_price,
+            "candles_held": len(rows),
+            "ml_label": 1,
+        }
+
+    elif strategy_type == "covered_call":
+        strike = options_meta.get("strike")
+        if strike is None:
+            strike = next((float(l["strike"]) for l in legs if l.get("action") == "SELL"), None)
+        if strike is None:
+            return {}
+        _, last_row = rows[-1]
+        final_price = float(last_row["close"])
+        if final_price < float(strike):
+            return {
+                "outcome": "win",
+                "pnl_pct": round(entry_price / final_price * 100, 4) if (entry_price and final_price) else 5.0,
+                "exit_price": entry_price,
+                "candles_held": len(rows),
+                "ml_label": 1,
+            }
+        else:
+            return {
+                "outcome": "loss",
+                "pnl_pct": round(-(stop_loss / entry_price) * 100, 4) if (stop_loss and entry_price) else -100.0,
+                "exit_price": final_price,
+                "candles_held": len(rows),
+                "ml_label": 0,
+            }
+
+    elif strategy_type == "bull_call_spread":
+        buy_strike  = next((float(l["strike"]) for l in legs if l.get("action") == "BUY"),  None)
+        sell_strike = next((float(l["strike"]) for l in legs if l.get("action") == "SELL"), None)
+        if buy_strike is None or sell_strike is None:
+            return {}
+        _, last_row = rows[-1]
+        final_price = float(last_row["close"])
+        max_profit = options_meta.get("max_profit", take_profit or entry_price)
+        if final_price >= sell_strike:
+            return {
+                "outcome": "win",
+                "pnl_pct": round(float(max_profit) / entry_price * 100, 4) if entry_price else 100.0,
+                "exit_price": final_price,
+                "candles_held": len(rows),
+                "ml_label": 1,
+            }
+        elif final_price <= buy_strike:
+            return {
+                "outcome": "loss",
+                "pnl_pct": -100.0,
+                "exit_price": final_price,
+                "candles_held": len(rows),
+                "ml_label": 0,
+            }
+        else:
+            spread_width = sell_strike - buy_strike
+            partial_profit = final_price - buy_strike - entry_price
+            pnl_pct = round(partial_profit / entry_price * 100, 4) if entry_price else 0.0
+            return {
+                "outcome": "win" if pnl_pct > 0 else ("break_even" if abs(pnl_pct) < 0.1 else "loss"),
+                "pnl_pct": pnl_pct,
+                "exit_price": final_price,
+                "candles_held": len(rows),
+                "ml_label": 1 if pnl_pct > 0 else 0,
+            }
+
+    # Unknown options strategy type — cannot resolve with strike-based logic
+    return {}
+
+
 def _resolve_outcome(
     entry_price: float,
     stop_loss: Optional[float],
@@ -182,6 +307,7 @@ def _resolve_outcome(
     df,           # OHLCV DataFrame sliced from entry candle onwards
     horizon: int = RESOLUTION_HORIZON,
     trailing_stop_pct: Optional[float] = None,
+    options_meta: Optional[dict] = None,
 ) -> dict:
     """
     Walk rows of `df` (starting at entry candle) to determine outcome.
@@ -190,7 +316,24 @@ def _resolve_outcome(
     If trailing_stop_pct is set (e.g. 2.0 = 2%), the stop trails up/down
     with the price peak and overrides the fixed stop_loss once it would be
     more favourable to the trade.
+
+    If options_meta is provided, delegates to _resolve_options_outcome() which
+    uses underlying price vs option strikes (BUG-HIGH-02 fix).
     """
+    # BUG-HIGH-02 FIX: options strategies store SL/TP in premium space but
+    # the OHLCV df contains underlying prices.  Comparing $1.50 stop_loss
+    # against a $400 underlying always triggers immediately → wrong ML labels.
+    if options_meta:
+        return _resolve_options_outcome(
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            signal_type=signal_type,
+            df=df,
+            horizon=horizon,
+            options_meta=options_meta,
+        )
+
     is_long = signal_type in ("BUY", "COVER")   # COVER closes a short → long direction P&L
     is_short = signal_type in ("SELL", "SHORT")
 
@@ -421,6 +564,11 @@ async def resolve_pending_outcomes() -> dict:
                         df=future_df,
                         horizon=horizon,
                         trailing_stop_pct=getattr(o, "trailing_stop_pct", None),
+                        options_meta=(
+                            sig.options_meta
+                            if (sig := sig_rows.get(o.signal_id)) is not None and sig.options_meta
+                            else None
+                        ),
                     )
 
                     if not result_dict:

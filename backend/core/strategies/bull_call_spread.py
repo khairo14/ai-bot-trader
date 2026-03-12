@@ -95,20 +95,16 @@ class BullCallSpreadStrategy(BaseStrategy):
             ])
 
         # MACD bullish filter
+        # BUG-CRIT-04 FIX: MACDTool.calculate() returns a ToolOutput where:
+        #   .value  = histogram float (not stored in .histogram / .macd / .signal attributes)
+        #   .signal = signal string ("bullish_crossover" | "histogram_positive" | …)
+        # getattr(macd_out, "histogram", None) → None (ToolOutput has no .histogram field)
+        # getattr(macd_out, "macd", None)      → None (same issue)
+        # getattr(macd_out, "signal", None)    → the signal STRING, not a numeric float
+        # Both None checks therefore always skipped → macd_bullish always False → always HOLD.
         macd_out = self.macd_tool.calculate(data)
-        histogram = getattr(macd_out, "histogram", None)
-        macd_line = getattr(macd_out, "macd", None)
-        signal_line = getattr(macd_out, "signal", None)
-
-        macd_bullish = False
-        macd_reason  = "MACD neutral"
-        if histogram is not None and histogram > 0:
-            macd_bullish = True
-            macd_reason  = f"MACD histogram positive ({histogram:.4f})"
-        elif (macd_line is not None and signal_line is not None
-              and macd_line > signal_line):
-            macd_bullish = True
-            macd_reason  = f"MACD ({macd_line:.4f}) above signal ({signal_line:.4f})"
+        macd_bullish = macd_out.signal in ("bullish_crossover", "histogram_positive")
+        macd_reason  = f"MACD {macd_out.signal} (histogram: {macd_out.value:.4f})"
 
         if not macd_bullish:
             return _hold([f"MACD not bullish — {macd_reason}"])
@@ -190,6 +186,8 @@ class BullCallSpreadStrategy(BaseStrategy):
                 "expiry": expiry,
                 "spread_width": round(spread_width, 2),
                 "max_profit": round(max_profit, 4),
+                "max_loss": round(net_debit, 4),   # net_debit is the max loss for a debit spread
+                "lot_size": 100,                    # 1 equity option contract = 100 shares
                 "underlying_price": round(current_price, 4),
                 "legs": [
                     {"action": "BUY",  "right": "C", "strike": buy_strike,  "premium": round(long_premium, 4)},

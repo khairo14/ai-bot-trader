@@ -41,6 +41,7 @@ from core.options.iv_rank import (
     nearest_strike, next_monthly_expiry,
 )
 from tools.basic.volume_atr_adx import ATR, ADX
+from tools.basic.rsi import RSI
 
 
 class IronCondorStrategy(BaseStrategy):
@@ -57,6 +58,8 @@ class IronCondorStrategy(BaseStrategy):
     # ── Thresholds ─────────────────────────────────────────────────────────────
     MIN_IV_RANK:     float = 50.0   # require elevated IV to sell premium
     MAX_ADX:         float = 25.0   # require non-trending market
+    RSI_LOW:         float = 35.0   # BUG-LOW-02: RSI filter — avoid directional breakouts
+    RSI_HIGH:        float = 65.0   # underlying must be neutral, not trending
     SHORT_ATR_MULT:  float = 1.0    # short strikes: 1×ATR from spot
     LONG_ATR_MULT:   float = 2.0    # wing strikes: 2×ATR from spot (capped loss)
     DTE:             int   = 30     # target days to expiry
@@ -64,6 +67,7 @@ class IronCondorStrategy(BaseStrategy):
     def __init__(self) -> None:
         self.atr_tool = ATR()
         self.adx_tool = ADX()
+        self.rsi_tool = RSI()
 
     def generate_signal(
         self,
@@ -104,6 +108,23 @@ class IronCondorStrategy(BaseStrategy):
             return _hold([
                 f"ADX {adx_out.value:.1f} > {self.MAX_ADX} — market trending; "
                 "iron condor needs a range-bound environment"
+            ])
+
+        # ── RSI 35–65 filter (BUG-LOW-02 FIX) ────────────────────────────────
+        # An RSI outside 35–65 signals that the underlying is in a directional move.
+        # Selling a condor into a trending underlying drastically raises the chance
+        # that the short strike is breached early, turning a theta-positive trade
+        # into a max-loss event before expiry.
+        rsi_out = self.rsi_tool.calculate(data)
+        if rsi_out.value < self.RSI_LOW:
+            return _hold([
+                f"RSI {rsi_out.value:.1f} < {self.RSI_LOW} — underlying oversold / trending down; "
+                "iron condor short put at risk of early breach"
+            ])
+        if rsi_out.value > self.RSI_HIGH:
+            return _hold([
+                f"RSI {rsi_out.value:.1f} > {self.RSI_HIGH} — underlying overbought / trending up; "
+                "iron condor short call at risk of early breach"
             ])
 
         # ── ATR for strike placement ───────────────────────────────────────────
@@ -197,6 +218,7 @@ class IronCondorStrategy(BaseStrategy):
             options_meta={
                 "strategy_type": "iron_condor",
                 "expiry": expiry,
+                "lot_size": 100,       # 1 equity option contract = 100 shares
                 "legs": [
                     {"action": "SELL", "right": "C", "strike": short_call, "premium": round(p_short_call, 4)},
                     {"action": "BUY",  "right": "C", "strike": long_call,  "premium": round(p_long_call,  4)},
