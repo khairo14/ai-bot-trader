@@ -242,6 +242,12 @@ def run_signals(self):
         }
     """
     try:
+        # Reload broker modes from runtime/broker_modes.json at the start of every
+        # task run.  This is what makes UI paper/live toggles propagate to the Celery
+        # worker without a process restart (FastAPI saves the file; Celery re-reads it).
+        from brokers import reload_broker_modes
+        reload_broker_modes()
+
         import asyncio
         from core.engine.signal_engine import SignalEngine
         from core.engine.forward_engine import ForwardEngine

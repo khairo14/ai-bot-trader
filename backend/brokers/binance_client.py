@@ -195,7 +195,10 @@ class BinanceClient(AbstractBroker):
             # standing bracket SL/TP orders.  Without this, F-103 in close_position()
             # incorrectly sees "no position" and skips the cancel+sell flow, causing
             # the trade to stay open or close at the wrong price.
-            if total > 0 and asset != "USDT":
+            # Exclude stablecoins pegged to USD — they are cash balances, not
+            # trading positions, and must never be synced as orphan trades.
+            _STABLECOINS = {"USDT", "FDUSD", "USDC", "BUSD", "DAI", "TUSD", "USDP", "GUSD", "EURC"}
+            if total > 0 and asset not in _STABLECOINS:
                 candidates.append((f"{asset}/USDT", total))
 
         if not candidates:
