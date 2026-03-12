@@ -144,7 +144,7 @@ export default function ForwardTest() {
   const [status, setStatus] = useState<ForwardStatus | null>(null)
   const [trades, setTrades] = useState<PaperTrade[]>([])
   const [tradeMode, setTradeMode] = useState<'paper' | 'live' | 'all'>('paper')
-  const [tradeStatus, setTradeStatus] = useState<'all' | 'open' | 'filled' | 'closed'>('all')
+  const [tradeStatus, setTradeStatus] = useState<'all' | 'open' | 'filled' | 'cancelled'>('all')
   const [tradePage, setTradePage] = useState(0)
   const [pendingSignals, setPendingSignals] = useState<PendingSignal[]>([])
   const [executingSignal, setExecutingSignal] = useState<number | null>(null)
@@ -748,7 +748,7 @@ export default function ForwardTest() {
               </div>
               {/* Status filter */}
               <div className="flex text-xs rounded-lg overflow-hidden border border-dark-500">
-                {([['all', 'All'], ['open', 'Open'], ['filled', 'Filled'], ['closed', 'Closed']] as const).map(([val, label]) => (
+                {([['all', 'All'], ['open', 'Open'], ['filled', 'Filled'], ['cancelled', 'Cancelled']] as const).map(([val, label]) => (
                   <button
                     key={val}
                     onClick={() => { setTradeStatus(val); setTradePage(0) }}

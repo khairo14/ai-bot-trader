@@ -607,6 +607,19 @@ async def patch_trade(
     logger.info(
         f"[ForwardTest] Trade {trade_id} updated — sl={t.stop_loss} tp={t.take_profit} by user"
     )
+
+    # Push new SL to broker so its bracket/stop order reflects the new level.
+    # Failure is non-fatal: software monitor_sl_tp enforces the DB value every tick.
+    if body.stop_loss is not None:
+        try:
+            from brokers import get_broker
+            _broker_name = t.broker.value if hasattr(t.broker, "value") else str(t.broker)
+            _broker = get_broker(_broker_name, force_paper=t.is_paper)
+            await _broker.connect()
+            await _broker.update_stop_loss(t.symbol, side, float(t.quantity or 0), body.stop_loss)
+        except Exception as _bk_err:
+            logger.debug(f"[ForwardTest] Broker SL push failed for trade {trade_id}: {_bk_err}")
+
     return {"id": trade_id, "stop_loss": t.stop_loss, "take_profit": t.take_profit}
 
 
