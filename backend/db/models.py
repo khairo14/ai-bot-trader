@@ -138,6 +138,10 @@ class TradeOutcome(Base):
     pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # % gain/loss
     candles_held: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ml_label: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)   # 1=win, 0=loss (for retraining)
+    # GAP-06: options trade metadata (strikes, expiry, legs) for options ML labels
+    options_meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # IMP-04: category for ML label disambiguation — "directional" or "premium_collection"
+    signal_type_category: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)   # False = live trade outcome
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=_utcnow, index=True)

@@ -1002,6 +1002,14 @@ async def emergency_stop(db: AsyncSession = Depends(get_db)):
     await db.commit()
 
     from api.websocket import manager
+    from notifications.notifier import notifier as _notify
+    await _notify.emergency(
+        db,
+        title="⚠️ Paper Emergency Stop Activated",
+        message=f"{closed_count} paper position(s) force-closed. All paper strategies deactivated.",
+        metadata={"positions_closed": closed_count, "mode": "paper"},
+    )
+    await db.commit()
     await manager.broadcast("emergency_stop", {"closed_trades": closed_count})
 
     return {

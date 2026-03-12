@@ -372,7 +372,7 @@ def run_signals(self):
                                 from core.regime_classifier import regime_classifier as _rc
                                 _broker_obj = _get_broker(strat.broker.value)
                                 await _broker_obj.connect()
-                                _ohlcv = await _broker_obj.get_ohlcv(symbol, timeframe, limit=200)
+                                _ohlcv = await _broker_obj.get_ohlcv(symbol, timeframe, limit=max(limit, 100))
                                 # IMP-30: pass asset_class so classify() selects the
                                 # appropriate ADX threshold for this instrument type
                                 _asset_class_str = params.get("asset_class", "")
@@ -633,6 +633,13 @@ def run_signals(self):
                                 trailing_stop_pct=sig.trailing_stop_pct,
                                 resolved=False,
                                 is_paper=strat.is_paper,
+                                # IMP-04 / GAP-06: store category + options data at creation time
+                                signal_type_category=(
+                                    "premium_collection"
+                                    if sig.strategy_name in {"iron_condor", "covered_call", "bull_call_spread"}
+                                    else "directional"
+                                ),
+                                options_meta=getattr(sig, "options_meta", None),
                             ))
 
                         # ── Broadcast signal to WebSocket clients ─────────────
