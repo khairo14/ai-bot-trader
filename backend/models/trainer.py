@@ -393,11 +393,19 @@ class ModelTrainer:
         feat_df = _compute_features(df)
         # G5: add regime_code column via 50-candle rolling regime classifier
         feat_df = _add_regime_codes(feat_df, df)
-        labels = _label(feat_df, horizon=label_horizon)
+        labels       = _label(feat_df, horizon=label_horizon)
+        labels_short = _label_short(feat_df, horizon=label_horizon)  # G6: compute before dropna
 
-        # Combine and drop NaN rows
-        feat_df["label"] = labels
+        # Combine and drop NaN rows (drops last `horizon` rows for both label directions)
+        feat_df["label"]       = labels
+        feat_df["label_short"] = labels_short
         feat_df = feat_df.dropna()
+
+        # Extract SHORT training arrays BEFORE live_df merge strips _close/_atr14 columns.
+        # active_features is the same before and after the merge (live_df adds rows, not cols).
+        active_features = [c for c in FEATURE_COLS if c in feat_df.columns]
+        X_short_arr: np.ndarray = feat_df[active_features].values
+        y_short_arr: np.ndarray = feat_df["label_short"].values.astype(int)
 
         # ── Merge live outcome labels from DB (ML feedback loop) ────────────
         live_df = await self._fetch_live_labels(symbol, df)
@@ -416,12 +424,11 @@ class ModelTrainer:
                 "auc": None,
             }
 
-        # Use the full shared FEATURE_COLS — same as MLScorer inference.
+        # active_features computed above; recompute to pick up any changes post-merge.
         active_features = [c for c in FEATURE_COLS if c in feat_df.columns]
 
-        def _train_one(y_arr: np.ndarray, label_name: str) -> tuple:
+        def _train_one(X_all: np.ndarray, y_arr: np.ndarray, label_name: str) -> tuple:
             """Fit XGBoost + calibration for one direction. Returns (model, holdout_auc, cv_auc)."""
-            X_all = feat_df[active_features].values
             # Time-ordered holdout — no shuffle
             X_tr, X_te, y_tr, y_te = train_test_split(X_all, y_arr, test_size=0.2, shuffle=False)
             _n_pos = int(sum(y_tr == 1))
@@ -466,7 +473,7 @@ class ModelTrainer:
 
         # ── 3–5. Train BUY model ─────────────────────────────────────────────
         y_buy = feat_df["label"].values.astype(int)
-        buy_model, holdout_auc, mean_cv_auc = _train_one(y_buy, "BUY")
+        buy_model, holdout_auc, mean_cv_auc = _train_one(feat_df[active_features].values, y_buy, "BUY")
         logger.info(f"[trainer] {symbol}: BUY CV AUC={mean_cv_auc:.3f}, holdout AUC={holdout_auc:.3f}")
 
         if holdout_auc < self.MIN_AUC:
@@ -514,21 +521,17 @@ class ModelTrainer:
             }
 
         # ── G6: Train dedicated SHORT model ──────────────────────────────────
-        # SHORT labels: 1 when price FALLS > 1.5×ATR within horizon candles.
-        feat_df_short = feat_df.copy()
-        _short_raw = _label_short(feat_df_short, horizon=label_horizon)
-        feat_df_short["label"] = _short_raw
-        feat_df_short = feat_df_short.dropna(subset=["label"])
+        # X_short_arr / y_short_arr were extracted before the live_df merge so they
+        # still have _close/_atr14; their length matches because both come from feat_df
+        # after the single dropna() that removed NaN features AND NaN label rows.
         short_model, short_auc, _ = (None, 0.0, 0.0)
-        if len(feat_df_short) >= effective_min_rows:
-            short_model, short_auc, _ = _train_one(
-                feat_df_short["label"].values.astype(int), "SHORT"
-            )
+        if len(y_short_arr) >= effective_min_rows:
+            short_model, short_auc, _ = _train_one(X_short_arr, y_short_arr, "SHORT")
             logger.info(f"[trainer] {symbol}: SHORT holdout AUC={short_auc:.3f}")
         else:
             logger.warning(
                 f"[trainer] {symbol}: insufficient rows for SHORT model "
-                f"({len(feat_df_short)} < {effective_min_rows}) — skipping"
+                f"({len(y_short_arr)} < {effective_min_rows}) — skipping"
             )
 
         # ── 6. Persist models ─────────────────────────────────────────────────
