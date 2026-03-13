@@ -477,17 +477,23 @@ class _IBKRManager:
             self._place_bracket_async(contract, action, quantity, take_profit_price, stop_loss_price)
         )
 
-    def ensure_connected_sync(self) -> bool:
+    def ensure_connected_sync(self, timeout: float = 12.0) -> bool:
         """
         Synchronously ensure the singleton IB connection is live.
         Runs _ensure_connected() on the background loop (where ib_insync lives).
         Returns True if connected, False if Gateway is unreachable.
         Unlike get_balance(), exceptions are NOT swallowed here.
-        Timeout is 90 s — long enough to survive all 4 connect retries (4 × 15 s)
-        plus delays, so trading callers (ForwardEngine) are never cut short.
+
+        timeout: how long to wait for the connect handshake.
+          - Default 12 s — fast-fail for Celery/scheduler callers so a down
+            Gateway doesn't block the entire signal tick for all brokers.
+            (12 s is slightly longer than one _CONNECT_TIMEOUT=15 s attempt but
+            the background _reconnect_loop manages retries independently.)
+          - Pass timeout=90.0 from ForwardEngine trade callers that have already
+            called connect() and need to survive all 4 retries before giving up.
         """
         self._start()
-        return self._submit(self._ensure_connected(), timeout=90.0)
+        return self._submit(self._ensure_connected(), timeout=timeout)
 
     def get_ib(self) -> "IB":
         """
@@ -1047,16 +1053,24 @@ class IBKRClient(AbstractBroker):
         """
         return _get_manager().get_ib()
 
-    async def connect(self) -> None:
+    async def connect(self, timeout: float = 12.0) -> None:
         """
         Ensure the singleton IBKR manager is connected (idempotent).
         Submits _ensure_connected directly to the background loop so the real
         socket state is checked — no exception swallowing.
+
+        timeout: forwarded to ensure_connected_sync().
+          - 12 s (default): fast-fail for scheduler/regime callers so a down
+            Gateway doesn't stall all other brokers' strategies.
+          - 90 s: used by ForwardEngine trade callers (passed explicitly) so a
+            live trade attempt survives all 4 connection retries before refusing.
         """
         _get_manager()._start()
         loop = asyncio.get_running_loop()
         try:
-            connected = await loop.run_in_executor(None, _get_manager().ensure_connected_sync)
+            connected = await loop.run_in_executor(
+                None, lambda: _get_manager().ensure_connected_sync(timeout=timeout)
+            )
         except Exception as exc:
             raise ConnectionError(
                 f"IBKRClient: could not connect to IB Gateway: {exc}"

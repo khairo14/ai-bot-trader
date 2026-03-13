@@ -262,77 +262,30 @@ def run_signals(self):
         )
         from sqlalchemy import select
 
-        async def _run():
-            signal_engine = SignalEngine()
-            forward_engine = ForwardEngine()
-            total_run = 0
-            total_errors = 0
+        async def _run_broker_group(broker_name: str, strategies: list) -> tuple[int, int]:
+            """
+            Process all strategies for ONE broker sequentially, using a dedicated
+            DB session.  Runs concurrently with other broker groups via asyncio.gather.
 
+            Isolation guarantees:
+            - Each broker group has its own AsyncSession → no cross-broker session
+              sharing, no lock contention.
+            - ForwardEngine is per-group → balance/position state is broker-scoped.
+            - A crash or long IBKR connect timeout in one group never delays another.
+            """
             from api.websocket import manager as ws_manager
             from notifications.notifier import notifier as _notify
 
+            local_signal_engine = SignalEngine()
+            local_forward_engine = ForwardEngine()
+            group_run = 0
+            group_errors = 0
+
             async with AsyncSessionLocal() as session:
-                result = await session.execute(
-                    # Exclude paper strategies — they are handled by the
-                    # wall-clock-aligned in-process forward_test scheduler
-                    # (main.py lifespan → _forward_test_scheduler).  Running
-                    # them here too would create duplicate signals + trades.
-                    select(StrategyModel).where(
-                        StrategyModel.is_active == True,
-                        StrategyModel.is_paper == False,
-                    )
-                )
-                active_strategies = result.scalars().all()
+                # Hydrate this group's ForwardEngine from the DB.
+                await local_forward_engine.initialize(session)
 
-                # Hydrate in-memory state from DB before processing any signal
-                await forward_engine.initialize(session)
-
-                # Reconcile ghost positions FIRST: mark DB OPEN trades as FILLED
-                # that the broker already closed via SL/TP bracket orders.  Running
-                # this before monitor_sl_tp prevents the monitor from placing a
-                # duplicate close order for positions the broker already exited.
-                try:
-                    _ghosts = await forward_engine.reconcile_positions(session)
-                    if _ghosts:
-                        logger.info(f"[signal_runner] Reconciled {_ghosts} ghost position(s)")
-                except Exception as _rec_err:
-                    logger.warning(f"[signal_runner] Reconcile error (non-fatal): {_rec_err}", exc_info=True)
-
-                # Software SL/TP enforcement — runs AFTER reconcile so it only
-                # fires on positions that are genuinely still open at the broker.
-                try:
-                    _sl_closed = await forward_engine.monitor_sl_tp(session)
-                    if _sl_closed:
-                        logger.info(f"[signal_runner] SL/TP monitor closed {_sl_closed} position(s)")
-                except Exception as _mon_err:
-                    logger.debug(f"[signal_runner] SL/TP monitor error (non-fatal): {_mon_err}")
-
-                # IMP-31: resolve stale PENDING trades before running strategies
-                # so they don't hold position slots indefinitely.
-                try:
-                    _pending_resolved = await forward_engine.cleanup_stale_pending_trades(session)
-                    if _pending_resolved:
-                        logger.info(f"[signal_runner] IMP-31: resolved {_pending_resolved} stale PENDING trade(s)")
-                except Exception as _pend_err:
-                    logger.debug(f"[signal_runner] PENDING cleanup error (non-fatal): {_pend_err}")
-
-                # F-083: Commit monitor/reconcile changes before the strategy loop.
-                # If the first strategy below raises and triggers session.rollback(),
-                # WITHOUT this commit the SL/TP closing orders already sent to the
-                # broker would be undone in the DB — leaving ghost OPEN trades.
-                try:
-                    await session.commit()
-                except Exception as _pre_commit_err:
-                    # This is a critical failure: SL/TP monitor changes won't be
-                    # persisted, positions may be unprotected. Raise so the Celery
-                    # task retries rather than continuing with a dirty session.
-                    logger.error(
-                        f"[signal_runner] Monitor/reconcile pre-commit failed — "
-                        f"aborting this run to avoid ghost positions: {_pre_commit_err}"
-                    )
-                    raise
-
-                for strat in active_strategies:
+                for strat in strategies:
                     params = strat.parameters or {}
                     strategy_type = params.get("strategy_type") or params.get("strategy_name")
                     symbol = params.get("symbol")
@@ -371,12 +324,19 @@ def run_signals(self):
                         _regime_filter: list[str] | None = params.get("regime_filter")
 
                         # Step 3: classify market regime (only when routing is enabled)
+                        # _ohlcv is pre-fetched here for the regime classifier and reused
+                        # by signal_engine.run() to avoid a second broker round-trip.
+                        # Initialise to None so the data= kwarg below is always defined
+                        # even when the broker connect or OHLCV fetch fails (BUG-MED-01).
+                        _ohlcv = None
                         _active_strategy_type = strategy_type  # may be swapped for auto_switch
                         if _regime_enabled:
                             try:
                                 from brokers import get_broker as _get_broker
                                 from core.regime_classifier import regime_classifier as _rc
                                 _broker_obj = _get_broker(strat.broker.value)
+                                # Default 12 s fast-fail: a down broker won't stall
+                                # this group's candle tick.
                                 await _broker_obj.connect()
                                 _ohlcv = await _broker_obj.get_ohlcv(symbol, timeframe, limit=max(limit, 100))
                                 # IMP-30: pass asset_class so classify() selects the
@@ -424,7 +384,7 @@ def run_signals(self):
                                         # Find first allowed strategy available in the engine
                                         _candidate = next(
                                             (s for s in _allowed
-                                             if s in signal_engine._strategies),
+                                             if s in local_signal_engine._strategies),
                                             None,
                                         )
                                         # If none are loaded yet, fall back to any name in the map
@@ -512,7 +472,7 @@ def run_signals(self):
                         # signal_engine.run() skips its own broker.get_ohlcv() call.
                         # Without data=, every strategy fetches OHLCV a second time —
                         # unnecessary broker round-trips and rate-limit consumption.
-                        sig = await signal_engine.run(
+                        sig = await local_signal_engine.run(
                             strategy_name=_active_strategy_type,
                             symbol=symbol,
                             broker_name=strat.broker.value,
@@ -707,7 +667,7 @@ def run_signals(self):
                         conf = 1.0
                         if sig.signal in _TRACKABLE_SIGNALS and _min_conf > 0.0:
                             conf = await _confluence_score(
-                                signal_engine, strategy_type, symbol,
+                                local_signal_engine, strategy_type, symbol,
                                 strat.broker.value, timeframe, sig.signal,
                             )
                             if conf < _min_conf:
@@ -787,7 +747,7 @@ def run_signals(self):
                             pass
 
                         # ── Pipe through ForwardEngine ───────────────────────────
-                        trade = await forward_engine.process_signal(
+                        trade = await local_forward_engine.process_signal(
                             signal=sig,
                             execution_mode=strat.execution_mode.value,
                             is_paper=strat.is_paper,
@@ -812,33 +772,135 @@ def run_signals(self):
                         # reduces available balance, but Strategy B's fallback balance
                         # still reads the pre-A value stored at initialization time).
                         try:
-                            await forward_engine.initialize(session)
+                            await local_forward_engine.initialize(session)
                         except Exception as _rh_err:
                             logger.debug(f"[signal_runner] ForwardEngine re-hydrate failed (non-fatal): {_rh_err}")
 
                         logger.info(
-                            f"[signal_runner] ✓ {strat.name} | {symbol} | {sig.signal} "
+                            f"[signal_runner] ✓ [{broker_name}] {strat.name} | {symbol} | {sig.signal} "
                             f"@ {sig.entry_price} (conf={sig.confidence:.2f}) "
                             f"acted_on={db_signal.acted_on}"
                         )
                         # F-010: record that we processed this candle so the next
                         # Celery tick skips it (candle hasn't changed).
                         _last_candle_fired[strat.id] = _last_close_ts
-                        total_run += 1
+                        group_run += 1
 
                     except Exception as e:
                         await session.rollback()
                         logger.error(
-                            f"[signal_runner] ✗ Strategy id={strat.id} name='{strat.name}': {e}",
+                            f"[signal_runner] ✗ [{broker_name}] Strategy id={strat.id} name='{strat.name}': {e}",
                             exc_info=True,
                         )
-                        total_errors += 1
+                        group_errors += 1
                         # BUG-MED-01 FIX: persist regime hysteresis state to Redis so it
                         # survives Celery worker restarts even when a strategy errors out.
                         try:
                             _save_regime_state_to_redis()
                         except Exception as _redis_err:
                             logger.debug(f"[signal_runner] Failed to save regime state after error: {_redis_err}")
+
+            return group_run, group_errors
+
+        async def _run():
+            total_run = 0
+            total_errors = 0
+
+            # ── Phase 1: reconcile / monitor / PENDING cleanup ────────────────
+            # Use a shared short-lived session for housekeeping only.
+            # A single shared ForwardEngine is fine here because reconcile and
+            # monitor iterate per-broker internally without storing trade state.
+            housekeeping_engine = ForwardEngine()
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    # Exclude paper strategies — they are handled by the
+                    # wall-clock-aligned in-process forward_test scheduler
+                    # (main.py lifespan → _forward_test_scheduler).  Running
+                    # them here too would create duplicate signals + trades.
+                    select(StrategyModel).where(
+                        StrategyModel.is_active == True,
+                        StrategyModel.is_paper == False,
+                    )
+                )
+                active_strategies = result.scalars().all()
+
+                await housekeeping_engine.initialize(session)
+
+                # Reconcile ghost positions FIRST: mark DB OPEN trades as FILLED
+                # that the broker already closed via SL/TP bracket orders.  Running
+                # this before monitor_sl_tp prevents the monitor from placing a
+                # duplicate close order for positions the broker already exited.
+                try:
+                    _ghosts = await housekeeping_engine.reconcile_positions(session)
+                    if _ghosts:
+                        logger.info(f"[signal_runner] Reconciled {_ghosts} ghost position(s)")
+                except Exception as _rec_err:
+                    logger.warning(f"[signal_runner] Reconcile error (non-fatal): {_rec_err}", exc_info=True)
+
+                # Software SL/TP enforcement — runs AFTER reconcile so it only
+                # fires on positions that are genuinely still open at the broker.
+                try:
+                    _sl_closed = await housekeeping_engine.monitor_sl_tp(session)
+                    if _sl_closed:
+                        logger.info(f"[signal_runner] SL/TP monitor closed {_sl_closed} position(s)")
+                except Exception as _mon_err:
+                    logger.debug(f"[signal_runner] SL/TP monitor error (non-fatal): {_mon_err}")
+
+                # IMP-31: resolve stale PENDING trades before running strategies
+                # so they don't hold position slots indefinitely.
+                try:
+                    _pending_resolved = await housekeeping_engine.cleanup_stale_pending_trades(session)
+                    if _pending_resolved:
+                        logger.info(f"[signal_runner] IMP-31: resolved {_pending_resolved} stale PENDING trade(s)")
+                except Exception as _pend_err:
+                    logger.debug(f"[signal_runner] PENDING cleanup error (non-fatal): {_pend_err}")
+
+                # F-083: Commit monitor/reconcile changes before the strategy loop.
+                # If the first strategy below raises and triggers session.rollback(),
+                # WITHOUT this commit the SL/TP closing orders already sent to the
+                # broker would be undone in the DB — leaving ghost OPEN trades.
+                try:
+                    await session.commit()
+                except Exception as _pre_commit_err:
+                    # This is a critical failure: SL/TP monitor changes won't be
+                    # persisted, positions may be unprotected. Raise so the Celery
+                    # task retries rather than continuing with a dirty session.
+                    logger.error(
+                        f"[signal_runner] Monitor/reconcile pre-commit failed — "
+                        f"aborting this run to avoid ghost positions: {_pre_commit_err}"
+                    )
+                    raise
+
+            # ── Phase 2: per-broker parallel signal generation + execution ────
+            # Group active strategies by broker name so each group gets its own
+            # isolated asyncio.Task, DB session, and ForwardEngine instance.
+            # Binance, Alpaca, and IBKR groups race concurrently — a 12 s IBKR
+            # connect timeout never stalls Binance/Alpaca signals.
+            from collections import defaultdict as _defaultdict
+            broker_groups: dict[str, list] = _defaultdict(list)
+            for strat in active_strategies:
+                broker_groups[strat.broker.value].append(strat)
+
+            if broker_groups:
+                results = await asyncio.gather(
+                    *[
+                        _run_broker_group(broker_name, strategies)
+                        for broker_name, strategies in broker_groups.items()
+                    ],
+                    return_exceptions=True,
+                )
+                for broker_name, result in zip(broker_groups.keys(), results):
+                    if isinstance(result, Exception):
+                        logger.error(
+                            f"[signal_runner] Broker group '{broker_name}' raised an "
+                            f"unhandled exception: {result}",
+                            exc_info=result,
+                        )
+                        total_errors += 1
+                    else:
+                        r, e = result
+                        total_run += r
+                        total_errors += e
 
             logger.info(
                 f"[signal_runner] Completed: {total_run} strategies run, {total_errors} errors."
