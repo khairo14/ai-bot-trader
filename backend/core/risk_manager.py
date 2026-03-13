@@ -69,6 +69,10 @@ class RiskManager:
         # Per-broker state — keyed by broker name (binance/alpaca/ibkr)
         # {"binance": {"consecutive_losses": 1, "circuit_breaker_active": False, "circuit_breaker_date": "2026-03-07"}}
         self._per_broker: dict[str, dict] = {}
+        # Cross-process reset propagation: track mtime of the state file so that
+        # when the FastAPI container resets and saves, the Celery worker detects
+        # the change on the next validate() call and reloads automatically.
+        self._state_file_mtime: float = 0.0
         self._load_state()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -118,6 +122,11 @@ class RiskManager:
                 f"per_strategy_count={len(self._per_strategy)} "
                 f"per_broker_count={len(self._per_broker)}"
             )
+            # Record mtime so _maybe_reload_state() knows this load is current.
+            try:
+                self._state_file_mtime = os.path.getmtime(_STATE_FILE)
+            except OSError:
+                pass
         except Exception as exc:
             logger.warning(f"[RiskManager] Could not load risk state: {exc}")
 
@@ -157,6 +166,11 @@ class RiskManager:
                     tmp.write(payload)
                     tmp_path = tmp.name
                 os.replace(tmp_path, _STATE_FILE)
+                # Update mtime so our own write doesn't trigger a redundant reload.
+                try:
+                    self._state_file_mtime = os.path.getmtime(_STATE_FILE)
+                except OSError:
+                    pass
             except Exception as _replace_err:
                 logger.warning(f"[RiskManager] Could not atomically save risk state: {_replace_err}")
                 if tmp_path:
@@ -166,6 +180,27 @@ class RiskManager:
                         pass
         except Exception as exc:
             logger.warning(f"[RiskManager] Could not save risk state: {exc}")
+
+    def _maybe_reload_state(self) -> None:
+        """Re-load persisted state when risk_state.json has been modified externally.
+
+        This propagates manual resets performed via the FastAPI process to the
+        Celery worker process (and vice-versa), since each runs its own in-memory
+        RiskManager singleton.  The check is a single stat() syscall — cheap
+        enough to call on every validate().
+        """
+        try:
+            if not os.path.exists(_STATE_FILE):
+                return
+            mtime = os.path.getmtime(_STATE_FILE)
+            if mtime != self._state_file_mtime:
+                logger.info(
+                    "[RiskManager] State file changed externally — reloading "
+                    f"(stored mtime={self._state_file_mtime}, file mtime={mtime})"
+                )
+                self._load_state()
+        except OSError:
+            pass
 
     def validate(
         self,
@@ -187,6 +222,9 @@ class RiskManager:
         asset_exposure: total notional of already-open positions in signal.symbol,
         used to enforce max_exposure_per_asset_pct as a hard gate (not just a cap).
         """
+        # Propagate external resets (e.g., from the FastAPI container) to this
+        # process's in-memory singleton before checking any limits.
+        self._maybe_reload_state()
         # ── Resolve effective risk parameters ─────────────────────────────────
         # Per-broker DB overrides take precedence; NULL fields use global config.
         bs = broker_settings or {}
