@@ -143,8 +143,13 @@ class ForwardEngine:
     # ──────────────────────────────────────────────────────────────────────────
 
     @staticmethod
-    async def _daily_pnl(db_session, broker: str | None = None) -> float:
-        """Return today's realised + unrealized P&L, optionally filtered to one broker."""
+    async def _daily_pnl(db_session, broker: str | None = None, is_paper: bool | None = None) -> float:
+        """Return today's realised + unrealized P&L, optionally filtered to one broker.
+
+        BUG-LOW-05 FIX: pass is_paper=True to get only paper P&L, is_paper=False for
+        only live P&L, or is_paper=None (default) to sum both (used by portfolio view).
+        Without this, a bad paper day could trip the live circuit breaker and vice versa.
+        """
         # BUG-1 FIX: build today_start as a tz-naive UTC datetime so it matches
         # the TIMESTAMP WITHOUT TIME ZONE columns in the DB.  Previously the code
         # called datetime.now(utc).replace(..., tzinfo=None) which first creates a
@@ -178,43 +183,57 @@ class ForwardEngine:
             except ValueError:
                 pass
 
-        # Bug-15 FIX: separate paper and live P&L so a large live loss does
-        # not trip the paper circuit-breaker and vice versa.  Only paper rows
-        # carry is_paper == True; LiveTrade rows are always live.
-        q_realised_paper = await db_session.execute(
-            select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
-                Trade.is_paper == True,
-                Trade.status == OrderStatus.FILLED,
-                Trade.closed_at >= today_start,
-                *broker_filter,
+        # BUG-LOW-05 FIX + Bug-15 FIX: gate each side behind is_paper so paper
+        # losses cannot trip the live circuit breaker (and vice versa).
+        # is_paper=True  → only Trade rows (paper)      is_paper=False → only LiveTrade rows (live)
+        # is_paper=None  → sum both sides               (used by portfolio / dashboard queries)
+        realised_paper = 0.0
+        realised_live  = 0.0
+        unrealized_paper = 0.0
+        unrealized_live  = 0.0
+
+        if is_paper is not False:   # True or None → include paper rows
+            q_rp = await db_session.execute(
+                select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
+                    Trade.is_paper == True,
+                    Trade.status == OrderStatus.FILLED,
+                    Trade.closed_at >= today_start,
+                    *broker_filter,
+                )
             )
-        )
-        q_realised_live = await db_session.execute(
-            select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
-                LiveTrade.status == OrderStatus.FILLED,
-                LiveTrade.closed_at >= today_start,
-                *live_broker_filter,
+            realised_paper = q_rp.scalar_one()
+            q_op = await db_session.execute(
+                select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
+                    Trade.is_paper == True,
+                    Trade.status == OrderStatus.OPEN,
+                    Trade.pnl.isnot(None),
+                    Trade.opened_at >= today_start,
+                    *broker_filter,
+                )
             )
-        )
-        realised: float = q_realised_paper.scalar_one() + q_realised_live.scalar_one()
-        q_open_paper = await db_session.execute(
-            select(func.coalesce(func.sum(Trade.pnl), 0.0)).where(
-                Trade.is_paper == True,
-                Trade.status == OrderStatus.OPEN,
-                Trade.pnl.isnot(None),
-                Trade.opened_at >= today_start,
-                *broker_filter,
+            unrealized_paper = q_op.scalar_one()
+
+        if is_paper is not True:    # False or None → include live rows
+            q_rl = await db_session.execute(
+                select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
+                    LiveTrade.status == OrderStatus.FILLED,
+                    LiveTrade.closed_at >= today_start,
+                    *live_broker_filter,
+                )
             )
-        )
-        q_open_live = await db_session.execute(
-            select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
-                LiveTrade.status == OrderStatus.OPEN,
-                LiveTrade.pnl.isnot(None),
-                LiveTrade.opened_at >= today_start,
-                *live_broker_filter,
+            realised_live = q_rl.scalar_one()
+            q_ol = await db_session.execute(
+                select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
+                    LiveTrade.status == OrderStatus.OPEN,
+                    LiveTrade.pnl.isnot(None),
+                    LiveTrade.opened_at >= today_start,
+                    *live_broker_filter,
+                )
             )
-        )
-        unrealized: float = q_open_paper.scalar_one() + q_open_live.scalar_one()
+            unrealized_live = q_ol.scalar_one()
+
+        realised   = realised_paper  + realised_live
+        unrealized = unrealized_paper + unrealized_live
         return realised + unrealized
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -247,7 +266,9 @@ class ForwardEngine:
         # setting derived from .env.  Without this, flipping a strategy to is_paper=False
         # would still trade against the paper endpoint if that's what .env points to.
         broker = get_broker(signal.broker, force_paper=is_paper)
-        await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
+        # Use 90 s timeout here (trade execution path) so IBKR gets all 4 retries
+        # before we refuse the order.  The scheduler/regime path uses 12 s (fast-fail).
+        await broker.connect(timeout=90.0)  # type: ignore[call-arg]  # no-op for Binance/Alpaca
 
         # ── Get balance + open count ──────────────────────
         # Both paper and live use the real broker API — paper broker instances
@@ -388,10 +409,12 @@ class ForwardEngine:
                 logger.debug(f"[ForwardEngine] Could not load broker settings for {broker_key}: {_bs_err}")
 
         # ── Daily P&L from DB filtered to this broker (for circuit breaker) ──
+        # BUG-LOW-05 FIX: pass is_paper so paper losses don't trip the live
+        # circuit breaker and live losses don't block paper strategies.
         daily_pnl = 0.0
         if db_session is not None:
             try:
-                daily_pnl = await self._daily_pnl(db_session, broker=broker_key)
+                daily_pnl = await self._daily_pnl(db_session, broker=broker_key, is_paper=is_paper)
             except Exception as exc:
                 logger.warning(f"[ForwardEngine] Could not compute daily_pnl: {exc}")
 
@@ -924,7 +947,8 @@ class ForwardEngine:
         broker = get_broker(_broker_name_close, force_paper=trade.is_paper)
 
         try:
-            await broker.connect()   # no-op for Binance/Alpaca; ensures IBKR singleton is live
+            # 90 s timeout: position-close path needs the same retry budget as order entry.
+            await broker.connect(timeout=90.0)  # type: ignore[call-arg]  # no-op for Binance/Alpaca
         except Exception as _conn_err:
             logger.warning(f"[ForwardEngine] Broker connect failed before close: {_conn_err}")
 
@@ -1342,6 +1366,27 @@ class ForwardEngine:
         self._emergency_stop_active = True
         closed = 0
         logger.warning("[ForwardEngine] ⚠️ EMERGENCY STOP ACTIVATED")
+
+        # GAP-04 FIX: dispatch an email + in-app notification immediately so the
+        # operator is alerted even if they are not watching the dashboard.
+        if db_session is not None:
+            try:
+                from notifications.notifier import notifier as _emg_notifier
+                await _emg_notifier.emergency(
+                    db_session,
+                    title="🚨 EMERGENCY STOP ACTIVATED",
+                    message=(
+                        "The ForwardEngine emergency stop has been triggered. "
+                        "All open positions are being closed immediately. "
+                        "Manual review is required before re-enabling trading."
+                    ),
+                    metadata={"source": "forward_engine.emergency_stop"},
+                )
+                await db_session.commit()
+            except Exception as _emg_notif_err:
+                logger.error(
+                    f"[ForwardEngine] Emergency stop notification failed (non-fatal): {_emg_notif_err}"
+                )
 
         if db_session is not None:
             # DB-authoritative: close ALL open trades (paper and live).
