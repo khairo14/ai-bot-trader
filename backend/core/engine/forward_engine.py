@@ -2560,9 +2560,17 @@ class ForwardEngine:
                 )
                 # Strategy.symbol does not exist as a column — the symbol is stored
                 # inside the JSON parameters field as parameters["symbol"].
+                _active_strats_list = _active_strats_q.scalars().all()
                 _active_orphan_syms = {
                     _normalize((s.parameters or {}).get("symbol", ""), _orph_broker)
-                    for s in _active_strats_q.scalars().all()
+                    for s in _active_strats_list
+                    if (s.parameters or {}).get("symbol")
+                }
+                # Map normalized_symbol → strategy.name so orphan trades get the
+                # user-defined name even when no recent signal exists in the DB.
+                _active_orphan_sym_to_name: dict[str, str] = {
+                    _normalize((s.parameters or {}).get("symbol", ""), _orph_broker): s.name
+                    for s in _active_strats_list
                     if (s.parameters or {}).get("symbol")
                 }
 
@@ -2595,8 +2603,11 @@ class ForwardEngine:
                     # Preserve strategy_name BEFORE any potential delink (osig=None).
                     # If we later set _osig=None to avoid the unique constraint, we
                     # still want the recovered trade to show the correct strategy.
+                    # Fall back to the active Strategy's user-defined name before
+                    # resorting to "unknown".
                     _orph_strategy_name: str = (
-                        _osig.strategy_name if _osig and _osig.strategy_name else "unknown"
+                        _osig.strategy_name if _osig and _osig.strategy_name
+                        else _active_orphan_sym_to_name.get(_op_norm, "unknown")
                     )
 
                     # Dust guard: skip positions whose notional value is below the
