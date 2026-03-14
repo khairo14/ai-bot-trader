@@ -591,12 +591,12 @@ export default function ForwardTest() {
             <p className="text-gray-600 text-sm">No open positions</p>
           </div>
         ) : (
-          <div className="overflow-hidden">
-            <table className="w-full text-xs table-fixed">
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs min-w-[860px]">
               <thead>
                 <tr className="text-gray-500 border-b border-dark-600">
                   <th className="text-left px-3 py-2 font-medium w-10">#</th>
-                  <th className="text-left px-3 py-2 font-medium w-20">Symbol</th>
+                  <th className="text-left px-3 py-2 font-medium w-24">Symbol</th>
                   <th className="text-left px-3 py-2 font-medium w-14">Side</th>
                   <th className="text-left px-3 py-2 font-medium w-24">Entry</th>
                   <th className="text-left px-3 py-2 font-medium w-20">Stop Loss</th>
@@ -605,7 +605,7 @@ export default function ForwardTest() {
                   <th className="text-left px-3 py-2 font-medium w-16">Broker</th>
                   <th className="text-left px-3 py-2 font-medium w-14">Mode</th>
                   <th className="text-left px-3 py-2 font-medium w-36">Strategy</th>
-                  <th className="text-left px-3 py-2 font-medium w-24">Opened</th>
+                  <th className="text-left px-3 py-2 font-medium w-36">Opened</th>
                   <th className="text-left px-3 py-2 font-medium w-32"></th>
                 </tr>
               </thead>
@@ -632,7 +632,7 @@ export default function ForwardTest() {
                     </td>
                     <td className="px-3 py-2 text-gray-400 truncate">{pos.strategy_name ?? '—'}</td>
                     <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
-                      {pos.opened_at ? parseUtc(pos.opened_at)?.toLocaleTimeString() : '—'}
+                      {pos.opened_at ? parseUtc(pos.opened_at)?.toLocaleString() : '—'}
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-1.5">
@@ -794,22 +794,22 @@ export default function ForwardTest() {
             const pageRows = filteredTrades.slice(page * TRADES_PAGE_SIZE, (page + 1) * TRADES_PAGE_SIZE)
             return (
               <>
-                <div className="overflow-hidden">
-                  <table className="w-full text-xs table-fixed">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs min-w-[900px]">
                     <thead>
                       <tr className="text-gray-500 border-b border-dark-600">
                         <th className="text-left px-2 py-2 font-medium w-10">#</th>
-                        <th className="text-left px-2 py-2 font-medium w-20">Symbol</th>
+                        <th className="text-left px-2 py-2 font-medium w-24">Symbol</th>
                         <th className="text-left px-2 py-2 font-medium w-14">Side</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Entry</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Exit</th>
                         <th className="text-left px-2 py-2 font-medium w-20">SL</th>
                         <th className="text-left px-2 py-2 font-medium w-20">TP</th>
                         <th className="text-left px-2 py-2 font-medium w-28">P&L</th>
-                        <th className="text-left px-2 py-2 font-medium w-20">Status</th>
+                        <th className="text-left px-2 py-2 font-medium w-24">Status</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Broker</th>
-                        <th className="text-left px-2 py-2 font-medium">Strategy</th>
-                        <th className="text-left px-2 py-2 font-medium w-32">Opened</th>
+                        <th className="text-left px-2 py-2 font-medium w-36">Strategy</th>
+                        <th className="text-left px-2 py-2 font-medium w-36">Opened</th>
                       </tr>
                     </thead>
                     <tbody>
