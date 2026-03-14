@@ -17,7 +17,7 @@ from core.auth import get_current_user, require_admin
 router = APIRouter()
 
 
-def _trade_dict(t: Trade) -> dict:
+def _trade_dict(t: Trade | LiveTrade) -> dict:
     return {
         "id": t.id,
         "symbol": t.symbol,
@@ -44,8 +44,8 @@ async def get_open_positions(
     _user=Depends(get_current_user),
 ):
     """Get all currently open (paper or live) positions."""
-    paper = (await db.execute(select(Trade).where(Trade.status == OrderStatus.OPEN))).scalars().all()
-    live  = (await db.execute(select(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN))).scalars().all()
+    paper = list((await db.execute(select(Trade).where(Trade.status == OrderStatus.OPEN))).scalars().all())
+    live  = list((await db.execute(select(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN))).scalars().all())
     return {"positions": [_trade_dict(t) for t in paper + live]}
 
 
@@ -57,14 +57,14 @@ async def get_trade_history(
     _user=Depends(get_current_user),
 ):
     """Get completed trades, newest first. Defaults to last 200; use offset for pagination."""
-    paper = (await db.execute(
+    paper = list((await db.execute(
         select(Trade).where(Trade.status == OrderStatus.FILLED)
         .order_by(desc(Trade.closed_at)).limit(min(limit, 1000)).offset(offset)
-    )).scalars().all()
-    live  = (await db.execute(
+    )).scalars().all())
+    live  = list((await db.execute(
         select(LiveTrade).where(LiveTrade.status == OrderStatus.FILLED)
         .order_by(desc(LiveTrade.closed_at)).limit(min(limit, 1000)).offset(offset)
-    )).scalars().all()
+    )).scalars().all())
     all_trades = sorted(paper + live, key=lambda t: t.closed_at or t.opened_at or datetime.min, reverse=True)[:min(limit, 1000)]
     return {"trades": [_trade_dict(t) for t in all_trades]}
 
@@ -75,12 +75,12 @@ async def export_trade_history(
     _user=Depends(get_current_user),
 ):
     """Download all completed trades as CSV."""
-    paper = (await db.execute(
+    paper = list((await db.execute(
         select(Trade).where(Trade.status == OrderStatus.FILLED).order_by(desc(Trade.closed_at))
-    )).scalars().all()
-    live  = (await db.execute(
+    )).scalars().all())
+    live  = list((await db.execute(
         select(LiveTrade).where(LiveTrade.status == OrderStatus.FILLED).order_by(desc(LiveTrade.closed_at))
-    )).scalars().all()
+    )).scalars().all())
     trades = sorted(paper + live, key=lambda t: t.closed_at or t.opened_at or datetime.min, reverse=True)
 
     buf = io.StringIO()

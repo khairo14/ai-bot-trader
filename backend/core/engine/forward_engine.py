@@ -672,6 +672,22 @@ class ForwardEngine:
                     if broker_key == "ibkr":
                         expiry = meta.get("expiry", "")
                         quantity = max(1, int(getattr(signal, "quantity", 1) or 1))
+                        # Pre-commit PENDING before placing the order to close the orphan window.
+                        if db_session:
+                            try:
+                                db_session.add(trade)
+                                await db_session.commit()
+                                await db_session.refresh(trade)
+                            except Exception as _pre_ml_err:
+                                logger.error(
+                                    f"[ForwardEngine] Pre-commit PENDING (multi-leg) failed for "
+                                    f"{signal.symbol}: {_pre_ml_err} — aborting order to prevent orphan"
+                                )
+                                try:
+                                    await db_session.rollback()
+                                except Exception:
+                                    pass
+                                return None
                         try:
                             result = await broker.place_multi_leg_order(
                                 symbol=signal.symbol,
@@ -684,12 +700,15 @@ class ForwardEngine:
                                 f"[ForwardEngine] LIVE multi-leg IBKR order failed for "
                                 f"{signal.symbol}: {_mleg_err}"
                             )
+                            trade.status = OrderStatus.REJECTED
+                            trade.notes = f"Order rejected: {_mleg_err}"
+                            if db_session:
+                                await db_session.commit()
                             return None
                         trade.entry_price = result.fill_price or signal.entry_price
                         trade.status = OrderStatus.OPEN
                         trade.broker_order_id = result.order_id
                         if db_session:
-                            db_session.add(trade)
                             await db_session.commit()
                             await db_session.refresh(trade)
                         logger.info(
@@ -746,6 +765,27 @@ class ForwardEngine:
                     pass
                 return trade
         mode_tag = "PAPER" if is_paper else "LIVE"
+        # ── Pre-commit the PENDING trade BEFORE calling the broker ───────────
+        # This closes the orphan window: if place_order() succeeds but the process
+        # crashes before the final DB commit, the PENDING row already exists and the
+        # reconcile loop (monitor_sl_tp) will upgrade it to OPEN on the next tick.
+        # If the pre-commit itself fails, we abort — never call the broker without
+        # a DB record, so we cannot create an untracked position.
+        if db_session:
+            try:
+                db_session.add(trade)
+                await db_session.commit()
+                await db_session.refresh(trade)  # assign DB id before broker call
+            except Exception as _pre_err:
+                logger.error(
+                    f"[ForwardEngine] Pre-commit PENDING trade failed for {signal.symbol}: "
+                    f"{_pre_err} — aborting order to prevent orphan"
+                )
+                try:
+                    await db_session.rollback()
+                except Exception:
+                    pass
+                return None
         try:
             result = await broker.place_order(
                 symbol=signal.symbol,
@@ -794,8 +834,8 @@ class ForwardEngine:
             )
             # Return the rejected Trade so callers can set signal_id and acted_on=True.
             # This prevents the same signal from being re-attempted on the next run.
+            # trade is already in DB (pre-committed as PENDING) — only commit the status update.
             if db_session:
-                db_session.add(trade)
                 await db_session.commit()
                 await db_session.refresh(trade)
                 try:
@@ -822,7 +862,7 @@ class ForwardEngine:
             return trade
 
         if db_session:
-            db_session.add(trade)
+            # trade already in DB (pre-committed as PENDING) — commit the OPEN/PENDING status update.
             await db_session.commit()
             await db_session.refresh(trade)
 
