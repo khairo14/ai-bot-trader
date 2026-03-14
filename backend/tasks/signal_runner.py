@@ -422,7 +422,7 @@ def run_signals(self):
                                             entry_price=float(_price),
                                             stop_loss=None, take_profit=None,
                                             confidence=0.0, timeframe=timeframe,
-                                            strategy_name=strategy_type,
+                                            strategy_name=strat.name,
                                             asset_class=getattr(strat.asset_class, "value", "crypto"),
                                             broker=strat.broker.value,
                                             regime=_confirmed_regime,
@@ -445,7 +445,7 @@ def run_signals(self):
                                                 entry_price=float(_price),
                                                 stop_loss=None, take_profit=None,
                                                 confidence=0.0, timeframe=timeframe,
-                                                strategy_name=strategy_type,
+                                                strategy_name=strat.name,
                                                 regime=_confirmed_regime,
                                                 asset_class=_hold_asset,
                                                 broker=strat.broker,
@@ -481,20 +481,15 @@ def run_signals(self):
                             asset_class=getattr(strat.asset_class, "value", None),
                             data=_ohlcv if _ohlcv is not None else None,
                         )
-                        # Tag the signal with the original configured strategy name
-                        # so the DB always reflects what the user configured,
-                        # even if auto-switch ran a different strategy.
+                        # Always store the user-defined strategy name (strat.name) so
+                        # the UI displays the configured strategy name, not the algorithm type.
+                        sig.strategy_name = strat.name
                         if _active_strategy_type != strategy_type:
                             sig.reasons = (sig.reasons or []) + [
                                 f"configured as {strategy_type}, executed as "
                                 f"{_active_strategy_type} via regime auto-switch "
                                 f"(regime: {_confirmed_regime if _regime_enabled else 'n/a'})"
                             ]
-                            # Keep sig.strategy_name as the strategy that actually ran
-                            # (_active_strategy_type) so ML feedback and analytics correctly
-                            # attribute the outcome to the executing strategy, not the
-                            # configured one. Dedup keys on strategy_type below so each
-                            # configured row remains independent.
 
                         # ── Persist signal to DB ─────────────────────────────────
                         # Coerce enums safely
@@ -537,11 +532,9 @@ def run_signals(self):
                         _dup_q = await session.execute(
                             select(SignalModel.id).where(
                                 and_(
-                                    # Key on the configured strategy_type (not the switched
-                                    # sig.strategy_name) so each configured strategy row has
-                                    # its own dedup slot and auto-switch can't eat another
-                                    # row's candle window.
-                                    SignalModel.strategy_name == strategy_type,
+                                    # Key on the user-defined strategy name (strat.name) so
+                                    # each configured strategy row has its own dedup slot.
+                                    SignalModel.strategy_name == strat.name,
                                     SignalModel.symbol == sig.symbol,
                                     SignalModel.signal == sig_type,
                                     SignalModel.timeframe == timeframe,
@@ -614,7 +607,7 @@ def run_signals(self):
                                 # IMP-04 / GAP-06: store category + options data at creation time
                                 signal_type_category=(
                                     "premium_collection"
-                                    if sig.strategy_name in {"iron_condor", "covered_call", "bull_call_spread"}
+                                    if _active_strategy_type in {"iron_condor", "covered_call", "bull_call_spread"}
                                     else "directional"
                                 ),
                                 options_meta=getattr(sig, "options_meta", None),
