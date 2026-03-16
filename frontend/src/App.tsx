@@ -5,7 +5,7 @@ import toast from 'react-hot-toast'
 import {
   LayoutDashboard, FlaskConical, Play, Settings,
   Layers, Zap, ShieldAlert, BookOpen, ChevronLeft, ChevronRight, BarChart2, LogOut,
-  TrendingUp, Code2, GitBranch, ScanSearch
+  TrendingUp, Code2, GitBranch, ScanSearch, Timer
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -21,6 +21,7 @@ import Analytics from './pages/Analytics'
 import StrategyEditor from './pages/StrategyEditor'
 import MultiTimeframe from './pages/MultiTimeframe'
 import MarketScanner from './pages/MarketScanner'
+import Scalping from './pages/Scalping'
 import Login from './pages/Login'
 import axios from 'axios'
 
@@ -39,6 +40,7 @@ const NAV_ITEMS = [
   { to: '/backtest', label: 'Backtest', icon: FlaskConical },
   { to: '/forward-test', label: 'Forward Test', icon: Play },
   { to: '/scanner', label: 'Market Scanner', icon: ScanSearch },
+  { to: '/scalping', label: 'Scalping', icon: Timer },
   { to: '/chart', label: 'Chart', icon: BarChart2 },
   { to: '/analytics', label: 'Analytics', icon: TrendingUp },
   { to: '/strategy-editor', label: 'Strategy Editor', icon: Code2 },
@@ -207,6 +209,7 @@ function ProtectedLayout({ onLogout }: { onLogout: () => void }) {
           <Route path="/backtest" element={<Backtest />} />
           <Route path="/forward-test" element={<ForwardTest />} />
           <Route path="/scanner" element={<MarketScanner />} />
+          <Route path="/scalping" element={<Scalping />} />
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/strategy-editor" element={<StrategyEditor />} />

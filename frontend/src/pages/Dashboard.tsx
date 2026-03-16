@@ -188,6 +188,7 @@ export default function Dashboard() {
   const [editSl, setEditSl] = useState('')
   const [editTp, setEditTp] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
+  const [signalFilter, setSignalFilter] = useState<'all' | 'swing' | 'scalp'>('all')
 
   const enrichPositionsWithLivePnl = useCallback(async (positions: OpenPosition[]): Promise<OpenPosition[]> => {
     if (positions.length === 0) return positions
@@ -390,6 +391,12 @@ export default function Dashboard() {
   const buySignals = signals.filter(s => s.signal === 'BUY').length
   const sellSignals = signals.filter(s => s.signal === 'SELL' || s.signal === 'SHORT').length
   const pnlColor = !portfolio ? 'text-white' : portfolio.today_pnl >= 0 ? 'text-green-400' : 'text-red-400'
+
+  const filteredSignals = signalFilter === 'all'
+    ? signals
+    : signalFilter === 'scalp'
+      ? signals.filter(s => s.strategy_name?.startsWith('scalp_'))
+      : signals.filter(s => !s.strategy_name?.startsWith('scalp_'))
 
   return (
     <div className="p-6 space-y-6">
@@ -977,7 +984,23 @@ export default function Dashboard() {
       {/* Recent Signals */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold text-gray-300">Recent Signals</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-sm font-semibold text-gray-300">Recent Signals</h2>
+            {/* All / Swing / Scalp filter */}
+            {(['all', 'swing', 'scalp'] as const).map(f => (
+              <button
+                key={f}
+                onClick={() => setSignalFilter(f)}
+                className={`text-xs px-2.5 py-1 rounded-full transition-all ${
+                  signalFilter === f
+                    ? 'bg-brand-500/20 text-brand-400 border border-brand-500/40'
+                    : 'bg-dark-700 text-gray-500 hover:text-gray-300 border border-dark-600'
+                }`}
+              >
+                {f === 'all' ? 'All' : f === 'swing' ? 'Swing' : 'Scalp'}
+              </button>
+            ))}
+          </div>
           {signals.length > 0 && (
             <button
               onClick={async () => {
@@ -1005,9 +1028,14 @@ export default function Dashboard() {
             <Activity size={32} className="text-gray-600 mx-auto mb-3" />
             <p className="text-gray-500 text-sm">No signals yet. Start a strategy to see signals here.</p>
           </div>
+        ) : filteredSignals.length === 0 ? (
+          <div className="bg-dark-800 border border-dark-600 rounded-xl p-8 text-center">
+            <Activity size={32} className="text-gray-600 mx-auto mb-3" />
+            <p className="text-gray-500 text-sm">No {signalFilter} signals in the recent feed.</p>
+          </div>
         ) : (
           <div className="space-y-3">
-            {signals.map(s => <SignalCard key={s.id} signal={s} />)}
+            {filteredSignals.map(s => <SignalCard key={s.id} signal={s} />)}
           </div>
         )}
       </div>

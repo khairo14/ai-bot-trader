@@ -339,6 +339,14 @@ export default function Strategies() {
                 </div>
               </div>
               <div className="flex items-center gap-4">
+                {/* Scalping badge */}
+                {typeof s.parameters?.strategy_type === 'string' &&
+                  s.parameters.strategy_type.startsWith('scalp_') && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-900/30 text-yellow-400 border border-yellow-900/50" title="Scalping strategy — short timeframe, fixed stops">
+                    SCALP
+                  </span>
+                )}
+
                 {/* Regime Mode pill */}
                 {s.parameters?.regime_mode === 'auto_switch' && (
                   <span className="text-xs px-1.5 py-0.5 rounded bg-purple-900/30 text-purple-400 border border-purple-900/50" title="Auto-Switch: strategy swaps based on market regime">
