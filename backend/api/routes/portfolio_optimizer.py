@@ -47,6 +47,7 @@ async def get_weights(db: AsyncSession = Depends(get_db)):
         entry = {
             "id": s.id,
             "name": s.name,
+            "strategy_name": s.name,
             "strategy_type": params.get("strategy_type", s.name),
             "symbol": params.get("symbol", ""),
             "broker": s.broker.value if hasattr(s.broker, "value") else str(s.broker),
