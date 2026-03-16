@@ -242,6 +242,14 @@ class RiskManager:
                 {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
             )
             _b["max_consecutive_losses_effective"] = _max_consec
+        # Cache the effective threshold on the per-strategy dict too so record_outcome()
+        # trips the strategy CB at the correct level (e.g. scalp=5, not global=3).
+        if strategy_name := getattr(signal, "strategy_name", None):
+            _ps = self._per_strategy.setdefault(
+                strategy_name,
+                {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
+            )
+            _ps["max_consecutive_losses_effective"] = _max_consec
         # ── Per-broker circuit breaker and consecutive-loss check ──────────────
         if broker:
             b_state = self._per_broker.get(broker, {})
@@ -541,7 +549,10 @@ class RiskManager:
                     f"[RiskManager] Loss on '{strategy_name}' — "
                     f"consecutive_losses={s['consecutive_losses']}"
                 )
-                if s["consecutive_losses"] >= self.max_consecutive_losses:
+                # Use the effective threshold cached by validate() so scalp strategies
+                # (max_consec=5) don't trip at the global default (3).
+                _strat_max_consec = s.get("max_consecutive_losses_effective", self.max_consecutive_losses)
+                if s["consecutive_losses"] >= _strat_max_consec:
                     s["circuit_breaker_active"] = True
                     s["circuit_breaker_date"] = str(date.today())
                     logger.warning(
