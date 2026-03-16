@@ -75,6 +75,25 @@ export default function SignalCard({ signal }: Props) {
   const [confluenceLoading, setConfluenceLoading] = useState(false)
   const [confluence, setConfluence] = useState<{ consensus: string; score: number; tfs: { timeframe: string; signal: string; agrees: boolean }[] } | null>(null)
 
+  // Mirror _HIGHER_TF from signal_runner.py so the UI check uses the same
+  // higher timeframes as the execution gate (primary TF + its two higher TFs).
+  const HIGHER_TF: Record<string, string[]> = {
+    '1m':  ['5m',  '15m'],
+    '3m':  ['15m', '1h'],
+    '5m':  ['15m', '1h'],
+    '15m': ['1h',  '4h'],
+    '30m': ['4h',  '1d'],
+    '1h':  ['4h',  '1d'],
+    '2h':  ['4h',  '1d'],
+    '4h':  ['1d',  '1w'],
+    '6h':  ['1d',  '1w'],
+    '12h': ['1d',  '1w'],
+    '1d':  [],
+    '1w':  [],
+  }
+  const higherTfs = HIGHER_TF[signal.timeframe] ?? ['1h', '4h', '1d']
+  const tfParam = [signal.timeframe, ...higherTfs].join(',')
+
   const checkConfluence = async () => {
     setConfluenceLoading(true)
     try {
@@ -83,7 +102,7 @@ export default function SignalCard({ signal }: Props) {
           symbol: signal.symbol,
           broker: signal.broker,
           strategy_type: signal.strategy_name,
-          timeframes: '1h,4h,1d',
+          timeframes: tfParam,
         },
       })
       const data = r.data
@@ -350,7 +369,7 @@ export default function SignalCard({ signal }: Props) {
               className="flex items-center gap-1.5 text-xs text-gray-600 hover:text-gray-400 transition-colors w-full"
             >
               <GitBranch size={11} className={confluenceLoading ? 'animate-pulse text-brand-400' : ''} />
-              {confluenceLoading ? 'Checking 1h · 4h · 1d…' : 'Check multi-TF confluence'}
+              {confluenceLoading ? `Checking ${[signal.timeframe, ...higherTfs].join(' · ')}…` : 'Check multi-TF confluence'}
             </button>
           )}
         </div>
