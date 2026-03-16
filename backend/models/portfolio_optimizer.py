@@ -200,7 +200,7 @@ async def optimize_portfolio() -> dict:
         "weights": weights,
         "trade_counts": {k: len(v) for k, v in strategy_returns.items()},
         "sharpe_ratios": {
-            n: round((_mean(r) - RISK_FREE_RATE) / _std(r), 3)
+            n: round((_mean(r) - RISK_FREE_RATE) / _std(r), 3) if _std(r) > 0 else round(10.0 * _mean(r), 3)
             for n, r in strategy_returns.items()
             if len(r) >= MIN_TRADES
         },
