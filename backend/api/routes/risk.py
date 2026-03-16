@@ -105,9 +105,10 @@ async def strategy_risk_status():
     _rm._load_state()
     return {
         name: {
-            "circuit_breaker_active": s.get("circuit_breaker_active", False),
-            "consecutive_losses": s.get("consecutive_losses", 0),
-            "circuit_breaker_date": s.get("circuit_breaker_date"),
+            "circuit_breaker_active":         s.get("circuit_breaker_active", False),
+            "consecutive_losses":             s.get("consecutive_losses", 0),
+            "circuit_breaker_date":           s.get("circuit_breaker_date"),
+            "max_consecutive_losses_effective": s.get("max_consecutive_losses_effective"),
         }
         for name, s in _rm._per_strategy.items()
     }

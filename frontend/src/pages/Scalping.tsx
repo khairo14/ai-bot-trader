@@ -27,6 +27,7 @@ interface ScalpSettings {
   min_score: number
   ml_veto_threshold: number
   sr_tp_snap: boolean
+  max_consecutive_losses: number
 }
 
 export default function Scalping() {
@@ -297,6 +298,17 @@ export default function Scalping() {
                   : <ToggleLeft size={22} className="text-gray-600" />
                 }
               </button>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Max Consecutive Losses</label>
+              <input
+                type="number" step="1" min="1" max="20"
+                value={form.max_consecutive_losses ?? settings.max_consecutive_losses}
+                onChange={e => setForm(f => ({ ...f, max_consecutive_losses: parseInt(e.target.value) }))}
+                className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+              />
+              <p className="text-xs text-gray-600 mt-1">CB trips after this many scalp losses in a row (global swing default: 3)</p>
             </div>
           </div>
 

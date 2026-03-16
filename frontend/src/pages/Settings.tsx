@@ -32,6 +32,7 @@ interface StrategyRiskState {
   circuit_breaker_active: boolean
   consecutive_losses: number
   circuit_breaker_date: string | null
+  max_consecutive_losses_effective?: number
 }
 
 interface MLModelInfo {
@@ -486,7 +487,12 @@ export default function Settings() {
                     : <span className="text-brand-500 shrink-0">🟢</span>
                   }
                   <span className="text-sm text-white truncate">{name}</span>
-                  <span className="text-xs text-gray-500 shrink-0">{s.consecutive_losses} losses</span>
+                  <span className="text-xs text-gray-500 shrink-0">
+                    {s.consecutive_losses}
+                    {s.max_consecutive_losses_effective != null
+                      ? ` / ${s.max_consecutive_losses_effective} losses`
+                      : ' losses'}
+                  </span>
                 </div>
                 <button
                   onClick={() => resetStrategyCB(name)}
