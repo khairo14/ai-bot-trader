@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
@@ -78,6 +79,7 @@ async def get_analytics_summary(
     # Fetch resolved outcomes ordered by creation time — limit to last 5000 to prevent memory blowup
     q = await db.execute(
         select(TradeOutcome)
+        .options(joinedload(TradeOutcome.signal))
         .where(*filters)
         .order_by(TradeOutcome.resolved_at)
         .limit(5000)
@@ -197,7 +199,8 @@ async def get_analytics_summary(
     # ── Win rate by broker ────────────────────────────────────────────────────
     broker_stats: dict[str, dict] = defaultdict(lambda: {"total": 0, "wins": 0, "pnl_sum": 0.0})
     for o in outcomes:
-        broker_key = (o.broker or "unknown").lower()
+        raw = o.signal.broker if (o.signal and o.signal.broker) else None
+        broker_key = (raw.value if hasattr(raw, 'value') else str(raw)).lower() if raw else "unknown"
         s = broker_stats[broker_key]
         s["total"] += 1
         pnl = _safe_pnl(o.pnl_pct)
