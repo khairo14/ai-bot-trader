@@ -1588,7 +1588,7 @@ class ForwardEngine:
             logger.info(f"[ForwardEngine] IMP-31: resolved {resolved} stale PENDING trade(s)")
         return resolved
 
-    async def monitor_sl_tp(self, db_session) -> int:
+    async def monitor_sl_tp(self, db_session, strategy_prefix: str | None = None) -> int:
         """
         Software-side SL/TP enforcement — runs every scheduler tick as a
         safety net independent of broker bracket orders.
@@ -1603,6 +1603,12 @@ class ForwardEngine:
         level.  Uses the same `close_position()` path as manual close, so
         PnL, notifications, and risk-manager counters all fire correctly.
 
+        ``strategy_prefix`` — when set, only trades whose ``strategy_name``
+        starts with the given prefix are checked.  Used by the 5s scalping
+        heartbeat to scope its query to scalp trades only without touching the
+        broader swing trade set.  Default ``None`` keeps the existing behaviour
+        (all open trades are checked).
+
         Returns the number of positions closed.
         """
         # IMP-3: skip if another coroutine in the same event loop is already running
@@ -1613,19 +1619,36 @@ class ForwardEngine:
             logger.debug("[ForwardEngine] monitor_sl_tp: already running in this process, skipping.")
             return 0
         async with _MONITOR_SL_TP_LOCK:
-            return await self._monitor_sl_tp_inner(db_session)
+            return await self._monitor_sl_tp_inner(db_session, strategy_prefix=strategy_prefix)
 
-    async def _monitor_sl_tp_inner(self, db_session) -> int:
+    async def _monitor_sl_tp_inner(self, db_session, strategy_prefix: str | None = None) -> int:
         from sqlalchemy import select as _sel
         from db.models import Strategy as _StratModel
 
-        # Fetch ALL open trades (paper + live) — we need trades without SL/TP too for time-based exits.
-        _paper_q = await db_session.execute(
-            _sel(Trade).where(Trade.status == OrderStatus.OPEN)
-        )
-        _live_q = await db_session.execute(
-            _sel(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN)
-        )
+        # Fetch open trades — optionally scoped to a strategy_name prefix.
+        # The scalping 5s heartbeat passes strategy_prefix="scalp_" so only
+        # scalp trades are scanned, leaving swing trades to the 60s heartbeat.
+        if strategy_prefix:
+            _paper_q = await db_session.execute(
+                _sel(Trade).where(
+                    Trade.status == OrderStatus.OPEN,
+                    Trade.strategy_name.like(f"{strategy_prefix}%"),
+                )
+            )
+            _live_q = await db_session.execute(
+                _sel(LiveTrade).where(
+                    LiveTrade.status == OrderStatus.OPEN,
+                    LiveTrade.strategy_name.like(f"{strategy_prefix}%"),
+                )
+            )
+        else:
+            # Fetch ALL open trades (paper + live) — we need trades without SL/TP too for time-based exits.
+            _paper_q = await db_session.execute(
+                _sel(Trade).where(Trade.status == OrderStatus.OPEN)
+            )
+            _live_q = await db_session.execute(
+                _sel(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN)
+            )
         open_trades: list = _paper_q.scalars().all() + _live_q.scalars().all()
         if not open_trades:
             return 0

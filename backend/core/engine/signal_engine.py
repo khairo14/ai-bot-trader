@@ -10,6 +10,7 @@ from core.strategies.iron_condor import IronCondorStrategy
 from core.strategies.covered_call import CoveredCallStrategy
 from core.strategies.bull_call_spread import BullCallSpreadStrategy
 from core.strategies.volatility_squeeze import VolatilitySqueezeStrategy
+from core.strategies.scalping_ema_vwap import ScalpingEmaVwap
 from brokers import get_broker
 
 
@@ -21,6 +22,7 @@ STRATEGY_REGISTRY = {
     "covered_call":       CoveredCallStrategy,
     "bull_call_spread":   BullCallSpreadStrategy,
     "volatility_squeeze": VolatilitySqueezeStrategy,
+    "scalp_ema_vwap":     ScalpingEmaVwap,
 }
 
 # Asset class that each broker trades in for non-options strategies.

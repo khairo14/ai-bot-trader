@@ -9,6 +9,8 @@ from db.database import init_db
 from api.routes import signals, positions, backtest, strategies, brokers, tools, portfolio, forward_test, notifications, ml, charts, auth as auth_routes, regime, analytics, strategy_code, confluence, portfolio_optimizer, risk, scanner
 from api.routes import kline_ws
 from api.routes import regime_settings
+from api.routes import scalping as scalping_routes
+from api.routes import scalping_ws
 from api.websocket import ws_endpoint
 from core.auth import get_current_user
 
@@ -68,6 +70,49 @@ async def _sl_tp_heartbeat():
                     logger.debug(f"[SL/TP Heartbeat] Commit error: {_ce}")
         except Exception as exc:
             logger.error(f"[SL/TP Heartbeat] Tick error: {exc}", exc_info=True)
+
+
+async def _scalping_sl_tp_heartbeat():
+    """
+    Dedicated 5-second SL/TP monitor for scalping trades only.
+
+    Why 5s instead of 60s:
+      Scalp trades have tight stops (0.8 × ATR) and are designed to close
+      in minutes.  The 60s swing heartbeat would leave a breached scalp
+      position open for up to a full minute — unacceptable at 5m timeframes.
+
+    Scope:
+      Only queries trades where strategy_name LIKE 'scalp_%' via the
+      strategy_prefix argument added to ForwardEngine.monitor_sl_tp().
+      Swing trades are never touched here.
+
+    Does NOT call reconcile_positions (too expensive at 5s cadence;
+    the 60s swing heartbeat covers that for all trades including scalp).
+    Does NOT call cleanup_stale_pending_trades (same reason).
+    """
+    from db.database import AsyncSessionLocal
+    from core.engine.forward_engine import get_forward_engine
+
+    _engine = get_forward_engine()
+    logger.info("[Scalp SL/TP Heartbeat] 5-second scalp monitor started.")
+
+    while True:
+        await asyncio.sleep(5)
+        try:
+            async with AsyncSessionLocal() as session:
+                await _engine.initialize(session)
+                try:
+                    closed = await _engine.monitor_sl_tp(session, strategy_prefix="scalp_")
+                    if closed:
+                        logger.info(f"[Scalp SL/TP Heartbeat] Closed {closed} scalp position(s) via SL/TP")
+                except Exception as _me:
+                    logger.debug(f"[Scalp SL/TP Heartbeat] Monitor error: {_me}")
+                try:
+                    await session.commit()
+                except Exception as _ce:
+                    logger.debug(f"[Scalp SL/TP Heartbeat] Commit error: {_ce}")
+        except Exception as exc:
+            logger.error(f"[Scalp SL/TP Heartbeat] Tick error: {exc}", exc_info=True)
 
 
 async def _forward_test_scheduler():
@@ -337,12 +382,15 @@ async def lifespan(app: FastAPI):
 
     # Start price streaming cache (feeds monitor_sl_tp with sub-second prices)
     from core.engine.price_stream import price_stream_manager
+    from core.engine.scalping_stream import scalping_stream_manager
     from db.database import AsyncSessionLocal as _ASL
     stream_task = asyncio.create_task(price_stream_manager.start(_ASL))
+    scalping_stream_task = asyncio.create_task(scalping_stream_manager.start(_ASL))
 
     # Start auto-scheduler (skip if interval set to 0 — manual-only mode)
     scheduler_task = None
     heartbeat_task = asyncio.create_task(_sl_tp_heartbeat())
+    scalping_heartbeat_task = asyncio.create_task(_scalping_sl_tp_heartbeat())
     if settings.forward_test_interval_minutes > 0:
         scheduler_task = asyncio.create_task(_forward_test_scheduler())
     else:
@@ -350,7 +398,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    for _t in filter(None, [heartbeat_task, stream_task, scheduler_task]):
+    for _t in filter(None, [heartbeat_task, scalping_heartbeat_task, stream_task, scalping_stream_task, scheduler_task]):
         _t.cancel()
         try:
             await _t
@@ -399,6 +447,7 @@ app.include_router(portfolio_optimizer.router, prefix="/api/portfolio-optimizer"
 app.include_router(risk.router, prefix="/api/risk", tags=["Risk"], dependencies=_auth)
 app.include_router(scanner.router, prefix="/api/scanner", tags=["Scanner"], dependencies=_auth)
 app.include_router(regime_settings.router, prefix="/api/settings/regime", tags=["Settings"], dependencies=_auth)
+app.include_router(scalping_routes.router, prefix="/api/scalping", tags=["Scalping"], dependencies=_auth)
 
 # ── Internal endpoints (Celery workers → FastAPI server, no public auth) ────
 # These are intentionally excluded from the API docs (include_in_schema=False).
@@ -417,9 +466,23 @@ async def _internal_ml_reload(x_internal_secret: str = Header(default="")):
     logger.info("[internal] MLScorer cache flushed via /internal/ml/reload")
     return {"status": "ok"}
 
+
+@app.post("/internal/scalping/ml/reload", include_in_schema=False)
+async def _internal_scalping_ml_reload(x_internal_secret: str = Header(default="")):
+    """Flush the in-process ScalpingMLScorer model cache.
+    Called automatically by the Celery scalping_ml_retrain worker after each daily retrain.
+    """
+    if not settings.internal_api_secret or x_internal_secret != settings.internal_api_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from core.scalping_ml_scorer import scalping_ml_scorer
+    scalping_ml_scorer.reload()
+    logger.info("[internal] ScalpingMLScorer cache flushed via /internal/scalping/ml/reload")
+    return {"status": "ok"}
+
 # WebSocket endpoints
 app.add_api_websocket_route("/ws", ws_endpoint)
-app.include_router(kline_ws.router, prefix="/ws")  # /ws/kline — live candle stream
+app.include_router(kline_ws.router, prefix="/ws")        # /ws/kline — live candle stream
+app.include_router(scalping_ws.router, prefix="/ws")  # /ws/scalping — scalp signal feed
 
 
 @app.get("/health", tags=["Health"])

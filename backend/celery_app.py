@@ -11,7 +11,7 @@ celery_app = Celery(
     "ai_bot_trader",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["tasks.ml_retrain", "tasks.signal_runner", "tasks.outcome_resolver", "tasks.portfolio_rebalancer", "tasks.notification_cleanup"],
+    include=["tasks.ml_retrain", "tasks.signal_runner", "tasks.scalping_runner", "tasks.scalping_ml_retrain", "tasks.outcome_resolver", "tasks.portfolio_rebalancer", "tasks.notification_cleanup"],
 )
 
 celery_app.conf.update(
@@ -58,6 +58,17 @@ celery_app.conf.beat_schedule = {
     "portfolio-rebalance-weekly": {
         "task": "tasks.portfolio_rebalancer.rebalance",
         "schedule": crontab(hour=3, minute=0, day_of_week="sunday"),
+    },
+    # Run scalping signal engine every 60 seconds (same cadence as swing)
+    "run-scalping-every-60s": {
+        "task": "tasks.scalping_runner.run_scalping_signals",
+        "schedule": 60,
+        "options": {"expires": 55},
+    },
+    # Retrain scalping ML models daily at 04:30 UTC (after swing retrain at 02:00)
+    "scalp-ml-retrain-daily": {
+        "task": "tasks.scalping_ml_retrain.retrain_scalp_models",
+        "schedule": crontab(hour=4, minute=30),
     },
     # Delete read notifications older than 30 days (Sunday 04:00 UTC)
     "cleanup-notifications-weekly": {
