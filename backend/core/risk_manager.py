@@ -309,9 +309,12 @@ class RiskManager:
                 )
 
         # ── Level 4: Per-broker daily circuit breaker ────────────────────────────
-        # Only trip/check the CB for the signal's own broker; global state is no
-        # longer used to gate individual broker signals.
-        if _cb_broker and account_balance > 0:
+        # Only check daily P&L CB when using the real broker key.
+        # When _cb_broker is an isolated virtual key (e.g. "scalp"), the daily_pnl
+        # passed in covers the entire real broker — using it against the isolated
+        # key would trip the scalp CB purely from swing trade losses.
+        # Isolated keys rely on per-strategy + consecutive-loss CBs instead.
+        if _cb_broker and _cb_broker == broker and account_balance > 0:
             daily_loss_pct = daily_pnl / account_balance
             if daily_loss_pct <= -_daily_cb_pct:
                 b = self._per_broker.setdefault(

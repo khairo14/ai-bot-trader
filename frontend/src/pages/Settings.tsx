@@ -473,6 +473,44 @@ export default function Settings() {
         })}
       </section>
 
+      {/* Scalp Engine Circuit Breaker */}
+      {brokerState['scalp'] && (
+        <section className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-3">
+          <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Scalp Engine Circuit Breaker</h2>
+          <p className="text-xs text-gray-600">
+            Scalping strategies share an isolated CB key ("scalp") that is independent of the Binance broker CB.
+            Threshold and daily loss limit are configured in the Scalping page settings.
+          </p>
+          <div className="flex items-center justify-between bg-dark-700 rounded-lg px-4 py-3">
+            <div className="flex items-center gap-3">
+              {brokerState['scalp'].circuit_breaker_active
+                ? <span className="text-xs text-red-400 bg-red-900/30 px-2 py-1 rounded border border-red-800/40">🔴 CB Active — all scalp signals blocked</span>
+                : <span className="text-xs text-brand-500 bg-brand-900/20 px-2 py-1 rounded border border-brand-800/40">🟢 OK</span>
+              }
+              {brokerState['scalp'].consecutive_losses > 0 && (
+                <span className="text-xs text-yellow-400">{brokerState['scalp'].consecutive_losses} consecutive scalp losses</span>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => resetBrokerCB('scalp')}
+                disabled={!brokerState['scalp'].circuit_breaker_active}
+                className="flex items-center gap-1 text-xs text-yellow-400 hover:text-yellow-300 bg-yellow-900/20 hover:bg-yellow-900/30 disabled:opacity-30 px-2 py-1 rounded border border-yellow-900/40 transition-all"
+              >
+                <AlertTriangle size={10} /> Reset CB
+              </button>
+              <button
+                onClick={() => resetBrokerLosses('scalp')}
+                disabled={brokerState['scalp'].consecutive_losses === 0}
+                className="flex items-center gap-1 text-xs text-gray-300 hover:text-white bg-dark-600 hover:bg-dark-500 disabled:opacity-30 px-2 py-1 rounded border border-dark-500 transition-all"
+              >
+                Reset Streak ({brokerState['scalp'].consecutive_losses})
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* Per-Strategy Circuit Breakers */}
       {Object.keys(strategyState).length > 0 && (
         <section className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-3">

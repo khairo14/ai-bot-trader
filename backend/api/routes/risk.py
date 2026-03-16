@@ -29,6 +29,9 @@ router = APIRouter()
 _rm = get_risk_manager()  # BUG-2 FIX: process-wide singleton — reset propagates to ForwardEngine
 
 _VALID_BROKERS = {"binance", "alpaca", "ibkr"}
+# "scalp" is a virtual isolated CB key (no DB settings row);
+# it supports reset-only endpoints so scalp losses never trip the shared Binance CB.
+_VALID_CB_KEYS = _VALID_BROKERS | {"scalp"}
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -118,18 +121,18 @@ async def strategy_risk_status():
 
 @router.post("/{broker}/reset-circuit-breaker")
 async def reset_broker_circuit_breaker(broker: str):
-    """Reset the circuit breaker for one specific broker."""
-    if broker not in _VALID_BROKERS:
-        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'. Valid: binance, alpaca, ibkr")
+    """Reset the circuit breaker for one specific broker (or the scalp virtual CB key)."""
+    if broker not in _VALID_CB_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'. Valid: binance, alpaca, ibkr, scalp")
     _rm.reset_broker_circuit_breaker(broker)
     return {"message": f"{broker} circuit breaker reset. Trading is now allowed for this broker."}
 
 
 @router.post("/{broker}/reset-consecutive-losses")
 async def reset_broker_consecutive_losses(broker: str):
-    """Reset the consecutive-loss counter for one specific broker."""
-    if broker not in _VALID_BROKERS:
-        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'. Valid: binance, alpaca, ibkr")
+    """Reset the consecutive-loss counter for one specific broker (or the scalp virtual CB key)."""
+    if broker not in _VALID_CB_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown broker '{broker}'. Valid: binance, alpaca, ibkr, scalp")
     _rm.reset_broker_consecutive_losses(broker)
     return {"message": f"{broker} consecutive-loss counter reset to 0."}
 
