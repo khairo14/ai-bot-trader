@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers, X, Loader2, History, Edit2 } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity, RefreshCw, Wifi, WifiOff, CheckCircle, XCircle, Clock, Trash2, Brain, BarChart2, Layers, X, Loader2, History, Edit2, ChevronDown } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import SignalCard from '../components/SignalCard'
@@ -175,6 +175,7 @@ export default function Dashboard() {
   const [regimeError, setRegimeError] = useState(false)
   const [portfolioWeights, setPortfolioWeights] = useState<WeightsData | null>(null)
   const [optimizing, setOptimizing] = useState(false)
+  const [allocCollapsed, setAllocCollapsed] = useState(false)
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([])
   const [trades, setTrades] = useState<Trade[]>([])
   const [tradePage, setTradePage] = useState(1)
@@ -611,13 +612,17 @@ export default function Dashboard() {
       {/* Portfolio Optimizer Weights (ML-03) */}
       <div className="bg-dark-800 border border-dark-600 rounded-xl p-4">
         <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
+          <button
+            className="flex items-center gap-2 cursor-pointer group"
+            onClick={() => setAllocCollapsed(v => !v)}
+          >
             <Layers size={14} className="text-brand-400" />
             <span className="text-sm font-semibold text-gray-300">Strategy Allocation</span>
             {portfolioWeights?.optimized && (
               <span className="text-xs bg-brand-500/15 text-brand-400 px-2 py-0.5 rounded-full">Sharpe-optimized</span>
             )}
-          </div>
+            <ChevronDown size={14} className={`text-gray-500 transition-transform duration-200 ${allocCollapsed ? '-rotate-90' : ''}`} />
+          </button>
           <button
             disabled={optimizing}
             onClick={async () => {
@@ -638,7 +643,7 @@ export default function Dashboard() {
             {optimizing ? 'Optimizing…' : 'Optimize Now'}
           </button>
         </div>
-        {portfolioWeights && portfolioWeights.weighted_strategies.length > 0 ? (
+        {!allocCollapsed && (portfolioWeights && portfolioWeights.weighted_strategies.length > 0 ? (
           <div className="space-y-2">
             {portfolioWeights.weighted_strategies.map(s => {
               const pct = Math.round(s.weight * 100)
@@ -665,7 +670,7 @@ export default function Dashboard() {
           <p className="text-xs text-gray-600">
             No optimization data yet — click "Optimize Now" to compute Sharpe-weighted allocations from trade history.
           </p>
-        )}
+        ))}
       </div>
 
       {/* Pending Approvals (semi-auto signals awaiting confirmation) */}
