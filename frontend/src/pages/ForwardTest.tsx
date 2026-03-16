@@ -146,6 +146,9 @@ export default function ForwardTest() {
   const [tradeMode, setTradeMode] = useState<'paper' | 'live' | 'all'>('paper')
   const [tradeStatus, setTradeStatus] = useState<'all' | 'open' | 'filled' | 'cancelled'>('all')
   const [tradePage, setTradePage] = useState(0)
+  const [tradeSortCol, setTradeSortCol] = useState<string>('opened_at')
+  const [tradeSortDir, setTradeSortDir] = useState<'asc' | 'desc'>('desc')
+  const [tradeBrokerFilter, setTradeBrokerFilter] = useState<string>('all')
   const [pendingSignals, setPendingSignals] = useState<PendingSignal[]>([])
   const [executingSignal, setExecutingSignal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
@@ -739,7 +742,7 @@ export default function ForwardTest() {
                 {(['paper', 'live', 'all'] as const).map((m) => (
                   <button
                     key={m}
-                    onClick={() => { setTradeMode(m); setTradePage(0) }}
+                    onClick={() => { setTradeMode(m); setTradePage(0); fetchAll(m) }}
                     className={`px-2.5 py-1 capitalize transition-colors ${
                       tradeMode === m ? 'bg-dark-600 text-white' : 'text-gray-500 hover:text-gray-300'
                     }`}
@@ -758,9 +761,23 @@ export default function ForwardTest() {
                   >{label}</button>
                 ))}
               </div>
+              {/* Broker filter */}
+              {trades.length > 0 && (() => {
+                const brokers = ['all', ...Array.from(new Set(trades.map(t => t.broker))).sort()]
+                return (
+                  <div className="flex text-xs rounded-lg overflow-hidden border border-dark-500">
+                    {brokers.map(b => (
+                      <button key={b} onClick={() => { setTradeBrokerFilter(b); setTradePage(0) }}
+                        className={`px-2.5 py-1 capitalize transition-colors ${
+                          tradeBrokerFilter === b ? 'bg-dark-600 text-white' : 'text-gray-500 hover:text-gray-300'
+                        }`}>{b}</button>
+                    ))}
+                  </div>
+                )
+              })()}
             </div>
             <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500">{trades.filter(t => tradeStatus === 'all' || t.status === tradeStatus).length} trade{trades.filter(t => tradeStatus === 'all' || t.status === tradeStatus).length !== 1 ? 's' : ''}</span>
+              <span className="text-xs text-gray-500">{trades.filter(t => (tradeStatus === 'all' || t.status === tradeStatus) && (tradeBrokerFilter === 'all' || t.broker === tradeBrokerFilter)).length} trade{trades.filter(t => (tradeStatus === 'all' || t.status === tradeStatus) && (tradeBrokerFilter === 'all' || t.broker === tradeBrokerFilter)).length !== 1 ? 's' : ''}</span>
               <a
                 href="/api/forward-test/trades/export"
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-dark-700 text-gray-400 hover:text-green-400 hover:bg-green-500/10 text-xs transition-all"
@@ -778,7 +795,8 @@ export default function ForwardTest() {
             </div>
           </div>
           {(() => {
-            const filteredTrades = tradeStatus === 'all' ? trades : trades.filter(t => t.status === tradeStatus)
+            const statusFiltered = tradeStatus === 'all' ? trades : trades.filter(t => t.status === tradeStatus)
+            const filteredTrades = tradeBrokerFilter === 'all' ? statusFiltered : statusFiltered.filter(t => t.broker === tradeBrokerFilter)
             if (filteredTrades.length === 0) return (
               <div className="p-12 text-center">
                 <Activity size={36} className="text-gray-600 mx-auto mb-3 opacity-30" />
@@ -788,10 +806,29 @@ export default function ForwardTest() {
                 {tradeMode === 'paper' && tradeStatus === 'all' && <p className="text-gray-600 text-xs mt-1">Enable a strategy in paper mode and click "Run Now".</p>}
               </div>
             )
+            const SORT_FN: Record<string, (a: PaperTrade, b: PaperTrade) => number> = {
+              symbol:    (a, b) => a.symbol.localeCompare(b.symbol),
+              side:      (a, b) => a.side.localeCompare(b.side),
+              pnl:       (a, b) => (a.pnl ?? 0) - (b.pnl ?? 0),
+              broker:    (a, b) => a.broker.localeCompare(b.broker),
+              opened_at: (a, b) => (a.opened_at ?? '').localeCompare(b.opened_at ?? ''),
+            }
+            const sorted = [...filteredTrades].sort((a, b) => {
+              const fn = SORT_FN[tradeSortCol] ?? SORT_FN['opened_at']
+              return tradeSortDir === 'asc' ? fn(a, b) : fn(b, a)
+            })
+            const handleSort = (col: string) => {
+              if (tradeSortCol === col) setTradeSortDir(d => d === 'asc' ? 'desc' : 'asc')
+              else { setTradeSortCol(col); setTradeSortDir('desc') }
+              setTradePage(0)
+            }
+            const SortIcon = ({ col }: { col: string }) => (
+              <span className="ml-0.5 opacity-50">{tradeSortCol === col ? (tradeSortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
+            )
             return (() => {
-            const totalPages = Math.ceil(filteredTrades.length / TRADES_PAGE_SIZE)
+            const totalPages = Math.ceil(sorted.length / TRADES_PAGE_SIZE)
             const page = Math.min(tradePage, totalPages - 1)
-            const pageRows = filteredTrades.slice(page * TRADES_PAGE_SIZE, (page + 1) * TRADES_PAGE_SIZE)
+            const pageRows = sorted.slice(page * TRADES_PAGE_SIZE, (page + 1) * TRADES_PAGE_SIZE)
             return (
               <>
                 <div className="overflow-x-auto">
@@ -799,17 +836,17 @@ export default function ForwardTest() {
                     <thead>
                       <tr className="text-gray-500 border-b border-dark-600">
                         <th className="text-left px-2 py-2 font-medium w-10">#</th>
-                        <th className="text-left px-2 py-2 font-medium w-24">Symbol</th>
-                        <th className="text-left px-2 py-2 font-medium w-14">Side</th>
+                        <th onClick={() => handleSort('symbol')} className="text-left px-2 py-2 font-medium w-24 cursor-pointer hover:text-white select-none">Symbol<SortIcon col="symbol" /></th>
+                        <th onClick={() => handleSort('side')} className="text-left px-2 py-2 font-medium w-14 cursor-pointer hover:text-white select-none">Side<SortIcon col="side" /></th>
                         <th className="text-left px-2 py-2 font-medium w-20">Entry</th>
                         <th className="text-left px-2 py-2 font-medium w-20">Exit</th>
                         <th className="text-left px-2 py-2 font-medium w-20">SL</th>
                         <th className="text-left px-2 py-2 font-medium w-20">TP</th>
-                        <th className="text-left px-2 py-2 font-medium w-28">P&L</th>
+                        <th onClick={() => handleSort('pnl')} className="text-left px-2 py-2 font-medium w-28 cursor-pointer hover:text-white select-none">P&L<SortIcon col="pnl" /></th>
                         <th className="text-left px-2 py-2 font-medium w-24">Status</th>
-                        <th className="text-left px-2 py-2 font-medium w-20">Broker</th>
+                        <th onClick={() => handleSort('broker')} className="text-left px-2 py-2 font-medium w-20 cursor-pointer hover:text-white select-none">Broker<SortIcon col="broker" /></th>
                         <th className="text-left px-2 py-2 font-medium w-36">Strategy</th>
-                        <th className="text-left px-2 py-2 font-medium w-36">Opened</th>
+                        <th onClick={() => handleSort('opened_at')} className="text-left px-2 py-2 font-medium w-36 cursor-pointer hover:text-white select-none">Opened<SortIcon col="opened_at" /></th>
                       </tr>
                     </thead>
                     <tbody>

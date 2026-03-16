@@ -10,6 +10,7 @@ import { SkeletonStat } from '../components/Skeleton'
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface EquityPoint { date: string; cumulative_pnl: number; pnl_pct: number; trade_index: number }
 interface MonthlyReturn { year: number; month: number; pnl_pct: number; label: string }
+interface BrokerBreakdown { broker: string; total: number; wins: number; losses: number; win_rate: number; avg_pnl: number; total_pnl: number }
 interface StratBreakdown { strategy_name: string; total: number; wins: number; losses: number; win_rate: number; avg_pnl: number }
 interface SymBreakdown   { symbol:        string; total: number; wins: number; losses: number; win_rate: number; avg_pnl: number }
 interface HourBreakdown  { hour:          number; total: number; wins: number; win_rate: number }
@@ -23,6 +24,7 @@ interface AnalyticsData {
   monthly_returns: MonthlyReturn[]
   by_strategy:     StratBreakdown[]
   by_symbol:       SymBreakdown[]
+  by_broker:       BrokerBreakdown[]
   by_hour:         HourBreakdown[]
   rolling_sharpe:  SharpePoint[]
   summary:         Summary
@@ -240,6 +242,57 @@ export default function Analytics() {
               )}
             </div>
           </div>
+
+          {/* Performance by Broker */}
+          {data.by_broker && data.by_broker.length > 0 && (
+            <div className="bg-dark-800 border border-dark-600 rounded-xl p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <BarChart2 size={14} className="text-brand-400" />
+                <span className="text-sm font-semibold text-gray-300">Performance by Broker</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-gray-500 border-b border-dark-600">
+                      <th className="text-left py-2 pr-4 font-medium">Broker</th>
+                      <th className="text-right py-2 px-3 font-medium">Trades</th>
+                      <th className="text-right py-2 px-3 font-medium">Wins</th>
+                      <th className="text-right py-2 px-3 font-medium">Losses</th>
+                      <th className="text-right py-2 px-3 font-medium">Win Rate</th>
+                      <th className="text-right py-2 px-3 font-medium">Avg P&L</th>
+                      <th className="text-right py-2 pl-3 font-medium">Total P&L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.by_broker.map(b => (
+                      <tr key={b.broker} className="border-b border-dark-700 hover:bg-dark-750 transition-colors">
+                        <td className="py-2 pr-4 font-medium text-white capitalize">{b.broker}</td>
+                        <td className="py-2 px-3 text-gray-300 text-right">{b.total}</td>
+                        <td className="py-2 px-3 text-green-400 text-right">{b.wins}</td>
+                        <td className="py-2 px-3 text-red-400 text-right">{b.losses}</td>
+                        <td className={`py-2 px-3 font-medium text-right ${b.win_rate >= 50 ? 'text-green-400' : 'text-red-400'}`}>{b.win_rate}%</td>
+                        <td className={`py-2 px-3 font-mono text-right ${b.avg_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{b.avg_pnl >= 0 ? '+' : ''}{b.avg_pnl.toFixed(3)}%</td>
+                        <td className={`py-2 pl-3 font-mono text-right ${b.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>{b.total_pnl >= 0 ? '+' : ''}{b.total_pnl.toFixed(2)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-4 space-y-2">
+                {data.by_broker.map(b => (
+                  <div key={b.broker}>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-gray-400 capitalize">{b.broker}</span>
+                      <span className={b.win_rate >= 50 ? 'text-green-400' : 'text-red-400'}>{b.win_rate}% win rate</span>
+                    </div>
+                    <div className="h-1.5 bg-dark-700 rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full ${b.win_rate >= 50 ? 'bg-green-500' : 'bg-red-500'}`} style={{ width: `${b.win_rate}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Win rate by hour + rolling Sharpe */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

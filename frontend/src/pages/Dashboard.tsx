@@ -179,6 +179,9 @@ export default function Dashboard() {
   const [trades, setTrades] = useState<Trade[]>([])
   const [tradePage, setTradePage] = useState(1)
   const TRADES_PER_PAGE = 8
+  const [tradeSortCol, setTradeSortCol] = useState<string>('opened_at')
+  const [tradeSortDir, setTradeSortDir] = useState<'asc' | 'desc'>('desc')
+  const [tradeBrokerFilter, setTradeBrokerFilter] = useState<string>('all')
   const [closingId, setClosingId] = useState<number | null>(null)
   const [editPos, setEditPos] = useState<OpenPosition | null>(null)
   const [editSl, setEditSl] = useState('')
@@ -818,7 +821,7 @@ export default function Dashboard() {
 
       {/* Recent Trades */}
       <div className="bg-dark-800 border border-dark-600 rounded-xl overflow-hidden">
-        <div className="px-4 py-3 border-b border-dark-600 flex items-center gap-2">
+        <div className="px-4 py-3 border-b border-dark-600 flex items-center gap-2 flex-wrap">
           <History size={14} className="text-gray-400" />
           <span className="text-sm font-semibold text-gray-300">Recent Trades</span>
           {trades.length > 0 && (
@@ -826,6 +829,20 @@ export default function Dashboard() {
               {trades.length}
             </span>
           )}
+          {/* Broker filter */}
+          {trades.length > 0 && (() => {
+            const brokers = ['all', ...Array.from(new Set(trades.map(t => t.broker))).sort()]
+            return (
+              <div className="flex text-xs rounded-lg overflow-hidden border border-dark-500 ml-1">
+                {brokers.map(b => (
+                  <button key={b} onClick={() => { setTradeBrokerFilter(b); setTradePage(1) }}
+                    className={`px-2.5 py-1 capitalize transition-colors ${
+                      tradeBrokerFilter === b ? 'bg-dark-600 text-white' : 'text-gray-500 hover:text-gray-300'
+                    }`}>{b}</button>
+                ))}
+              </div>
+            )
+          })()}
           <Link to="/forward-test" className="ml-auto text-xs text-brand-400 hover:text-brand-300 transition-colors">View all →</Link>
         </div>
         {trades.length === 0 ? (
@@ -833,16 +850,41 @@ export default function Dashboard() {
             <p className="text-gray-600 text-sm">No trades yet</p>
           </div>
         ) : (() => {
-          const totalPages = Math.ceil(trades.length / TRADES_PER_PAGE)
-          const pageTrades = trades.slice((tradePage - 1) * TRADES_PER_PAGE, tradePage * TRADES_PER_PAGE)
+          const SORT_FN: Record<string, (a: Trade, b: Trade) => number> = {
+            symbol:      (a, b) => a.symbol.localeCompare(b.symbol),
+            side:        (a, b) => a.side.localeCompare(b.side),
+            pnl:         (a, b) => (a.pnl ?? 0) - (b.pnl ?? 0),
+            broker:      (a, b) => a.broker.localeCompare(b.broker),
+            opened_at:   (a, b) => (a.opened_at ?? '').localeCompare(b.opened_at ?? ''),
+          }
+          const brokerFiltered = tradeBrokerFilter === 'all' ? trades : trades.filter(t => t.broker === tradeBrokerFilter)
+          const sorted = [...brokerFiltered].sort((a, b) => {
+            const fn = SORT_FN[tradeSortCol] ?? SORT_FN['opened_at']
+            return tradeSortDir === 'asc' ? fn(a, b) : fn(b, a)
+          })
+          const handleSort = (col: string) => {
+            if (tradeSortCol === col) setTradeSortDir(d => d === 'asc' ? 'desc' : 'asc')
+            else { setTradeSortCol(col); setTradeSortDir('desc') }
+            setTradePage(1)
+          }
+          const SortIcon = ({ col }: { col: string }) => (
+            <span className="ml-0.5 opacity-50">{tradeSortCol === col ? (tradeSortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
+          )
+          const totalPages = Math.ceil(sorted.length / TRADES_PER_PAGE)
+          const pageTrades = sorted.slice((tradePage - 1) * TRADES_PER_PAGE, tradePage * TRADES_PER_PAGE)
           return (
             <>
               <div className="overflow-x-auto overflow-y-auto max-h-[340px]">
                 <table className="w-full text-xs">
                   <thead className="sticky top-0 bg-dark-800 z-10">
                     <tr className="text-gray-500 border-b border-dark-600">
-                      {['Symbol', 'Side', 'Entry', 'Exit', 'SL', 'TP', 'P&L', 'Status', 'Broker', 'Strategy', 'Opened'].map(h => (
-                        <th key={h} className="text-left px-3 py-2 font-medium">{h}</th>
+                      {([['symbol','Symbol'],['side','Side'],['entry_price','Entry'],['exit_price','Exit'],['stop_loss','SL'],['take_profit','TP'],['pnl','P&L'],['status','Status'],['broker','Broker'],['strategy_name','Strategy'],['opened_at','Opened']] as [string,string][]).map(([col, label]) => (
+                        <th key={col} onClick={() => ['symbol','side','pnl','broker','opened_at'].includes(col) ? handleSort(col) : undefined}
+                          className={`text-left px-3 py-2 font-medium ${
+                            ['symbol','side','pnl','broker','opened_at'].includes(col) ? 'cursor-pointer hover:text-white select-none' : ''
+                          }`}>
+                          {label}{['symbol','side','pnl','broker','opened_at'].includes(col) && <SortIcon col={col} />}
+                        </th>
                       ))}
                     </tr>
                   </thead>

@@ -194,6 +194,30 @@ async def get_analytics_summary(
         if sharpe_values[i] is not None
     ]
 
+    # ── Win rate by broker ────────────────────────────────────────────────────
+    broker_stats: dict[str, dict] = defaultdict(lambda: {"total": 0, "wins": 0, "pnl_sum": 0.0})
+    for o in outcomes:
+        broker_key = (o.broker or "unknown").lower()
+        s = broker_stats[broker_key]
+        s["total"] += 1
+        pnl = _safe_pnl(o.pnl_pct)
+        s["pnl_sum"] += pnl
+        if o.outcome is not None and o.outcome.value == "win":
+            s["wins"] += 1
+
+    by_broker = [
+        {
+            "broker":   broker,
+            "total":    d["total"],
+            "wins":     d["wins"],
+            "losses":   d["total"] - d["wins"],
+            "win_rate": round(d["wins"] / d["total"] * 100, 1) if d["total"] else 0,
+            "avg_pnl":  round(d["pnl_sum"] / d["total"], 4) if d["total"] else 0,
+            "total_pnl": round(d["pnl_sum"], 4),
+        }
+        for broker, d in sorted(broker_stats.items())
+    ]
+
     # ── Summary stats ─────────────────────────────────────────────────────────
     total = len(outcomes)
     wins  = sum(1 for o in outcomes if o.outcome is not None and o.outcome.value == "win")
@@ -213,6 +237,7 @@ async def get_analytics_summary(
         "monthly_returns": monthly_returns,
         "by_strategy":     by_strategy,
         "by_symbol":       by_symbol,
+        "by_broker":       by_broker,
         "by_hour":         by_hour,
         "rolling_sharpe":  rolling_sharpe,
         "summary":         summary,
