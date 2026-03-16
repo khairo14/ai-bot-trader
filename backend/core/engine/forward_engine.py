@@ -415,7 +415,15 @@ class ForwardEngine:
         # at runtime without touching broker_risk_settings or config.py.
         # This ensures swing and scalp strategies share Binance but each uses
         # their own correct risk envelope.
-        if getattr(signal, "strategy_name", "").startswith("scalp_"):
+        # NOTE: signal.strategy_name may be the user-visible display name (e.g.
+        # "5min UNI/USDT") rather than the canonical "scalp_ema_vwap" type, so
+        # also check strategy_params["strategy_type"] injected by scalping_runner.
+        _strat_type_param = (strategy_params or {}).get("strategy_type", "")
+        _is_scalp_signal = (
+            getattr(signal, "strategy_name", "").startswith("scalp_")
+            or str(_strat_type_param).startswith("scalp_")
+        )
+        if _is_scalp_signal:
             try:
                 from tasks.scalping_runner import _load_scalp_settings as _scalp_cfg
                 _scfg = _scalp_cfg()
@@ -1739,6 +1747,11 @@ class ForwardEngine:
                 if _bid is not None and _bid > 0 and (_ask is None or _ask >= _bid):
                     _price_cache[_ck] = (_bid, _ask)
 
+        # Hard max-hold for scalp trades with null SL/TP — safety net in case bracket
+        # order placement failed and the trade was left unprotected.  2 hours is generous
+        # for any scalp timeframe (1m–5m); even a 5m scalp should be resolved within 30m.
+        _SCALP_NULL_SLTP_MAX_HOLD_H = 2.0
+
         for trade in open_trades:
             # Skip price fetch entirely if this trade has nothing to monitor:
             # no SL, no TP, no trailing stop, and no time-based exit params.
@@ -1747,7 +1760,26 @@ class ForwardEngine:
                 _param_float(trade.strategy_name, "breakeven_after_hours") is not None
                 or _param_float(trade.strategy_name, "max_hold_hours") is not None
             )
+            # SAFETY-NET: scalp trades with null SL/TP and no time-based exit would be
+            # monitored forever.  Force-close if they exceed the hard max-hold limit.
+            _is_scalp_trade = str(trade.strategy_name or "").startswith("scalp_")
             if not _has_sl_tp and not _has_time:
+                if (
+                    _is_scalp_trade
+                    and trade.opened_at is not None
+                    and (datetime.now(timezone.utc).replace(tzinfo=None) - trade.opened_at).total_seconds() / 3600.0
+                       >= _SCALP_NULL_SLTP_MAX_HOLD_H
+                ):
+                    logger.critical(
+                        f"[ForwardEngine] SAFETY-NET: scalp trade id={trade.id} {trade.symbol} "
+                        f"open with no SL/TP for >= {_SCALP_NULL_SLTP_MAX_HOLD_H}h — force closing"
+                    )
+                    try:
+                        await self.close_position(trade, reason="null_sltp_safety_close", db_session=db_session)
+                        await db_session.commit()
+                        closed_count += 1
+                    except Exception as _sc_err:
+                        logger.error(f"[ForwardEngine] Safety-net close failed for {trade.symbol} id={trade.id}: {_sc_err}")
                 continue
 
             try:

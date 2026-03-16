@@ -227,8 +227,11 @@ async def _async_run() -> None:
                     timeframe=timeframe,
                     spread_pct=spread_pct_live,
                 )
-                # Use user-defined strategy name for DB/UI display
-                sig.strategy_name = strat.name
+                # Preserve the canonical scalp_ type on the signal so ForwardEngine's
+                # risk override check (startswith("scalp_")) always matches correctly.
+                # The display name is stored separately in the DB signal row below.
+                sig.strategy_name = strategy_type   # e.g. "scalp_ema_vwap"
+                _display_name = strat.name           # e.g. "5min UNI/USDT"
 
                 # Skip non-actionable signals — mark candle processed but don't persist
                 if sig.signal not in _TRACKABLE:
@@ -292,7 +295,7 @@ async def _async_run() -> None:
                     take_profit   = sig.take_profit,
                     confidence    = sig.confidence,
                     timeframe     = sig.timeframe,
-                    strategy_name = sig.strategy_name,
+                    strategy_name = _display_name,    # human-readable name for UI
                     regime        = sig.regime,
                     asset_class   = asset_cls_enum,
                     broker        = strat.broker,
@@ -309,7 +312,7 @@ async def _async_run() -> None:
                         signal_id     = db_signal.id,
                         symbol        = sig.symbol,
                         timeframe     = sig.timeframe,
-                        strategy_name = sig.strategy_name,
+                        strategy_name = _display_name,
                         signal_type   = sig.signal,
                         entry_price   = sig.entry_price,
                         stop_loss     = sig.stop_loss,
@@ -357,17 +360,58 @@ async def _async_run() -> None:
                     try:
                         from api.websocket import manager as _ws
 
+                        # Inject strategy_type into params so ForwardEngine risk override
+                        # can detect scalp_ strategies even after strategy_name is display name.
+                        exec_params = {**params, "strategy_type": strategy_type}
+
                         async with AsyncSessionLocal() as exec_session:
                             result = await forward_engine.process_signal(
                                 signal=sig,
                                 execution_mode=strat.execution_mode.value if strat.execution_mode is not None else "SUGGESTION",
                                 is_paper=strat.is_paper,
                                 db_session=exec_session,
-                                strategy_params=params,
+                                strategy_params=exec_params,
                             )
                             if result is not None:
+                                # BUG-FIX: set signal_id and commit so the FK is persisted
                                 result.signal_id = db_signal.id
-                            await exec_session.commit()
+                                db_signal.acted_on = True
+                                exec_session.add(result)
+                                await exec_session.commit()
+                                # SAFETY-NET: scalp trade must have SL and TP set.
+                                # If bracket order failed silently, close immediately
+                                # rather than leave an unprotected position open.
+                                from db.models import OrderStatus as _OS
+                                if (
+                                    result.status == _OS.OPEN
+                                    and result.stop_loss is None
+                                    and result.take_profit is None
+                                ):
+                                    logger.critical(
+                                        f"[scalping_runner] SAFETY-NET: trade id={result.id} "
+                                        f"{result.symbol} opened with no SL/TP — closing immediately"
+                                    )
+                                    try:
+                                        async with AsyncSessionLocal() as _close_sess:
+                                            await forward_engine.close_position(
+                                                result, reason="null_sltp_safety_close",
+                                                db_session=_close_sess,
+                                            )
+                                            await _close_sess.commit()
+                                    except Exception as _safe_err:
+                                        logger.error(f"[scalping_runner] Safety close failed: {_safe_err}")
+                                # Sync acted_on back to the outer session
+                                await session.merge(db_signal)
+                                await session.commit()
+                            else:
+                                await exec_session.commit()
+
+                        # BUG-FIX: re-hydrate ForwardEngine so subsequent scalp strategies
+                        # in the same tick see updated balance / open-position counts.
+                        try:
+                            await forward_engine.initialize(session)
+                        except Exception as _rh_err:
+                            logger.debug(f"[scalping_runner] ForwardEngine re-hydrate failed: {_rh_err}")
 
                         # WebSocket broadcast on dedicated scalp channel
                         await _ws.broadcast("scalp_signal", {
@@ -379,7 +423,7 @@ async def _async_run() -> None:
                             "take_profit":    sig.take_profit,
                             "confidence":     sig.confidence,
                             "timeframe":      sig.timeframe,
-                            "strategy_name":  sig.strategy_name,
+                            "strategy_name":  _display_name,
                             "reasons":        sig.reasons,
                             "spread_pct":     spread_pct_live,
                             "source":         "celery",
