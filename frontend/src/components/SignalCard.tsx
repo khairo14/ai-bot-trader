@@ -180,7 +180,7 @@ export default function SignalCard({ signal }: Props) {
           <span className={`text-xs font-bold px-2 py-0.5 rounded ${cfg.bg} ${cfg.color} border ${cfg.border}`}>
             {signal.signal}
           </span>
-          <p className="text-xs text-gray-600 mt-1 flex items-center gap-1 justify-end">
+          <p className="flex items-center justify-end gap-1 mt-1 text-xs text-gray-600">
             <Clock size={10} />
             {_createdUtc?.toLocaleTimeString()}
           </p>
@@ -189,29 +189,29 @@ export default function SignalCard({ signal }: Props) {
 
       {/* Price Levels */}
       <div className="grid grid-cols-3 gap-2 text-xs">
-        <div className="bg-dark-700 rounded-lg p-2 text-center">
+        <div className="p-2 text-center rounded-lg bg-dark-700">
           <p className="text-gray-500 mb-0.5">Entry</p>
-          <p className="text-white font-mono font-medium">{signal.entry_price?.toFixed(4) ?? '—'}</p>
+          <p className="font-mono font-medium text-white">{signal.entry_price?.toFixed(4) ?? '—'}</p>
         </div>
-        <div className="bg-dark-700 rounded-lg p-2 text-center">
+        <div className="p-2 text-center rounded-lg bg-dark-700">
           <p className="text-gray-500 mb-0.5">Stop Loss</p>
-          <p className="text-red-400 font-mono font-medium">{signal.stop_loss?.toFixed(4) ?? '—'}</p>
+          <p className="font-mono font-medium text-red-400">{signal.stop_loss?.toFixed(4) ?? '—'}</p>
         </div>
-        <div className="bg-dark-700 rounded-lg p-2 text-center">
+        <div className="p-2 text-center rounded-lg bg-dark-700">
           <p className="text-gray-500 mb-0.5">Take Profit</p>
-          <p className="text-green-400 font-mono font-medium">{signal.take_profit?.toFixed(4) ?? '—'}</p>
+          <p className="font-mono font-medium text-green-400">{signal.take_profit?.toFixed(4) ?? '—'}</p>
         </div>
       </div>
 
       {/* Confidence Bar */}
       <div>
-        <div className="flex justify-between text-xs text-gray-500 mb-1">
+        <div className="flex justify-between mb-1 text-xs text-gray-500">
           <span>Confidence</span>
           <span>{((signal.confidence ?? 0) * 100).toFixed(0)}%{rr ? ` · R:R ${rr.toFixed(2)}` : ''}</span>
         </div>
         <div className="h-1.5 bg-dark-700 rounded-full overflow-hidden">
           <div
-            className="h-full rounded-full transition-all duration-500"
+            className="h-full transition-all duration-500 rounded-full"
             style={{
               width: `${(signal.confidence ?? 0) * 100}%`,
               background: (signal.confidence ?? 0) >= 0.75
@@ -224,7 +224,7 @@ export default function SignalCard({ signal }: Props) {
 
       {/* Options Section — shown for option asset_class */}
       {signal.asset_class === 'option' && (signal.iv_rank != null || signal.options_meta) && (
-        <div className="bg-dark-700 rounded-lg p-3 space-y-2 border border-purple-900/30">
+        <div className="p-3 space-y-2 border rounded-lg bg-dark-700 border-purple-900/30">
           {/* Strategy type badge + IV Rank */}
           <div className="flex items-center justify-between">
             {signal.options_meta?.strategy_type && (
@@ -242,7 +242,7 @@ export default function SignalCard({ signal }: Props) {
                 <span className="text-[10px] text-gray-500">IV Rank</span>
                 <div className="w-20 h-1.5 bg-dark-600 rounded-full overflow-hidden">
                   <div
-                    className="h-full rounded-full bg-purple-500 transition-all duration-500"
+                    className="h-full transition-all duration-500 bg-purple-500 rounded-full"
                     style={{ width: `${signal.iv_rank}%` }}
                   />
                 </div>
@@ -335,7 +335,7 @@ export default function SignalCard({ signal }: Props) {
 
       {/* Confluence mini-check */}
       {signal.signal !== 'HOLD' && (
-        <div className="border-t border-dark-600 pt-3">
+        <div className="pt-3 border-t border-dark-600">
           {confluence ? (
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5">
@@ -347,7 +347,7 @@ export default function SignalCard({ signal }: Props) {
                     className={`inline-block w-2.5 h-2.5 rounded-full ${TF_DOT_COLORS[t.signal] ?? 'bg-gray-600'} ${t.agrees ? 'opacity-100' : 'opacity-40'}`}
                   />
                 ))}
-                <span className="text-xs text-gray-500 ml-1">
+                <span className="ml-1 text-xs text-gray-500">
                   {confluence.tfs.filter(t => t.agrees).length}/{confluence.tfs.length} aligned
                 </span>
                 <span className={`text-xs font-semibold ${TF_DOT_COLORS[confluence.consensus] ? '' : 'text-gray-400'} ${
