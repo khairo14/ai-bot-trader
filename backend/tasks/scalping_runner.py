@@ -358,8 +358,6 @@ async def _async_run() -> None:
                 # ── Forward execution ────────────────────────────────────────────
                 if sig.signal in _TRACKABLE:
                     try:
-                        from api.websocket import manager as _ws
-
                         # Inject strategy_type into params so ForwardEngine risk override
                         # can detect scalp_ strategies even after strategy_name is display name.
                         exec_params = {**params, "strategy_type": strategy_type}
@@ -413,7 +411,13 @@ async def _async_run() -> None:
                         except Exception as _rh_err:
                             logger.debug(f"[scalping_runner] ForwardEngine re-hydrate failed: {_rh_err}")
 
-                        # WebSocket broadcast on dedicated scalp channel
+                    except Exception as _fwd_err:
+                        logger.error(f"[scalping_runner] ForwardEngine error: {_fwd_err}", exc_info=True)
+
+                    # WebSocket broadcast always fires for actionable signals,
+                    # even when ForwardEngine execution fails (e.g. broker error).
+                    try:
+                        from api.websocket import manager as _ws
                         await _ws.broadcast("scalp_signal", {
                             "id":             db_signal.id,
                             "symbol":         sig.symbol,
@@ -428,9 +432,8 @@ async def _async_run() -> None:
                             "spread_pct":     spread_pct_live,
                             "source":         "celery",
                         })
-
-                    except Exception as _fwd_err:
-                        logger.error(f"[scalping_runner] ForwardEngine error: {_fwd_err}", exc_info=True)
+                    except Exception as _ws_err:
+                        logger.debug(f"[scalping_runner] WS broadcast failed: {_ws_err}")
 
             except asyncio.TimeoutError:
                 logger.warning(f"[scalping_runner] Timeout fetching data for {symbol} — skipping")

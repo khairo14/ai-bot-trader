@@ -151,7 +151,7 @@ class AbstractBroker(ABC):
 
     # ── Connection ────────────────────────────────────────
 
-    async def connect(self) -> None:
+    async def connect(self, **kwargs) -> None:
         """Optional: establish connection before use (e.g. IBKR TWS). No-op by default."""
         pass
 

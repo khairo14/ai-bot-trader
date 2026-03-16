@@ -2063,10 +2063,10 @@ class ForwardEngine:
         for (broker_name, _is_paper), trades in by_broker.items():
             try:
                 broker = get_broker(broker_name, force_paper=_is_paper)
-                await broker.connect()
-                broker_positions = await broker.get_positions()
+                await asyncio.wait_for(broker.connect(), timeout=12.0)
+                broker_positions = await asyncio.wait_for(broker.get_positions(), timeout=20.0)
                 broker_symbols = {p.symbol for p in broker_positions}
-            except Exception as _e:
+            except (asyncio.TimeoutError, Exception) as _e:
                 logger.debug(f"[ForwardEngine] reconcile: {broker_name} positions unavailable: {_e}")
                 continue
 
@@ -2406,8 +2406,8 @@ class ForwardEngine:
                 _ibkr_trades = []
 
             ibkr_broker = get_broker("ibkr", force_paper=_ibkr_is_paper)
-            await ibkr_broker.connect()
-            ibkr_positions = await ibkr_broker.get_positions()
+            await asyncio.wait_for(ibkr_broker.connect(), timeout=12.0)
+            ibkr_positions = await asyncio.wait_for(ibkr_broker.get_positions(), timeout=20.0)
             _gob = getattr(ibkr_broker, "get_open_brackets", None)
             try:
                 brackets = await asyncio.wait_for(_gob(), timeout=12.0) if _gob else {}

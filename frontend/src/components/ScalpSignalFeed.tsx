@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { TrendingUp, TrendingDown, Wifi, WifiOff, Zap } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 
@@ -36,6 +36,33 @@ function fmtPrice(v: number | null): string {
 
 export default function ScalpSignalFeed() {
   const [signals, setSignals] = useState<ScalpSignal[]>([])
+  const [loading, setLoading] = useState(true)
+
+  // Seed with the last 50 scalp signals from DB on mount
+  useEffect(() => {
+    fetch('/api/scalping/signals?limit=50', { credentials: 'include' })
+      .then(r => r.json())
+      .then(data => {
+        const historical: ScalpSignal[] = (data.signals ?? []).map((s: Record<string, unknown>) => ({
+          id:            s.id as number,
+          symbol:        s.symbol as string,
+          signal:        s.signal as string,
+          entry_price:   s.entry_price as number,
+          stop_loss:     s.stop_loss as number | null,
+          take_profit:   s.take_profit as number | null,
+          confidence:    s.confidence as number,
+          timeframe:     s.timeframe as string,
+          strategy_name: s.strategy_name as string,
+          reasons:       (s.reasons as string[]) ?? [],
+          spread_pct:    0,
+          source:        'history',
+          _received_at:  s.created_at ? new Date(s.created_at as string).getTime() : Date.now(),
+        }))
+        setSignals(historical)
+      })
+      .catch(() => {/* silently ignore fetch errors — WS stream still works */})
+      .finally(() => setLoading(false))
+  }, [])
 
   const { connected } = useWebSocket(WS_URL, {
     onMessage: (raw) => {
@@ -64,8 +91,11 @@ export default function ScalpSignalFeed() {
       {signals.length === 0 ? (
         <div className="bg-dark-800 border border-dark-600 rounded-xl p-6 text-center">
           <Zap size={24} className="text-gray-600 mx-auto mb-2 opacity-40" />
-          <p className="text-gray-500 text-xs">Waiting for scalp signals…</p>
-          {!connected && <p className="text-gray-600 text-xs mt-1">Connecting to stream…</p>}
+          {loading
+            ? <p className="text-gray-500 text-xs">Loading signals…</p>
+            : <p className="text-gray-500 text-xs">No recent scalp signals</p>
+          }
+          {!connected && !loading && <p className="text-gray-600 text-xs mt-1">Connecting to live stream…</p>}
         </div>
       ) : (
         <div className="space-y-2">
@@ -117,11 +147,11 @@ export default function ScalpSignalFeed() {
                     {new Date(sig._received_at).toLocaleTimeString()}
                   </span>
                   <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                    sig.source === 'ws_stream'
+                    sig.source === 'ws_stream' || sig.source === 'celery'
                       ? 'bg-purple-900/30 text-purple-400'
                       : 'bg-dark-600 text-gray-500'
                   }`}>
-                    {sig.source === 'ws_stream' ? 'stream' : 'celery'}
+                    {sig.source === 'history' ? 'db' : 'live'}
                   </span>
                 </div>
               </div>

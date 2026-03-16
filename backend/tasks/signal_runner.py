@@ -337,8 +337,11 @@ def run_signals(self):
                                 _broker_obj = _get_broker(strat.broker.value)
                                 # Default 12 s fast-fail: a down broker won't stall
                                 # this group's candle tick.
-                                await _broker_obj.connect()
-                                _ohlcv = await _broker_obj.get_ohlcv(symbol, timeframe, limit=max(limit, 100))
+                                await asyncio.wait_for(_broker_obj.connect(), timeout=12.0)
+                                _ohlcv = await asyncio.wait_for(
+                                    _broker_obj.get_ohlcv(symbol, timeframe, limit=max(limit, 100)),
+                                    timeout=20.0,
+                                )
                                 # IMP-30: pass asset_class so classify() selects the
                                 # appropriate ADX threshold for this instrument type
                                 _asset_class_str = params.get("asset_class", "")

@@ -23,6 +23,11 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Prevent tasks from hanging indefinitely and starving other tasks.
+    # soft_time_limit raises SoftTimeLimitExceeded → task can clean up gracefully.
+    # time_limit kills the worker process after the hard limit (SIGKILL).
+    task_soft_time_limit=115,   # 115 s: just under the 120 s 2-tick budget
+    task_time_limit=150,        # 150 s: hard kill to recover hung worker processes
 )
 
 # Scheduled tasks

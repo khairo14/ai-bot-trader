@@ -43,6 +43,7 @@ def _signal_dict(s: Signal) -> dict:
 async def list_signals(
     symbol: Optional[str] = None,
     broker: Optional[str] = None,
+    strategy_prefix: Optional[str] = None,
     limit: int = Query(default=50, le=500),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -67,6 +68,8 @@ async def list_signals(
             query = query.where(Signal.broker == BrokerName(broker.lower()))
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Unknown broker: {broker}")
+    if strategy_prefix:
+        query = query.where(Signal.strategy_name.like(f"{strategy_prefix}%"))
     result = await db.execute(query)
     return {"signals": [_signal_dict(s) for s in result.scalars().all()]}
 

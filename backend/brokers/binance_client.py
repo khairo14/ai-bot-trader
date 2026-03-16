@@ -296,73 +296,75 @@ class BinanceClient(AbstractBroker):
         logger.info(f"[Binance] Placing {order_type.upper()} {side.upper()} {quantity} {symbol}")
         params = {}
         if stop_price and take_profit_price:
-            # Bracket: market entry first, then SL + TP exit guards on the opposite side.
-            # Binance OCO via ccxt "oco" type is rejected on testnet and unreliable on spot;
-            # placing two separate exit orders achieves the same protection.
+            # Bracket: market entry first, then combined OCO (TP + SL) exit.
+            # IMPORTANT: Binance spot locks the full base asset for ANY open sell order
+            # (limit OR stop-loss).  Placing two separate exit orders for the same
+            # quantity always fails with "insufficient balance" on the second order
+            # because the asset is already locked by the first.
+            # FIX: use a single OCO (One-Cancels-Other) order — Binance manages the
+            # lock internally and automatically cancels the other leg when one fires.
+            # If OCO is unavailable (rare testnet quirk), fall back to SL-only and
+            # let the software monitor_sl_tp handle the TP close.
             result = await self.exchange.create_market_order(symbol, side, quantity)  # type: ignore[arg-type]
             exit_side = "sell" if side == "buy" else "buy"
-            # BUG-2 FIX: place TP limit order FIRST, then SL STOP_LOSS order.
-            # Binance spot locks the full base asset when a STOP_LOSS (sell) order is placed.
-            # Placing SL first means free balance = 0 when TP tries to place, causing a
-            # silent "insufficient balance" failure.  A limit sell order does NOT lock
-            # the asset as reserved collateral, so the TP must come first.
-            # BUG-CRIT-01 FIX: wrap bracket placement in a single try/except so that if
-            # either the TP or SL guard fails after retries, we place an emergency market
-            # close to flatten the already-filled entry position before re-raising.
             try:
-                # TP guard
-                for _attempt in range(2):
-                    try:
-                        await self.exchange.create_limit_order(symbol, exit_side, quantity, take_profit_price)  # type: ignore[arg-type]
-                        break
-                    except Exception as _tp_err:
-                        if _attempt == 0:
-                            await asyncio.sleep(0.5)
-                        else:
-                            logger.error(f"[Binance] TP guard (bracket) failed after retry: {_tp_err}")
-                            raise RuntimeError(
-                                f"[Binance] TP guard (bracket) permanently failed for {symbol}: {_tp_err}"
-                            )
-                # SL guard — use STOP_LOSS (market-on-trigger) not STOP_LOSS_LIMIT so the
-                # full quantity is guaranteed to fill even when price gaps through the level.
-                for _attempt in range(2):
-                    try:
-                        await self.exchange.create_order(
-                            symbol, "STOP_LOSS", exit_side, quantity,
-                            params={"stopPrice": stop_price}
-                        )
-                        break
-                    except Exception as _sl_err:
-                        if _attempt == 0:
-                            await asyncio.sleep(0.5)
-                        else:
-                            raise RuntimeError(
-                                f"[Binance] SL guard (bracket) permanently failed for {symbol}: {_sl_err}"
-                            )
-            except Exception as _bracket_err:
-                # Emergency close: flatten the entry fill to avoid an unprotected position.
-                logger.critical(
-                    f"[Binance] Bracket placement failed for {symbol} after fill — "
-                    f"placing emergency market close to avoid orphaned position. Error: {_bracket_err}"
+                # OCO: TP (limit) + SL (stop-loss) in a single atomic order.
+                # For a SELL OCO: limit price (TP) must be above stop price (SL).
+                # For a BUY  OCO: limit price (TP) must be below stop price (SL).
+                # stopLimitPrice is set equal to stopPrice (market-on-trigger semantics);
+                # a 0.1% offset is not needed because Binance fills the stop leg as a
+                # market order when stopLimitPrice == stopPrice for SELL (aggressor fill).
+                _oco_params: dict = {
+                    "stopPrice": stop_price,
+                    "stopLimitPrice": stop_price,
+                    "stopLimitTimeInForce": "GTC",
+                }
+                await self.exchange.create_order(  # type: ignore[arg-type]
+                    symbol, "OCO", exit_side, quantity, take_profit_price, _oco_params
+                )
+                logger.info(f"[Binance] OCO bracket placed for {symbol}: TP={take_profit_price} SL={stop_price}")
+            except Exception as _oco_err:
+                # OCO failed (e.g. testnet quirk, price validation error).
+                # Fall back to SL-only — the forward-engine software monitor handles TP.
+                logger.warning(
+                    f"[Binance] OCO bracket failed for {symbol} ({_oco_err})"
+                    " — falling back to SL-only; software monitor will handle TP."
                 )
                 try:
-                    # BUG-CRIT-01 FIX: result["filled"] can be 0.0 (falsy in Python) on a partial
-                    # fill, so an `or` chain would skip it and fall through to result["amount"]
-                    # (the full requested quantity), causing the emergency close to over-sell.
-                    # Use explicit None / > 0 guard instead.
-                    _filled_raw = result.get("filled")
-                    _qty_filled = float(
-                        _filled_raw if (_filled_raw is not None and _filled_raw > 0)
-                        else (result.get("amount") or quantity)
-                    )
-                    await self.exchange.create_market_order(symbol, exit_side, _qty_filled)  # type: ignore[arg-type]
-                    logger.info(f"[Binance] Emergency market close placed for {symbol} qty={_qty_filled}")
-                except Exception as _emergency_err:
+                    for _attempt in range(2):
+                        try:
+                            await self.exchange.create_order(
+                                symbol, "STOP_LOSS", exit_side, quantity,
+                                params={"stopPrice": stop_price}
+                            )
+                            break
+                        except Exception as _sl_fb_err:
+                            if _attempt == 0:
+                                await asyncio.sleep(0.5)
+                            else:
+                                raise RuntimeError(
+                                    f"[Binance] SL guard (fallback) permanently failed for {symbol}: {_sl_fb_err}"
+                                )
+                except Exception as _bracket_err:
+                    # Both OCO and SL-fallback failed — emergency close to avoid orphan.
                     logger.critical(
-                        f"[Binance] Emergency market close FAILED for {symbol}: {_emergency_err} "
-                        "— manual intervention required to close the open position."
+                        f"[Binance] Bracket placement failed for {symbol} after fill — "
+                        f"placing emergency market close to avoid orphaned position. Error: {_bracket_err}"
                     )
-                raise _bracket_err
+                    try:
+                        _filled_raw = result.get("filled")
+                        _qty_filled = float(
+                            _filled_raw if (_filled_raw is not None and _filled_raw > 0)
+                            else (result.get("amount") or quantity)
+                        )
+                        await self.exchange.create_market_order(symbol, exit_side, _qty_filled)  # type: ignore[arg-type]
+                        logger.info(f"[Binance] Emergency market close placed for {symbol} qty={_qty_filled}")
+                    except Exception as _emergency_err:
+                        logger.critical(
+                            f"[Binance] Emergency market close FAILED for {symbol}: {_emergency_err} "
+                            "— manual intervention required to close the open position."
+                        )
+                    raise _bracket_err
             order_id = str(result["id"])
             fill_price = float(result.get("average") or result.get("price") or 0.0) or None
         elif stop_price and not take_profit_price:
