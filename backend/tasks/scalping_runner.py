@@ -323,6 +323,35 @@ async def _async_run() -> None:
                     f"conf={sig.confidence:.2f} | strat={strat.name} | tf={timeframe}"
                 )
 
+                # ── In-app signal notification ───────────────────────────────────
+                try:
+                    from notifications.notifier import notifier as _notify
+                    await _notify.signal(
+                        session,
+                        title=f"⚡ [SCALP] {sig.signal} • {sig.symbol}",
+                        message=(
+                            f"Strategy: {sig.strategy_name} | "
+                            f"Entry: ${sig.entry_price:,.4f} | "
+                            f"Conf: {sig.confidence * 100:.0f}% | "
+                            f"TF: {timeframe}"
+                            + (f" | Spread: {spread_pct_live:.3f}%" if spread_pct_live else "")
+                        ),
+                        metadata={
+                            "symbol": sig.symbol,
+                            "signal": sig.signal,
+                            "entry_price": sig.entry_price,
+                            "stop_loss": sig.stop_loss,
+                            "take_profit": sig.take_profit,
+                            "strategy": sig.strategy_name,
+                            "broker": broker_name,
+                            "timeframe": timeframe,
+                            "spread_pct": spread_pct_live,
+                        },
+                    )
+                    await session.commit()
+                except Exception as _n_err:
+                    logger.debug(f"[scalping_runner] Signal notification failed: {_n_err}")
+
                 # ── Forward execution ────────────────────────────────────────────
                 if sig.signal in _TRACKABLE:
                     try:
