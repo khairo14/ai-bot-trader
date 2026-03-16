@@ -134,7 +134,7 @@ async def optimize_portfolio() -> dict:
     from db.models import TradeOutcome, Strategy
     from sqlalchemy import select
 
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     cutoff = now - datetime.timedelta(days=90)  # H-6 FIX: only last 90 days
 
     # 1. Load resolved outcomes
