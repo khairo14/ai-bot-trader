@@ -203,7 +203,7 @@ async def _fetch_live_scalp_labels(
                 select(TradeOutcome).where(
                     TradeOutcome.symbol        == symbol,
                     TradeOutcome.timeframe     == timeframe,
-                    TradeOutcome.strategy_name.like("scalp_%"),
+                    TradeOutcome.strategy_name.like("%scalp%"),
                     TradeOutcome.signal_type   == direction,
                     TradeOutcome.resolved      == True,   # noqa: E712
                     TradeOutcome.ml_label      != None,   # noqa: E711

@@ -428,11 +428,17 @@ class ForwardEngine:
                 from tasks.scalping_runner import _load_scalp_settings as _scalp_cfg
                 _scfg = _scalp_cfg()
                 broker_settings = dict(broker_settings) if broker_settings else {}
-                broker_settings["risk_per_trade_pct"]    = _scfg.get("risk_per_trade_pct", 0.5)
-                broker_settings["max_consecutive_losses"] = _scfg.get("max_consecutive_losses", 5)
+                broker_settings["risk_per_trade_pct"]        = _scfg.get("risk_per_trade_pct", 0.5)
+                broker_settings["max_consecutive_losses"]     = _scfg.get("max_consecutive_losses", 5)
+                broker_settings["daily_circuit_breaker_pct"]  = _scfg.get("daily_circuit_breaker_pct", 5.0)
+                # Scalp losses should not pollute the shared per-broker Binance CB that
+                # swing strategies also use.  An isolated "scalp" key ensures the scalp
+                # CB and swing CB are tracked and tripped independently.
+                broker_settings["_broker_cb_key"] = "scalp"
                 logger.debug(
                     f"[ForwardEngine] Scalp risk override: risk={broker_settings['risk_per_trade_pct']}% "
-                    f"max_consec={broker_settings['max_consecutive_losses']}"
+                    f"max_consec={broker_settings['max_consecutive_losses']} "
+                    f"daily_cb={broker_settings['daily_circuit_breaker_pct']}%"
                 )
             except Exception as _scfg_err:
                 logger.debug(f"[ForwardEngine] Could not load scalp risk overrides: {_scfg_err}")
@@ -1365,10 +1371,14 @@ class ForwardEngine:
         # ── Update consecutive-loss counter (portfolio, strategy, broker) ────────
         if trade.pnl is not None:
             _broker_val = trade.broker.value if hasattr(trade.broker, 'value') else None
+            # Use an isolated "scalp" CB key so scalp losses don't trip the shared
+            # per-broker Binance circuit breaker that swing strategies also rely on.
+            _trade_is_scalp = "scalp" in str(trade.strategy_name or "").lower()
+            _cb_broker_val = "scalp" if _trade_is_scalp else _broker_val
             self.risk_manager.record_outcome(
                 won=trade.pnl > 0,
                 strategy_name=getattr(trade, "strategy_name", None),
-                broker=_broker_val,
+                broker=_cb_broker_val,
             )
 
         logger.info(
@@ -1762,7 +1772,7 @@ class ForwardEngine:
             )
             # SAFETY-NET: scalp trades with null SL/TP and no time-based exit would be
             # monitored forever.  Force-close if they exceed the hard max-hold limit.
-            _is_scalp_trade = str(trade.strategy_name or "").startswith("scalp_")
+            _is_scalp_trade = "scalp" in str(trade.strategy_name or "").lower()
             if not _has_sl_tp and not _has_time:
                 if (
                     _is_scalp_trade
@@ -2326,10 +2336,12 @@ class ForwardEngine:
                     # Record outcome for risk manager circuit breaker counters
                     if trade.pnl is not None:
                         _broker_val = trade.broker.value if hasattr(trade.broker, "value") else None
+                        _trade_is_scalp = "scalp" in str(trade.strategy_name or "").lower()
+                        _cb_broker_val = "scalp" if _trade_is_scalp else _broker_val
                         self.risk_manager.record_outcome(
                             won=trade.pnl > 0,
                             strategy_name=getattr(trade, "strategy_name", None),
-                            broker=_broker_val,
+                            broker=_cb_broker_val,
                         )
 
                     # In-app notification

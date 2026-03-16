@@ -724,6 +724,9 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> dict | None:
             limit=limit,
             asset_class=_asset_cls_str,
         )
+        # Always expose the human-readable strategy display name in signals/trades
+        # so the UI and DB are consistent.  strategy_type is only used as the algo key.
+        sig.strategy_name = strat.name
 
         logger.info(
             f"[ForwardTest] {sig.signal} {strat.name} | {symbol} "

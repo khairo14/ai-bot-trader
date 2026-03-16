@@ -55,6 +55,7 @@ def _load_scalp_settings() -> dict:
         # Risk gate overrides — applied by ForwardEngine for all scalp_ signals
         # so they don't compete with the global broker_risk_settings row.
         "max_consecutive_losses": 5,   # higher tolerance than swing (3)
+        "daily_circuit_breaker_pct": 5.0,  # independent of Binance swing CB (swing uses DB row, default 3%)
         "session_filter": {"crypto": None, "stock": ["14:30-21:00"]},
     }
     try:
@@ -373,6 +374,8 @@ async def _async_run() -> None:
                             if result is not None:
                                 # BUG-FIX: set signal_id and commit so the FK is persisted
                                 result.signal_id = db_signal.id
+                                # Ensure trade shows the human-readable display name, not the algo type.
+                                result.strategy_name = _display_name
                                 db_signal.acted_on = True
                                 exec_session.add(result)
                                 await exec_session.commit()

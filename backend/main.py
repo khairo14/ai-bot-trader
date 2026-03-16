@@ -74,7 +74,7 @@ async def _sl_tp_heartbeat():
 
 async def _scalping_sl_tp_heartbeat():
     """
-    Dedicated 5-second SL/TP monitor for scalping trades only.
+    Dedicated 5-second SL/TP monitor for scalping trades.
 
     Why 5s instead of 60s:
       Scalp trades have tight stops (0.8 × ATR) and are designed to close
@@ -82,9 +82,10 @@ async def _scalping_sl_tp_heartbeat():
       position open for up to a full minute — unacceptable at 5m timeframes.
 
     Scope:
-      Only queries trades where strategy_name LIKE 'scalp_%' via the
-      strategy_prefix argument added to ForwardEngine.monitor_sl_tp().
-      Swing trades are never touched here.
+      Scans ALL open trades so that scalp trades stored with display names
+      (e.g. "5min SOL scalp") are caught in addition to any legacy type-named
+      trades.  Swing trades also get 5s SL/TP enforcement as a bonus; the
+      per-strategy scheduler's monitor call remains the primary path for them.
 
     Does NOT call reconcile_positions (too expensive at 5s cadence;
     the 60s swing heartbeat covers that for all trades including scalp).
@@ -102,9 +103,9 @@ async def _scalping_sl_tp_heartbeat():
             async with AsyncSessionLocal() as session:
                 await _engine.initialize(session)
                 try:
-                    closed = await _engine.monitor_sl_tp(session, strategy_prefix="scalp_")
+                    closed = await _engine.monitor_sl_tp(session)
                     if closed:
-                        logger.info(f"[Scalp SL/TP Heartbeat] Closed {closed} scalp position(s) via SL/TP")
+                        logger.info(f"[Scalp SL/TP Heartbeat] Closed {closed} position(s) via SL/TP")
                 except Exception as _me:
                     logger.debug(f"[Scalp SL/TP Heartbeat] Monitor error: {_me}")
                 try:
@@ -194,6 +195,11 @@ async def _forward_test_scheduler():
                 tf           = params.get("timeframe", "1h")
                 interval     = timeframe_to_seconds(tf)
                 broker_name  = strat.broker.value
+
+                # Scalp strategies are driven exclusively by scalping_runner (Celery, 60s).
+                # Running them here too creates duplicate signals and trades.
+                if params.get("strategy_type", "").startswith("scalp_"):
+                    continue
 
                 # Last closed candle boundary (UTC epoch)
                 last_close   = math.floor(now / interval) * interval

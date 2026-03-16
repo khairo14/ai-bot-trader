@@ -175,7 +175,7 @@ export default function Dashboard() {
   const [regimeError, setRegimeError] = useState(false)
   const [portfolioWeights, setPortfolioWeights] = useState<WeightsData | null>(null)
   const [optimizing, setOptimizing] = useState(false)
-  const [allocCollapsed, setAllocCollapsed] = useState(false)
+  const [allocCollapsed, setAllocCollapsed] = useState(true)
   const [openPositions, setOpenPositions] = useState<OpenPosition[]>([])
   const [trades, setTrades] = useState<Trade[]>([])
   const [tradePage, setTradePage] = useState(1)
@@ -395,8 +395,8 @@ export default function Dashboard() {
   const filteredSignals = signalFilter === 'all'
     ? signals
     : signalFilter === 'scalp'
-      ? signals.filter(s => s.strategy_name?.startsWith('scalp_'))
-      : signals.filter(s => !s.strategy_name?.startsWith('scalp_'))
+      ? signals.filter(s => s.strategy_name?.toLowerCase().includes('scalp'))
+      : signals.filter(s => !s.strategy_name?.toLowerCase().includes('scalp'))
 
   return (
     <div className="p-6 space-y-6">
