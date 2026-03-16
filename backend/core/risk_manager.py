@@ -242,7 +242,7 @@ class RiskManager:
                 {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
             )
             _b["max_consecutive_losses_effective"] = _max_consec
-        # ── Per-broker circuit breaker (checked first) ────────────────────────
+        # ── Per-broker circuit breaker and consecutive-loss check ──────────────
         if broker:
             b_state = self._per_broker.get(broker, {})
             if b_state.get("circuit_breaker_active", False):
@@ -253,6 +253,18 @@ class RiskManager:
                         f"Per-broker circuit breaker active for '{broker}'. "
                         f"Consecutive losses: {b_state.get('consecutive_losses', 0)}. "
                         f"Reset required."
+                    ),
+                )
+            # Also enforce the count directly so broker-specific _max_consec
+            # overrides are respected even before record_outcome() trips the CB.
+            if b_state.get("consecutive_losses", 0) >= _max_consec:
+                return RiskValidation(
+                    approved=False,
+                    position_size=0, position_value=0, risk_amount=0, stop_distance=0,
+                    reason=(
+                        f"Consecutive loss limit reached for broker '{broker}' "
+                        f"({b_state.get('consecutive_losses', 0)}/{_max_consec}). "
+                        f"Manual reset required."
                     ),
                 )
 
@@ -284,52 +296,28 @@ class RiskManager:
                     ),
                 )
 
-        # ── Level 4: Portfolio-wide circuit breaker ───────────────────────────
-        if self._circuit_breaker_active:
-            return RiskValidation(
-                approved=False,
-                position_size=0, position_value=0, risk_amount=0, stop_distance=0,
-                reason="Daily circuit breaker is active. Reset required."
-            )
-
-        # Trip portfolio-wide CB using broker-specific daily P&L threshold
-        if account_balance > 0:
+        # ── Level 4: Per-broker daily circuit breaker ────────────────────────────
+        # Only trip/check the CB for the signal's own broker; global state is no
+        # longer used to gate individual broker signals.
+        if broker and account_balance > 0:
             daily_loss_pct = daily_pnl / account_balance
             if daily_loss_pct <= -_daily_cb_pct:
-                # BUG-3 FIX: trip ONLY the per-broker CB — never the global one from a
-                # per-broker daily-loss check. The global CB halts ALL brokers and should
-                # only fire for portfolio-wide thresholds, not a single broker breach.
-                if broker:
-                    b = self._per_broker.setdefault(
-                        broker,
-                        {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
-                    )
-                    b["circuit_breaker_active"] = True
-                    b["circuit_breaker_date"] = str(date.today())
-                else:
-                    # No specific broker context — treat as portfolio-wide daily loss
-                    self._circuit_breaker_active = True
+                b = self._per_broker.setdefault(
+                    broker,
+                    {"consecutive_losses": 0, "circuit_breaker_active": False, "circuit_breaker_date": None},
+                )
+                b["circuit_breaker_active"] = True
+                b["circuit_breaker_date"] = str(date.today())
                 self._save_state()
                 logger.warning(
                     f"[RiskManager] CIRCUIT BREAKER TRIGGERED — "
-                    f"broker={broker or 'global'} daily loss: {daily_loss_pct*100:.2f}%"
+                    f"broker={broker} daily loss: {daily_loss_pct*100:.2f}%"
                 )
                 return RiskValidation(
                     approved=False,
                     position_size=0, position_value=0, risk_amount=0, stop_distance=0,
-                    reason=f"Circuit breaker triggered: daily loss {daily_loss_pct*100:.2f}%"
+                    reason=f"Circuit breaker triggered: daily loss {daily_loss_pct*100:.2f}% for broker '{broker}'"
                 )
-
-        # ── Level 2: Consecutive losses (effective threshold) ─────────────────
-        if self.consecutive_losses >= _max_consec:
-            return RiskValidation(
-                approved=False,
-                position_size=0, position_value=0, risk_amount=0, stop_distance=0,
-                reason=(
-                    f"Consecutive loss limit reached ({self.consecutive_losses}/"
-                    f"{_max_consec}). Manual reset required."
-                ),
-            )
 
         # ── Level 3: Open positions limit (effective threshold) ───────────────
         if open_positions_count >= _max_positions:

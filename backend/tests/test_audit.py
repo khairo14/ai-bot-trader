@@ -90,12 +90,12 @@ class TestRiskManager(unittest.TestCase):
         self.assertGreater(v.position_size, 0)
 
     def test_circuit_breaker_blocks_on_loss(self):
-        sig = _make_signal()
+        sig = _make_signal()  # broker="binance"
         # 6% daily loss on a 10k account triggers 5% breaker
-        v = self.rm.validate(sig, account_balance=10_000, open_positions_count=0, daily_pnl=-600)
+        v = self.rm.validate(sig, account_balance=10_000, open_positions_count=0, daily_pnl=-600, broker="binance")
         self.assertFalse(v.approved)
         self.assertIn("Circuit breaker", v.reason or "")
-        self.assertTrue(self.rm._circuit_breaker_active)
+        self.assertTrue(self.rm._per_broker["binance"]["circuit_breaker_active"])
 
     def test_circuit_breaker_persists_after_reset(self):
         self.rm._circuit_breaker_active = True
@@ -115,16 +115,24 @@ class TestRiskManager(unittest.TestCase):
         self.assertFalse(rm2._circuit_breaker_active)  # new day → cleared
 
     def test_active_circuit_breaker_blocks_immediately(self):
-        self.rm._circuit_breaker_active = True
+        # Trip the per-broker CB for 'binance' (what _make_signal() uses)
+        self.rm._per_broker["binance"] = {
+            "consecutive_losses": 3, "circuit_breaker_active": True,
+            "circuit_breaker_date": str(date.today()),
+        }
         sig = _make_signal()
-        v = self.rm.validate(sig, account_balance=10_000, open_positions_count=0, daily_pnl=0)
+        v = self.rm.validate(sig, account_balance=10_000, open_positions_count=0, daily_pnl=0, broker="binance")
         self.assertFalse(v.approved)
         self.assertIn("circuit breaker", (v.reason or "").lower())
 
     def test_consecutive_losses_blocks(self):
-        self.rm.consecutive_losses = 3  # default max=3
-        sig = _make_signal()
-        v = self.rm.validate(sig, account_balance=10_000, open_positions_count=0, daily_pnl=0)
+        # Set per-broker streak to the default max (3) for 'binance'
+        self.rm._per_broker["binance"] = {
+            "consecutive_losses": 3, "circuit_breaker_active": False,
+            "circuit_breaker_date": None,
+        }
+        sig = _make_signal()  # broker="binance"
+        v = self.rm.validate(sig, account_balance=10_000, open_positions_count=0, daily_pnl=0, broker="binance")
         self.assertFalse(v.approved)
         self.assertIn("Consecutive loss", v.reason or "")
 
