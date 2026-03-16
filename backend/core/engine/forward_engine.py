@@ -408,6 +408,27 @@ class ForwardEngine:
             except Exception as _bs_err:
                 logger.debug(f"[ForwardEngine] Could not load broker settings for {broker_key}: {_bs_err}")
 
+        # ── Scalp-signal risk overrides ───────────────────────────────────────
+        # scalp_ strategies require a much smaller position size (0.5% vs 2.0%)
+        # and tolerate more consecutive losses before the circuit breaker fires.
+        # These values come from the scalping settings JSON so they're tunable
+        # at runtime without touching broker_risk_settings or config.py.
+        # This ensures swing and scalp strategies share Binance but each uses
+        # their own correct risk envelope.
+        if getattr(signal, "strategy_name", "").startswith("scalp_"):
+            try:
+                from tasks.scalping_runner import _load_scalp_settings as _scalp_cfg
+                _scfg = _scalp_cfg()
+                broker_settings = dict(broker_settings) if broker_settings else {}
+                broker_settings["risk_per_trade_pct"]    = _scfg.get("risk_per_trade_pct", 0.5)
+                broker_settings["max_consecutive_losses"] = _scfg.get("max_consecutive_losses", 5)
+                logger.debug(
+                    f"[ForwardEngine] Scalp risk override: risk={broker_settings['risk_per_trade_pct']}% "
+                    f"max_consec={broker_settings['max_consecutive_losses']}"
+                )
+            except Exception as _scfg_err:
+                logger.debug(f"[ForwardEngine] Could not load scalp risk overrides: {_scfg_err}")
+
         # ── Daily P&L from DB filtered to this broker (for circuit breaker) ──
         # BUG-LOW-05 FIX: pass is_paper so paper losses don't trip the live
         # circuit breaker and live losses don't block paper strategies.

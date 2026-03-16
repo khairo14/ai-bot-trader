@@ -52,6 +52,9 @@ def _load_scalp_settings() -> dict:
         "min_score": 4,
         "ml_veto_threshold": 0.40,
         "sr_tp_snap": False,
+        # Risk gate overrides — applied by ForwardEngine for all scalp_ signals
+        # so they don't compete with the global broker_risk_settings row.
+        "max_consecutive_losses": 5,   # higher tolerance than swing (3)
         "session_filter": {"crypto": None, "stock": ["14:30-21:00"]},
     }
     try:

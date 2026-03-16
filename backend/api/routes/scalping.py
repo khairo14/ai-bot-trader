@@ -40,6 +40,8 @@ _SETTINGS_DEFAULTS = {
     "min_score": 4,
     "ml_veto_threshold": 0.40,
     "sr_tp_snap": False,
+    # Risk gate overrides (applied by ForwardEngine for scalp_ signals only)
+    "max_consecutive_losses": 5,   # higher tolerance than swing (3)
     "session_filter": {"crypto": None, "stock": ["14:30-21:00"]},
 }
 
@@ -174,17 +176,18 @@ async def get_scalp_settings(_user=Depends(get_current_user)):
 # ── POST /scalping/settings ───────────────────────────────────────────────────
 
 class ScalpingSettingsUpdate(BaseModel):
-    enabled:            Optional[bool]  = None
-    timeframe:          Optional[str]   = None
-    risk_per_trade_pct: Optional[float] = None
-    sl_atr_mult:        Optional[float] = None
-    tp_atr_mult:        Optional[float] = None
-    min_volume_ratio:   Optional[float] = None
-    max_spread_pct:     Optional[float] = None
-    min_score:          Optional[int]   = None
-    ml_veto_threshold:  Optional[float] = None
-    sr_tp_snap:         Optional[bool]  = None
-    session_filter:     Optional[dict]  = None
+    enabled:                Optional[bool]  = None
+    timeframe:              Optional[str]   = None
+    risk_per_trade_pct:     Optional[float] = None
+    sl_atr_mult:            Optional[float] = None
+    tp_atr_mult:            Optional[float] = None
+    min_volume_ratio:       Optional[float] = None
+    max_spread_pct:         Optional[float] = None
+    min_score:              Optional[int]   = None
+    ml_veto_threshold:      Optional[float] = None
+    sr_tp_snap:             Optional[bool]  = None
+    max_consecutive_losses: Optional[int]   = None
+    session_filter:         Optional[dict]  = None
 
 
 @router.post("/settings")
@@ -214,6 +217,11 @@ async def update_scalp_settings(
         v = updates["ml_veto_threshold"]
         if not (0.20 <= v <= 0.70):
             raise HTTPException(status_code=422, detail="ml_veto_threshold must be 0.20–0.70")
+
+    if "max_consecutive_losses" in updates:
+        v = updates["max_consecutive_losses"]
+        if not (1 <= v <= 20):
+            raise HTTPException(status_code=422, detail="max_consecutive_losses must be 1–20")
 
     merged = {**current, **updates}
     _write_settings(merged)
