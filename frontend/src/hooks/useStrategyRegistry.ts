@@ -10,12 +10,12 @@ interface StrategyRegistry {
 // Fallback keeps the UI functional when the backend is unreachable on first load.
 const FALLBACK: StrategyRegistry = {
   by_broker: {
-    binance: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
-    alpaca:  ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb'],
+    binance: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb', 'scalp_ema_vwap'],
+    alpaca:  ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb', 'scalp_ema_vwap'],
     ibkr:    ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb',
                'iron_condor', 'covered_call', 'bull_call_spread'],
   },
-  all: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb',
+  all: ['hybrid_macd_rsi', 'momentum_breakout', 'mean_reversion_bb', 'scalp_ema_vwap',
         'iron_condor', 'covered_call', 'bull_call_spread'],
   options_strategies: ['iron_condor', 'covered_call', 'bull_call_spread'],
 }
