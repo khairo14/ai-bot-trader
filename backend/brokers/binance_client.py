@@ -326,12 +326,23 @@ class BinanceClient(AbstractBroker):
                 # OCO: TP (limit) + SL (stop-loss) in a single atomic order.
                 # For a SELL OCO: limit price (TP) must be above stop price (SL).
                 # For a BUY  OCO: limit price (TP) must be below stop price (SL).
-                # stopLimitPrice is set equal to stopPrice (market-on-trigger semantics);
-                # a 0.1% offset is not needed because Binance fills the stop leg as a
-                # market order when stopLimitPrice == stopPrice for SELL (aggressor fill).
+                #
+                # CRITICAL: stopLimitPrice must have a slippage buffer so the stop-limit
+                # leg still fills when price GAPS through the trigger level in one tick.
+                # Without this buffer, a fast move leaves the limit order dangling above
+                # (BUY) or below (SELL) market and the position goes unprotected.
+                # Buffer 0.2%:
+                #   SELL OCO (exit long):  stopLimitPrice = stopPrice × 0.998  (fills on downward gap)
+                #   BUY  OCO (exit short): stopLimitPrice = stopPrice × 1.002  (fills on upward gap)
+                _SL_SLIP_PCT = 0.002
+                _stop_lmt_price = round(
+                    stop_price * (1.0 - _SL_SLIP_PCT) if exit_side == "sell"
+                    else stop_price * (1.0 + _SL_SLIP_PCT),
+                    8,
+                )
                 _oco_params: dict = {
                     "stopPrice": stop_price,
-                    "stopLimitPrice": stop_price,
+                    "stopLimitPrice": _stop_lmt_price,
                     "stopLimitTimeInForce": "GTC",
                 }
                 await self.exchange.create_order(  # type: ignore[arg-type]

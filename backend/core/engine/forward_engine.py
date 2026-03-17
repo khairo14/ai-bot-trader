@@ -1840,9 +1840,9 @@ class ForwardEngine:
                     _price_cache[_ck] = (_bid, _ask)
 
         # Hard max-hold for scalp trades with null SL/TP — safety net in case bracket
-        # order placement failed and the trade was left unprotected.  2 hours is generous
-        # for any scalp timeframe (1m–5m); even a 5m scalp should be resolved within 30m.
-        _SCALP_NULL_SLTP_MAX_HOLD_H = 2.0
+        # order placement failed and the trade was left unprotected.
+        # 0.5h (30 min): a 5m scalp should resolve long before this.
+        _SCALP_NULL_SLTP_MAX_HOLD_H = 0.5
 
         for trade in open_trades:
             # Skip price fetch entirely if this trade has nothing to monitor:
@@ -1852,9 +1852,12 @@ class ForwardEngine:
                 _param_float(trade.strategy_name, "breakeven_after_hours") is not None
                 or _param_float(trade.strategy_name, "max_hold_hours") is not None
             )
-            # SAFETY-NET: scalp trades with null SL/TP and no time-based exit would be
-            # monitored forever.  Force-close if they exceed the hard max-hold limit.
-            _is_scalp_trade = "scalp" in str(trade.strategy_name or "").lower()
+            # Use strategy_type (stable algo key) first, fall back to strategy_name text search
+            # so display-name scalp trades ("5min UNI/USDT") are correctly identified.
+            _is_scalp_trade = (
+                str(getattr(trade, "strategy_type", "") or "").startswith("scalp_")
+                or "scalp" in str(trade.strategy_name or "").lower()
+            )
             if not _has_sl_tp and not _has_time:
                 if (
                     _is_scalp_trade
@@ -2018,6 +2021,19 @@ class ForwardEngine:
 
                 _breakeven_h = _param_float(trade.strategy_name, "breakeven_after_hours")
                 _maxhold_h   = _param_float(trade.strategy_name, "max_hold_hours")
+
+                # For scalp trades: if max_hold_hours is not set in the strategy DB
+                # params, fall back to the global scalping_settings.json value.
+                # This force-closes stuck scalp positions even without explicit DB params.
+                if _maxhold_h is None and _is_scalp_trade:
+                    try:
+                        from tasks.scalping_runner import _load_scalp_settings as _lss
+                        _scalp_cfg = _lss()
+                        _mh = float(_scalp_cfg.get("max_hold_hours", 0))
+                        if _mh > 0:
+                            _maxhold_h = _mh
+                    except Exception:
+                        pass
 
                 # max_hold: force-close the position — capital has been tied up too long.
                 if _maxhold_h is not None and _age_hours >= _maxhold_h:

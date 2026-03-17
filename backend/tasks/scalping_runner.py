@@ -248,6 +248,39 @@ async def _async_run() -> None:
                 # Mark candle as processed (only trackable signals reach here)
                 _last_scalp_candle_fired[strat.id] = last_close_ts
 
+                # ── Max-concurrent scalp positions gate ───────────────────────
+                # Prevents all symbols from entering simultaneously (correlated losses).
+                # Counts ALL open scalp positions on the same broker (paper or live)
+                # by strategy_type prefix OR display names matching known scalp strategies.
+                _max_concurrent = int(cfg.get("max_concurrent_scalp_positions", 10))
+                if _max_concurrent < 10:  # only run the query if actually configured
+                    from db.models import (
+                        Trade as _TradeM,
+                        LiveTrade as _LiveTradeM,
+                        OrderStatus as _OS_c,
+                    )
+                    from sqlalchemy import select as _sel_c, func as _func_c, or_ as _or_c
+                    _scalp_display_names = [s.name for s in scalp_strats]
+                    _ScalpModel = _TradeM if strat.is_paper else _LiveTradeM
+                    _open_cnt_q = await session.execute(
+                        _sel_c(_func_c.count()).select_from(_ScalpModel).where(
+                            _ScalpModel.status == _OS_c.OPEN,
+                            _ScalpModel.broker == strat.broker,
+                            _or_c(
+                                _ScalpModel.strategy_type.like("scalp_%"),
+                                _ScalpModel.strategy_name.in_(_scalp_display_names),
+                            ),
+                        )
+                    )
+                    _open_scalp_count = _open_cnt_q.scalar() or 0
+                    if _open_scalp_count >= _max_concurrent:
+                        logger.info(
+                            f"[scalping_runner] {strat.name}: {_open_scalp_count}/{_max_concurrent} "
+                            f"concurrent scalp positions on {strat.broker.value if hasattr(strat.broker, 'value') else strat.broker} "
+                            f"— skipping to prevent over-exposure"
+                        )
+                        continue
+
                 # ── Coerce enums ───────────────────────────────────────────────
                 try:
                     sig_type = SignalType(sig.signal)
