@@ -256,7 +256,8 @@ export function ChartPanel({ compact = false, defaultSymbol, defaultBroker, defa
 
   const [broker, setBroker]           = useState(initBroker)
   const [symbol, setSymbol]           = useState(initSymbol)
-  const [timeframe, setTimeframe]     = useState(defaultTimeframe ?? '1h')
+  const safeTf = TIMEFRAMES.includes(defaultTimeframe ?? '') ? defaultTimeframe! : '1h'
+  const [timeframe, setTimeframe]     = useState(safeTf)
   const [rangePreset, setRangePreset] = useState<Preset>('1M')
   const [customFrom, setCustomFrom]   = useState(() => toDateInput(Date.now() - 30*24*3600*1000))
   const [customTo, setCustomTo]       = useState(() => toDateInput(Date.now()))

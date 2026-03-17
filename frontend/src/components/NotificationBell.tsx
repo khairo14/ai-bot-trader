@@ -73,7 +73,11 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
         // notification would disappear immediately.
         const fetchedIds = new Set(fetched.map(n => n.id))
         const wsOnly = prev.filter(n => !fetchedIds.has(n.id))
-        return [...wsOnly, ...fetched].slice(0, 25)
+        // Always sort newest-first so new notifications appear at the top
+        // regardless of whether they arrived via WS or DB poll.
+        return [...wsOnly, ...fetched]
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          .slice(0, 25)
       })
       setUnread(countRes.data.unread_count ?? 0)
     } catch { /* silent */ }
@@ -105,7 +109,10 @@ export default function NotificationBell({ wsMessage, collapsed }: Props) {
           created_at: raw.created_at ?? new Date().toISOString(),
         }
         setNotifications(prev =>
-          prev.some(n => n.id === incoming.id) ? prev : [incoming, ...prev].slice(0, 25)
+          prev.some(n => n.id === incoming.id) ? prev
+            : [incoming, ...prev]
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                .slice(0, 25)
         )
         setUnread(prev => prev + 1)
       } else {

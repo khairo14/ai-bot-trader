@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from typing import Optional
 from loguru import logger
 
+from sqlalchemy.orm import selectinload
+
 from db.database import get_db
 from db.models import Trade, LiveTrade, OrderStatus
 from core.auth import get_current_user, require_admin
@@ -31,7 +33,7 @@ def _trade_dict(t: Trade | LiveTrade) -> dict:
         "pnl_pct": t.pnl_pct,
         "broker": t.broker.value if hasattr(t.broker, "value") else t.broker,
         "strategy_name": t.strategy_name,
-        "timeframe": getattr(t, "timeframe", None),  # BUG-1 FIX: Trade/LiveTrade have no timeframe col
+        "timeframe": (t.signal.timeframe if getattr(t, 'signal', None) else None) or getattr(t, 'timeframe', None),
         "is_paper": t.is_paper,
         "status": t.status.value if hasattr(t.status, "value") else t.status,
         "opened_at": t.opened_at.isoformat() if t.opened_at else None,
@@ -45,8 +47,14 @@ async def get_open_positions(
     _user=Depends(get_current_user),
 ):
     """Get all currently open (paper or live) positions."""
-    paper = list((await db.execute(select(Trade).where(Trade.status == OrderStatus.OPEN))).scalars().all())
-    live  = list((await db.execute(select(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN))).scalars().all())
+    paper = list((await db.execute(
+        select(Trade).where(Trade.status == OrderStatus.OPEN)
+        .options(selectinload(Trade.signal))
+    )).scalars().all())
+    live  = list((await db.execute(
+        select(LiveTrade).where(LiveTrade.status == OrderStatus.OPEN)
+        .options(selectinload(LiveTrade.signal))
+    )).scalars().all())
     return {"positions": [_trade_dict(t) for t in paper + live]}
 
 
