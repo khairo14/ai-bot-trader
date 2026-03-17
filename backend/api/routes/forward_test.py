@@ -928,6 +928,7 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> dict | None:
                 is_paper=strat.is_paper,
                 db_session=session,
                 position_size_multiplier=port_weight,
+                strategy_params=params,
             ) if allow_execution else None
 
             if trade is not None:
@@ -1224,11 +1225,23 @@ async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db), _us
     # Force full-auto execution
     engine = ForwardEngine()
     await engine.initialize(db)
+    # Pass strategy params so scalp risk settings (risk_per_trade_pct, _broker_cb_key,
+    # max_consecutive_losses) and portfolio weight are applied correctly.
+    _exec_params = strat.parameters or {} if strat else {}
+    _exec_weight = 1.0
+    try:
+        _w = _exec_params.get("weight")
+        if _w is not None:
+            _exec_weight = max(0.05, float(_w))
+    except (TypeError, ValueError):
+        pass
     trade = await engine.process_signal(
         signal=sig,
         execution_mode="full-auto",
         is_paper=is_paper,
         db_session=db,
+        position_size_multiplier=_exec_weight,
+        strategy_params=_exec_params,
     )
 
     if trade is None:
