@@ -655,8 +655,12 @@ def run_signals(self):
                         # still save the signal (visible on Dashboard as low-conf).
                         # Threshold is read from strategy params first, then
                         # per-strategy default, then global MIN_CONFLUENCE.
+                        # BUG-FIX: use _active_strategy_type (the strategy that actually
+                        # generated the signal, which may differ from strategy_type after
+                        # a regime auto-switch) so confluence reruns the *same* algo on
+                        # higher TFs, not the originally-configured one.
                         _strat_default = _STRATEGY_CONFLUENCE_DEFAULTS.get(
-                            strategy_type, MIN_CONFLUENCE
+                            _active_strategy_type, MIN_CONFLUENCE
                         )
                         _min_conf = float(
                             params.get("min_confluence", _strat_default)
@@ -665,7 +669,7 @@ def run_signals(self):
                         conf = 1.0
                         if sig.signal in _TRACKABLE_SIGNALS and _min_conf > 0.0:
                             conf = await _confluence_score(
-                                local_signal_engine, strategy_type, symbol,
+                                local_signal_engine, _active_strategy_type, symbol,
                                 strat.broker.value, timeframe, sig.signal,
                             )
                             if conf < _min_conf:
