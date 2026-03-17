@@ -121,6 +121,7 @@ interface OpenPosition {
   pnl_pct: number | null
   broker: string
   strategy_name: string | null
+  timeframe: string
   is_paper: boolean
   opened_at: string | null
 }

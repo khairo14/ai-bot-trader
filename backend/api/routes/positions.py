@@ -31,6 +31,7 @@ def _trade_dict(t: Trade | LiveTrade) -> dict:
         "pnl_pct": t.pnl_pct,
         "broker": t.broker.value if hasattr(t.broker, "value") else t.broker,
         "strategy_name": t.strategy_name,
+        "timeframe": t.timeframe,
         "is_paper": t.is_paper,
         "status": t.status.value if hasattr(t.status, "value") else t.status,
         "opened_at": t.opened_at.isoformat() if t.opened_at else None,
