@@ -207,10 +207,12 @@ async def _async_run() -> None:
 
                 # ── Live spread check ────────────────────────────────────────────
                 spread_pct_live: Optional[float] = None
+                _live_bid: Optional[float] = None
+                _live_ask: Optional[float] = None
                 try:
-                    bid, ask = await asyncio.wait_for(broker.get_bid_ask(symbol), timeout=5.0)
-                    if bid and ask and bid > 0:
-                        spread_pct_live = (ask - bid) / ((ask + bid) / 2) * 100
+                    _live_bid, _live_ask = await asyncio.wait_for(broker.get_bid_ask(symbol), timeout=5.0)
+                    if _live_bid and _live_ask and _live_bid > 0:
+                        spread_pct_live = (_live_ask - _live_bid) / ((_live_ask + _live_bid) / 2) * 100
                 except Exception as _sp_err:
                     logger.debug(f"[scalping_runner] Spread fetch skipped: {_sp_err}")
 
@@ -259,6 +261,40 @@ async def _async_run() -> None:
 
                 # Mark candle as processed (only trackable signals reach here)
                 _last_scalp_candle_fired[strat.id] = last_close_ts
+
+                # ── Live price anchoring: shift SL/TP to actual fill price ────
+                # signal.entry_price = last candle CLOSE, which can be 5–30s old
+                # by the time ForwardEngine opens the trade.  If price has drifted
+                # during that window, the SL (anchored to the stale close) is
+                # effectively much closer to the real fill price — causing instant
+                # stop-outs on the very next monitor tick.
+                # Fix: shift SL/TP by the delta between live bid/ask and signal price.
+                if _live_bid is not None and _live_ask is not None:
+                    # For longs we fill at ask; for shorts we fill at bid
+                    _is_long_sig = sig.signal in ("BUY", "COVER")
+                    _fill_estimate = _live_ask if _is_long_sig else _live_bid
+                    _entry_delta = _fill_estimate - sig.entry_price
+                    if abs(_entry_delta) > 0:
+                        if sig.stop_loss is not None:
+                            sig.stop_loss = round(sig.stop_loss + _entry_delta, 8)
+                        if sig.take_profit is not None:
+                            sig.take_profit = round(sig.take_profit + _entry_delta, 8)
+                        sig.entry_price = round(_fill_estimate, 8)
+                    # Stale/breached signal guard: if live price has ALREADY moved
+                    # past the SL there is no R:R left — skip rather than open a
+                    # trade that the monitor will close within 5 seconds.
+                    if sig.stop_loss is not None:
+                        _sl_already_hit = (
+                            (_is_long_sig and _fill_estimate <= sig.stop_loss) or
+                            (not _is_long_sig and _fill_estimate >= sig.stop_loss)
+                        )
+                        if _sl_already_hit:
+                            logger.info(
+                                f"[scalping_runner] STALE {symbol} {sig.signal}: "
+                                f"live={'ask' if _is_long_sig else 'bid'}={_fill_estimate:.6f} "
+                                f"already past SL={sig.stop_loss:.6f} — skipping instant stop-out"
+                            )
+                            continue
 
                 # ── Max-concurrent scalp positions gate ───────────────────────
                 # Prevents all symbols from entering simultaneously (correlated losses).

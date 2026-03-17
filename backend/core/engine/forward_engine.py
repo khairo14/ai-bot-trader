@@ -831,6 +831,41 @@ class ForwardEngine:
             and side == "sell"
         )
         if _is_binance_paper_short:
+            # Paper SHORT on Binance is fully simulated (no broker call).
+            # signal.entry_price = last candle close, which may be stale.
+            # Fetch the current bid so SL/TP are anchored to the real fill level,
+            # not a candle close that happened 5–30s ago.
+            try:
+                _now_bid = await asyncio.wait_for(broker.get_price(signal.symbol), timeout=4.0)
+                if _now_bid and _now_bid > 0 and signal.entry_price and signal.entry_price > 0:
+                    _entry_delta = _now_bid - signal.entry_price
+                    if abs(_entry_delta) > 0:
+                        if trade.stop_loss is not None:
+                            trade.stop_loss   = round(trade.stop_loss   + _entry_delta, 8)
+                        if trade.take_profit is not None:
+                            trade.take_profit = round(trade.take_profit + _entry_delta, 8)
+                        trade.entry_price = round(_now_bid, 8)
+                        logger.info(
+                            f"[ForwardEngine] Paper SHORT price anchored: {signal.symbol} "
+                            f"entry {signal.entry_price:.6f}→{trade.entry_price:.6f} "
+                            f"sl→{trade.stop_loss:.6f} tp→{trade.take_profit:.6f}"
+                        )
+                    # Guard: if current price is already at or past SL, this trade
+                    # would be instantly stopped out by the 5s monitor — reject it.
+                    if trade.stop_loss is not None and _now_bid >= trade.stop_loss:
+                        logger.warning(
+                            f"[ForwardEngine] Paper SHORT {signal.symbol} rejected: "
+                            f"live bid {_now_bid:.6f} >= SL {trade.stop_loss:.6f} — instant stop-out avoided"
+                        )
+                        trade.status = OrderStatus.REJECTED
+                        trade.notes = f"Rejected: live price {_now_bid:.6f} already past SL {trade.stop_loss:.6f}"
+                        if db_session:
+                            db_session.add(trade)
+                            await db_session.commit()
+                        return trade
+            except Exception as _pb_err:
+                logger.debug(f"[ForwardEngine] Paper SHORT price anchor failed for {signal.symbol}: {_pb_err}")
+
             trade.status = OrderStatus.OPEN
             trade.broker_order_id = (
                 f"paper_short_{signal.symbol}_{int(datetime.now(timezone.utc).timestamp())}"
@@ -842,7 +877,7 @@ class ForwardEngine:
             self._paper_positions[f"{signal.symbol}:{broker_key}"] = trade
             logger.info(
                 f"[ForwardEngine] ✅ PAPER SHORT simulated (Binance spot has no short balance): "
-                f"{signal.signal} {signal.symbol} @ {signal.entry_price} qty={effective_size}"
+                f"{signal.signal} {signal.symbol} @ {trade.entry_price} qty={effective_size}"
             )
             try:
                 from notifications.notifier import notifier as _notifier
@@ -850,7 +885,7 @@ class ForwardEngine:
                     db_session,
                     title=f"[PAPER] Short Opened — {signal.symbol}",
                     message=(
-                        f"{signal.signal} {signal.symbol} @ {signal.entry_price} "
+                        f"{signal.signal} {signal.symbol} @ {trade.entry_price} "
                         f"qty={effective_size} — paper simulated"
                     ),
                     metadata={
