@@ -667,6 +667,11 @@ class ForwardEngine:
             return None
 
         TradeModel = _trade_model(is_paper)
+        # Capture the stable algo key before scalping_runner (or anything else)
+        # overwrites signal.strategy_name with a display name like "5min UNI/USDT".
+        # strategy_params["strategy_type"] is always the canonical algo key
+        # (e.g. "scalp_ema_vwap", "hybrid_macd_rsi") so CB isolation works correctly.
+        _algo_key = (strategy_params or {}).get("strategy_type") or signal.strategy_name
         trade = TradeModel(
             symbol=signal.symbol,
             side=signal.signal.lower(),
@@ -681,6 +686,7 @@ class ForwardEngine:
             asset_class=signal.asset_class,
             is_paper=is_paper,
             strategy_name=signal.strategy_name,
+            strategy_type=_algo_key,
             opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
             user_id=getattr(signal, "user_id", None),  # I9: propagate user for audit trail
         )
@@ -1445,13 +1451,15 @@ class ForwardEngine:
         # ── Update consecutive-loss counter (portfolio, strategy, broker) ────────
         if trade.pnl is not None:
             _broker_val = trade.broker.value if hasattr(trade.broker, 'value') else None
-            # Use an isolated "scalp" CB key so scalp losses don't trip the shared
-            # per-broker Binance circuit breaker that swing strategies also rely on.
-            _trade_is_scalp = "scalp" in str(trade.strategy_name or "").lower()
+            # Use strategy_type (stable algo key set at trade creation, e.g.
+            # "scalp_ema_vwap") so scalp losses don't trip the shared per-broker
+            # Binance CB.  Falls back to strategy_name for legacy records.
+            _strategy_key = getattr(trade, "strategy_type", None) or str(trade.strategy_name or "")
+            _trade_is_scalp = str(_strategy_key).startswith("scalp_")
             _cb_broker_val = "scalp" if _trade_is_scalp else _broker_val
             self.risk_manager.record_outcome(
                 won=trade.pnl > 0,
-                strategy_name=getattr(trade, "strategy_name", None),
+                strategy_name=_strategy_key or getattr(trade, "strategy_name", None),
                 broker=_cb_broker_val,
             )
 
@@ -2410,11 +2418,12 @@ class ForwardEngine:
                     # Record outcome for risk manager circuit breaker counters
                     if trade.pnl is not None:
                         _broker_val = trade.broker.value if hasattr(trade.broker, "value") else None
-                        _trade_is_scalp = "scalp" in str(trade.strategy_name or "").lower()
+                        _strategy_key = getattr(trade, "strategy_type", None) or str(trade.strategy_name or "")
+                        _trade_is_scalp = str(_strategy_key).startswith("scalp_")
                         _cb_broker_val = "scalp" if _trade_is_scalp else _broker_val
                         self.risk_manager.record_outcome(
                             won=trade.pnl > 0,
-                            strategy_name=getattr(trade, "strategy_name", None),
+                            strategy_name=_strategy_key or getattr(trade, "strategy_name", None),
                             broker=_cb_broker_val,
                         )
 
@@ -2660,6 +2669,7 @@ class ForwardEngine:
                     broker=BrokerName.IBKR,
                     is_paper=_ibkr_is_paper,
                     strategy_name=_ibkr_orphan_strategy,  # preserved before potential delink
+                    strategy_type=getattr(linked_signal, "strategy_type", None) if linked_signal else None,
                     signal_id=linked_signal.id if linked_signal else None,
                     broker_order_id="orphan_sync",
                     opened_at=datetime.now(timezone.utc).replace(tzinfo=None),

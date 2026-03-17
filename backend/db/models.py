@@ -176,6 +176,7 @@ class Trade(Base):
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
     broker_order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     strategy_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    strategy_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)  # algo key (e.g. "scalp_ema_vwap"), stable for CB isolation
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # rejection reason, halt info, etc.
     opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -213,6 +214,7 @@ class LiveTrade(Base):
     is_paper: Mapped[bool] = mapped_column(Boolean, default=False)
     broker_order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     strategy_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    strategy_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)  # algo key (e.g. "scalp_ema_vwap"), stable for CB isolation
     notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
