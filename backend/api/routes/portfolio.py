@@ -31,8 +31,15 @@ async def _safe_balance(broker_name: str) -> dict:
     """Fetch broker balance with timeout; never raises."""
     global _ibkr_last_fail
     import time
+    # Pre-resolve is_paper outside try so the except block can always reference it safely.
+    # If get_broker_modes() itself raises, default to paper=True (safe conservative assumption).
     try:
-        from brokers import get_broker, get_broker_modes
+        from brokers import get_broker_modes as _gbm
+        is_paper: bool = _gbm().get(broker_name, "paper") == "paper"
+    except Exception:
+        is_paper = True
+    try:
+        from brokers import get_broker
         if broker_name == "ibkr":
             # Skip immediately if IBKR failed recently — stops connection spam
             if time.monotonic() - _ibkr_last_fail < _IBKR_COOLDOWN:
@@ -46,8 +53,6 @@ async def _safe_balance(broker_name: str) -> dict:
         else:
             broker = get_broker(broker_name)
             balance = await asyncio.wait_for(broker.get_balance(), timeout=8.0)
-
-        is_paper = get_broker_modes().get(broker_name, "paper") == "paper"
 
         return {
             "broker": broker_name,
