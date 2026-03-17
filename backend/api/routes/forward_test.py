@@ -1045,8 +1045,8 @@ async def emergency_stop(db: AsyncSession = Depends(get_db), _user=Depends(_requ
     Close all open paper trades immediately — fetches current price from broker
     to compute real PnL before marking each trade as FILLED.
     """
-    from core.engine.forward_engine import ForwardEngine
-    engine = ForwardEngine()
+    from core.engine.forward_engine import get_forward_engine
+    engine = get_forward_engine()  # FIX: use singleton to share state with running scheduler
     await engine.initialize(db)
 
     q = await db.execute(
@@ -1095,7 +1095,7 @@ async def emergency_stop(db: AsyncSession = Depends(get_db), _user=Depends(_requ
 
 
 @router.get("/pending-signals")
-async def get_pending_signals(db: AsyncSession = Depends(get_db)):
+async def get_pending_signals(db: AsyncSession = Depends(get_db), _user=Depends(_get_current_user)):
     """
     Return unacted, non-HOLD signals from active suggestion / semi-auto strategies
     created in the last 6 hours.  These are the signals awaiting manual execution.

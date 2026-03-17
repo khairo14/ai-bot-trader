@@ -207,7 +207,8 @@ class ForwardEngine:
                     Trade.is_paper == True,
                     Trade.status == OrderStatus.OPEN,
                     Trade.pnl.isnot(None),
-                    Trade.opened_at >= today_start,
+                    # DI-3 FIX: do NOT filter by opened_at — overnight positions
+                    # opened before today_start still contribute to today's loss.
                     *broker_filter,
                 )
             )
@@ -226,7 +227,9 @@ class ForwardEngine:
                 select(func.coalesce(func.sum(LiveTrade.pnl), 0.0)).where(
                     LiveTrade.status == OrderStatus.OPEN,
                     LiveTrade.pnl.isnot(None),
-                    LiveTrade.opened_at >= today_start,
+                    # DI-3 FIX: do NOT filter by opened_at — overnight live positions
+                    # are the most dangerous scenario (real money).  All open positions
+                    # must count toward the daily loss CB regardless of open date.
                     *live_broker_filter,
                 )
             )
