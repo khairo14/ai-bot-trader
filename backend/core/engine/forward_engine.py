@@ -2322,9 +2322,26 @@ class ForwardEngine:
                     continue  # position exists at broker — no further action needed
 
                 # Position is gone from broker.
+
+                # ── Paper Binance SHORT: intentionally not in broker positions ──
+                # These trades are fully software-simulated (no real broker order).
+                # broker_order_id starts with "paper_short_".  The software
+                # monitor_sl_tp handles SL/TP enforcement.  Treating them as
+                # ghosts and running IMP-3 (closed-order lookup) causes the last
+                # real WLD/SOL SL fill to be re-used and close every new paper
+                # position within seconds of opening.  Skip reconciliation for
+                # these simulated positions entirely.
+                _boid = trade.broker_order_id or ""
+                if _boid.startswith("paper_short_"):
+                    logger.debug(
+                        f"[ForwardEngine] reconcile: skipping paper SHORT {trade.symbol} "
+                        f"id={trade.id} — software-simulated, not in broker positions (expected)"
+                    )
+                    continue
+
                 # F-105: PENDING with no real orderId → order never reached broker → REJECTED
                 if trade.status == OrderStatus.PENDING:
-                    _oid = trade.broker_order_id or ""
+                    _oid = _boid
                     if _oid.startswith("rejected_") or not _oid:
                         trade.status = OrderStatus.REJECTED
                         ghost_count += 1
