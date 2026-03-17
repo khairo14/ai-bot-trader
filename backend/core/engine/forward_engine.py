@@ -1486,15 +1486,16 @@ class ForwardEngine:
         # ── Update consecutive-loss counter (portfolio, strategy, broker) ────────
         if trade.pnl is not None:
             _broker_val = trade.broker.value if hasattr(trade.broker, 'value') else None
-            # Use strategy_type (stable algo key set at trade creation, e.g.
-            # "scalp_ema_vwap") so scalp losses don't trip the shared per-broker
-            # Binance CB.  Falls back to strategy_name for legacy records.
-            _strategy_key = getattr(trade, "strategy_type", None) or str(trade.strategy_name or "")
-            _trade_is_scalp = str(_strategy_key).startswith("scalp_")
+            # Use strategy_name (display name e.g. "5min BNB/USDT") as the CB key
+            # so each symbol/timeframe gets its own CB entry.  Use strategy_type
+            # only to detect the scalp broker isolation key ("scalp" CB bucket).
+            _strategy_type = getattr(trade, "strategy_type", None) or ""
+            _strategy_key = str(trade.strategy_name or _strategy_type or "")
+            _trade_is_scalp = _strategy_type.startswith("scalp_")
             _cb_broker_val = "scalp" if _trade_is_scalp else _broker_val
             self.risk_manager.record_outcome(
                 won=trade.pnl > 0,
-                strategy_name=_strategy_key or getattr(trade, "strategy_name", None),
+                strategy_name=_strategy_key or None,
                 broker=_cb_broker_val,
             )
 
@@ -2488,12 +2489,13 @@ class ForwardEngine:
                     # Record outcome for risk manager circuit breaker counters
                     if trade.pnl is not None:
                         _broker_val = trade.broker.value if hasattr(trade.broker, "value") else None
-                        _strategy_key = getattr(trade, "strategy_type", None) or str(trade.strategy_name or "")
-                        _trade_is_scalp = str(_strategy_key).startswith("scalp_")
+                        _strategy_type = getattr(trade, "strategy_type", None) or ""
+                        _strategy_key = str(trade.strategy_name or _strategy_type or "")
+                        _trade_is_scalp = _strategy_type.startswith("scalp_")
                         _cb_broker_val = "scalp" if _trade_is_scalp else _broker_val
                         self.risk_manager.record_outcome(
                             won=trade.pnl > 0,
-                            strategy_name=_strategy_key or getattr(trade, "strategy_name", None),
+                            strategy_name=_strategy_key or None,
                             broker=_cb_broker_val,
                         )
 
