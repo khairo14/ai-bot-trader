@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Plus, Layers, ToggleLeft, ToggleRight, X, BookOpen, Sparkles, Trash2, Pencil } from 'lucide-react'
+import { Plus, Layers, ToggleLeft, ToggleRight, X, BookOpen, Sparkles, Trash2, Pencil, ChevronDown, ChevronRight } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import axios from 'axios'
 import toast from 'react-hot-toast'
@@ -78,6 +78,15 @@ export default function Strategies() {
   const [form, setForm] = useState(defaultForm)
   const [saving, setSaving] = useState(false)
   const [formErrors, setFormErrors] = useState<{ name?: string; symbol?: string }>({})
+  const [collapsedBrokers, setCollapsedBrokers] = useState<Set<string>>(new Set())
+
+  const toggleBroker = (broker: string) => {
+    setCollapsedBrokers(prev => {
+      const next = new Set(prev)
+      if (next.has(broker)) { next.delete(broker) } else { next.add(broker) }
+      return next
+    })
+  }
 
   const load = () => {
     setLoadingStrategies(true)
@@ -312,13 +321,21 @@ export default function Strategies() {
           <div className="space-y-6">
             {groups.map(({ broker, items }) => (
               <div key={broker}>
-                <div className="flex items-center gap-3 mb-3">
+                <div
+                  className="flex items-center gap-3 mb-3 cursor-pointer select-none group"
+                  onClick={() => toggleBroker(broker)}
+                >
                   <span className={`text-xs font-bold uppercase tracking-widest ${brokerAccent[broker] ?? 'text-gray-400'}`}>
                     {broker}
                   </span>
                   <div className="flex-1 h-px bg-dark-600" />
                   <span className="text-xs text-gray-600">{items.length} {items.length === 1 ? 'strategy' : 'strategies'}</span>
+                  {collapsedBrokers.has(broker)
+                    ? <ChevronRight size={14} className="text-gray-600 group-hover:text-gray-400 transition-colors" />
+                    : <ChevronDown size={14} className="text-gray-600 group-hover:text-gray-400 transition-colors" />
+                  }
                 </div>
+                {!collapsedBrokers.has(broker) && (
                 <div className="space-y-3">
                   {items.map(s => (
             <div key={s.id} className="bg-dark-800 border border-dark-600 rounded-xl p-4 flex items-center justify-between">
@@ -397,8 +414,7 @@ export default function Strategies() {
               </div>
             </div>
           ))}
-                </div>
-              </div>
+                </div>                )}              </div>
             ))}
           </div>
         )

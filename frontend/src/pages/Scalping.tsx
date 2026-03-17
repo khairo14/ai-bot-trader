@@ -9,6 +9,7 @@ interface ModelInfo {
   symbol: string
   model_path: string
   trained_date: string | null
+  has_short_model: boolean
 }
 
 interface MLStatus {
@@ -63,7 +64,7 @@ export default function Scalping() {
     const [statsRes, settingsRes, mlRes] = await Promise.allSettled([
       axios.get('/api/scalping/stats'),
       axios.get('/api/scalping/settings'),
-      axios.get('/api/ml/status'),
+      axios.get('/api/scalping/ml/status'),
     ])
     if (statsRes.status === 'fulfilled') setStats(statsRes.value.data)
     if (settingsRes.status === 'fulfilled') {
@@ -113,9 +114,9 @@ export default function Scalping() {
   const retrainNow = async () => {
     setRetraining(true)
     try {
-      const res = await axios.post('/api/ml/retrain')
+      const res = await axios.post('/api/scalping/ml/retrain')
       if (res.data.status === 'queued' || res.status === 200) {
-        toast.success('ML retraining queued — runs in background. Results in ~2–5 min.')
+        toast.success('Scalp ML retraining queued — runs in background. Results in ~2–5 min.')
       } else {
         toast.error(res.data.detail || 'Retrain request failed')
       }
@@ -445,7 +446,9 @@ export default function Scalping() {
                   <div key={m.symbol} className="flex items-center justify-between bg-dark-700 px-3 py-2 rounded-lg">
                     <span className="text-sm font-medium text-white">{m.symbol}</span>
                     <span className="text-xs text-gray-500">
-                      {m.trained_date ? `Trained ${m.trained_date}` : m.model_path}
+                      {m.trained_date
+                        ? `Trained ${m.trained_date}${m.has_short_model ? ' · buy+short' : ' · buy only'}`
+                        : m.model_path}
                     </span>
                   </div>
                 ))}

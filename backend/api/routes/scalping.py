@@ -245,3 +245,136 @@ async def toggle_scalping(
     _write_settings(current)
     state = "enabled" if payload.enabled else "disabled"
     return {"status": "ok", "scalping": state}
+
+
+# ── GET /scalping/ml/status ───────────────────────────────────────────────────
+
+_ML_LATEST_JSON = (
+    pathlib.Path(__file__).resolve().parent.parent.parent
+    / "data" / "models" / "latest.json"
+)
+
+
+class ScalpModelInfo(BaseModel):
+    symbol: str               # e.g. "BTC/USDT:5m"  (":scalp" suffix stripped)
+    model_path: str
+    trained_date: Optional[str] = None
+    has_short_model: bool = False
+
+
+class ScalpMLStatusResponse(BaseModel):
+    model_count: int
+    models: list[ScalpModelInfo]
+    last_retrain: Optional[str]
+    outcomes_total: int
+    outcomes_resolved: int
+    outcomes_pending: int
+    win_rate_pct: Optional[float]
+    avg_pnl_pct: Optional[float]
+    feedback_loop_active: bool
+
+
+@router.get("/ml/status", response_model=ScalpMLStatusResponse)
+async def scalp_ml_status(_user=Depends(get_current_user)):
+    """Return scalping-specific ML model stats (keys ending with ':scalp' only)."""
+    from db.database import AsyncSessionLocal
+    from db.models import TradeOutcome
+    from sqlalchemy import func as _f
+
+    models: list[ScalpModelInfo] = []
+    last_retrain: Optional[str] = None
+
+    if _ML_LATEST_JSON.exists():
+        try:
+            registry: dict = json.loads(_ML_LATEST_JSON.read_text())
+            mtime = datetime.fromtimestamp(_ML_LATEST_JSON.stat().st_mtime)
+            last_retrain = mtime.isoformat(timespec="seconds")
+            # Only scalp buy keys: ends with ":scalp" but NOT ":scalp:short"
+            scalp_buy_keys = {
+                k: v for k, v in registry.items()
+                if k.endswith(":scalp") and v is not None
+            }
+            for key, path in scalp_buy_keys.items():
+                p = pathlib.Path(path)
+                # Filename: BTC_USDT_5m_2026-03-07_scalp_buy.pkl
+                # parts[-3] = date  (buy=-1, scalp=-2, date=-3)
+                parts = p.stem.split("_")
+                trained_date = parts[-3] if len(parts) >= 4 else None
+                display_symbol = key.removesuffix(":scalp")
+                short_key = f"{key}:short"
+                short_path = registry.get(short_key)
+                has_short = bool(
+                    short_path and pathlib.Path(short_path).exists()
+                )
+                models.append(ScalpModelInfo(
+                    symbol=display_symbol,
+                    model_path=str(p.name),
+                    trained_date=trained_date,
+                    has_short_model=has_short,
+                ))
+        except Exception:
+            pass
+
+    # Outcome stats scoped to scalp strategies
+    async with AsyncSessionLocal() as session:
+        total_r = await session.execute(
+            select(_f.count()).select_from(TradeOutcome)
+            .where(TradeOutcome.strategy_name.like("%scalp%"))
+        )
+        outcomes_total = total_r.scalar() or 0
+
+        resolved_r = await session.execute(
+            select(_f.count()).select_from(TradeOutcome)
+            .where(TradeOutcome.strategy_name.like("%scalp%"))
+            .where(TradeOutcome.resolved == True)  # noqa: E712
+        )
+        outcomes_resolved = resolved_r.scalar() or 0
+
+        win_rate_pct: Optional[float] = None
+        avg_pnl_pct: Optional[float] = None
+
+        if outcomes_resolved > 0:
+            wins_r = await session.execute(
+                select(_f.count()).select_from(TradeOutcome)
+                .where(TradeOutcome.strategy_name.like("%scalp%"))
+                .where(TradeOutcome.resolved == True)  # noqa: E712
+                .where(TradeOutcome.ml_label == 1)
+            )
+            wins = wins_r.scalar() or 0
+            win_rate_pct = round(wins / outcomes_resolved * 100, 1)
+
+            pnl_r = await session.execute(
+                select(_f.avg(TradeOutcome.pnl_pct))
+                .where(TradeOutcome.strategy_name.like("%scalp%"))
+                .where(TradeOutcome.resolved == True)  # noqa: E712
+            )
+            avg_pnl_raw = pnl_r.scalar()
+            if avg_pnl_raw is not None:
+                avg_pnl_pct = round(float(avg_pnl_raw), 3)
+
+    outcomes_pending = outcomes_total - outcomes_resolved
+
+    return ScalpMLStatusResponse(
+        model_count=len(models),
+        models=models,
+        last_retrain=last_retrain,
+        outcomes_total=outcomes_total,
+        outcomes_resolved=outcomes_resolved,
+        outcomes_pending=outcomes_pending,
+        win_rate_pct=win_rate_pct,
+        avg_pnl_pct=avg_pnl_pct,
+        feedback_loop_active=outcomes_resolved > 0,
+    )
+
+
+# ── POST /scalping/ml/retrain ─────────────────────────────────────────────────
+
+@router.post("/ml/retrain", dependencies=[Depends(require_admin)])
+async def trigger_scalp_retrain():
+    """Manually trigger scalping ML retraining via Celery (admin only)."""
+    try:
+        from tasks.scalping_ml_retrain import retrain_scalp_models
+        task = retrain_scalp_models.delay()
+        return {"status": "queued", "task_id": task.id}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Celery unavailable: {exc}")
