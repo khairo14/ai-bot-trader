@@ -91,12 +91,16 @@ class ATR(BaseTool):
         atr_pct = current_atr / current_close * 100  # as % of price
 
         # High volatility if ATR > 3% of price
+        # Low volatility threshold: 0.2% (not 0.5%).
+        # Typical 5m crypto candle ATR is 0.1-0.3% of price in calm markets;
+        # using 0.5% caused ALL symbols to be flagged low_volatility during
+        # normal quiet periods, permanently blocking the ATR scoring point.
         if atr_pct > 3.0:
             signal = "high_volatility"
             strength = min(atr_pct / 6.0, 1.0)
-        elif atr_pct < 0.5:
+        elif atr_pct < 0.2:
             signal = "low_volatility"
-            strength = 1.0 - (atr_pct / 0.5)
+            strength = 1.0 - (atr_pct / 0.2)
         else:
             signal = "normal"
             strength = atr_pct / 3.0
