@@ -1168,6 +1168,16 @@ async def execute_signal(signal_id: int, db: AsyncSession = Depends(get_db), _us
     if db_signal.signal == SignalType.HOLD:
         raise HTTPException(status_code=400, detail="Cannot execute a HOLD signal.")
 
+    # Confluence suppression gate — if signal_runner already flagged this signal
+    # as low-confluence (swing path) the reason is stored in reasons[].  Block
+    # manual re-execution so the gate cannot be bypassed by direct API calls.
+    _suppression = next(
+        (r for r in (db_signal.reasons or []) if r.startswith("execution suppressed")),
+        None,
+    )
+    if _suppression:
+        raise HTTPException(status_code=400, detail=_suppression)
+
     # Market hours gate — block live execution when session is closed.
     # Paper execution is always allowed (pure simulation, no real order).
     _exec_broker = db_signal.broker.value if hasattr(db_signal.broker, "value") else str(db_signal.broker)

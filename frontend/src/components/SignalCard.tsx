@@ -141,7 +141,20 @@ export default function SignalCard({ signal }: Props) {
   // auto-execution. The risk manager gate is intentionally NOT blocked here — the user
   // can still attempt manual override and will receive a clear rejection message.
   const suppressionReason = reasons.find(r => r.startsWith('execution suppressed'))
-  const isButtonDisabled = signal.acted_on || isStale || !!suppressionReason
+
+  // Directional conflict: user manually checked confluence and the higher-TF
+  // consensus opposes the signal direction (e.g. BUY signal but consensus is SHORT).
+  // HOLD and MIXED are not treated as conflicts — they indicate no clear direction.
+  const OPPOSITE: Record<string, string> = { BUY: 'SELL', SELL: 'BUY', SHORT: 'COVER', COVER: 'SHORT' }
+  const confluenceConflict = confluence !== null
+    && confluence.consensus !== 'HOLD'
+    && confluence.consensus !== 'MIXED'
+    && confluence.consensus !== signal.signal
+  const confluenceConflictMsg = confluenceConflict
+    ? `Multi-TF confluence shows ${confluence!.consensus} (${Math.round(confluence!.score * 100)}%) — conflicts with this ${signal.signal} signal. Check higher timeframes before executing.`
+    : null
+
+  const isButtonDisabled = signal.acted_on || isStale || !!suppressionReason || confluenceConflict
 
   const executeSignal = async () => {
     if (signal.acted_on) {
@@ -154,6 +167,10 @@ export default function SignalCard({ signal }: Props) {
     }
     if (suppressionReason) {
       toast.error(suppressionReason)
+      return
+    }
+    if (confluenceConflictMsg) {
+      toast.error(confluenceConflictMsg)
       return
     }
     try {
@@ -318,7 +335,7 @@ export default function SignalCard({ signal }: Props) {
           <button
             onClick={executeSignal}
             disabled={isButtonDisabled}
-            title={suppressionReason ?? (isStale ? `Signal is ${ageMin}m old` : undefined)}
+            title={confluenceConflictMsg ?? suppressionReason ?? (isStale ? `Signal is ${ageMin}m old` : undefined)}
             className={`w-full py-1.5 text-xs font-semibold rounded-lg transition-all border ${
               isButtonDisabled
                 ? 'bg-dark-700 text-gray-500 border-dark-500 cursor-not-allowed opacity-50'
@@ -327,6 +344,8 @@ export default function SignalCard({ signal }: Props) {
           >
             {isStale
               ? `Stale (${ageMin}m ago) — Run Now first`
+              : confluenceConflict
+              ? `Blocked — higher TFs say ${confluence!.consensus}`
               : suppressionReason
               ? `Suppressed — ${suppressionReason.replace('execution suppressed: ', '')}`
               : signal.acted_on ? 'Signal Executed' : 'Execute Signal'}
