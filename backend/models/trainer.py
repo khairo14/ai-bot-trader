@@ -318,7 +318,11 @@ class ModelTrainer:
                         TradeOutcome.symbol == symbol,
                         TradeOutcome.resolved == True,  # noqa: E712
                         TradeOutcome.ml_label != None,  # noqa: E711
-                        TradeOutcome.is_paper == False,  # DI-2 FIX: exclude paper outcomes to avoid idealised-fill bias
+                        # Include paper outcomes — fills now use a real live-price
+                        # anchor so they are realistic. Excluding paper means zero
+                        # live labels are available during paper-only operation, so
+                        # the model falls back to yfinance heuristics and never
+                        # learns from actual SL/TP outcomes.
                     )
                 )
                 outcomes = result.scalars().all()
