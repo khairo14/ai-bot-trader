@@ -2323,19 +2323,21 @@ class ForwardEngine:
 
                 # Position is gone from broker.
 
-                # ── Paper Binance SHORT: intentionally not in broker positions ──
-                # These trades are fully software-simulated (no real broker order).
-                # broker_order_id starts with "paper_short_".  The software
-                # monitor_sl_tp handles SL/TP enforcement.  Treating them as
-                # ghosts and running IMP-3 (closed-order lookup) causes the last
-                # real WLD/SOL SL fill to be re-used and close every new paper
-                # position within seconds of opening.  Skip reconciliation for
-                # these simulated positions entirely.
+                # ── Software-simulated positions: never in broker positions ──────
+                # Two cases are fully simulated (no real broker order was placed):
+                #   paper_short_    — Binance paper SELL (spot has no short balance)
+                #   paper_multileg_ — Paper multi-leg options (no broker supports them)
+                # Both are intentionally absent from broker.get_positions().
+                # If we treat them as ghosts and run IMP-3 (closed-order lookup),
+                # the last real SL/TP fill at the broker is re-used to close the
+                # simulated position within seconds.
+                # monitor_sl_tp handles SL/TP enforcement for these positions.
                 _boid = trade.broker_order_id or ""
-                if _boid.startswith("paper_short_"):
+                _SIMULATED_PREFIXES = ("paper_short_", "paper_multileg_")
+                if any(_boid.startswith(pfx) for pfx in _SIMULATED_PREFIXES):
                     logger.debug(
-                        f"[ForwardEngine] reconcile: skipping paper SHORT {trade.symbol} "
-                        f"id={trade.id} — software-simulated, not in broker positions (expected)"
+                        f"[ForwardEngine] reconcile: skipping software-simulated {trade.symbol} "
+                        f"id={trade.id} (order={_boid[:20]}) — not in broker positions (expected)"
                     )
                     continue
 
