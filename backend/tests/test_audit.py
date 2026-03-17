@@ -165,13 +165,15 @@ class TestRiskManager(unittest.TestCase):
         self.assertIn("R:R", v.reason or "")
 
     def test_position_size_formula(self):
-        # stop=$8000 → natural size=200/8000=0.025 BTC (value=$1250 < $1500 cap)
+        # stop=$8000 → natural size after confidence scaling
         sig = _make_signal(entry=50000, sl=42000, tp=70000)  # stop=$8000, R:R=2.5
         bal = 10_000
         v = self.rm.validate(sig, account_balance=bal, open_positions_count=0, daily_pnl=0)
         self.assertTrue(v.approved)
-        # risk_per_trade_pct=2% → risk_amount=200, stop=8000 → size=0.025
-        expected_size = (bal * 0.02) / 8000
+        # risk_per_trade_pct=2%, confidence=0.75 → conf_scale=0.875
+        # risk_amount = 10000 * 0.02 * 0.875 = 175; size = 175/8000 = 0.021875
+        conf_scale = 0.5 + 0.5 * 0.75  # matches _make_signal(confidence=0.75)
+        expected_size = (bal * 0.02 * conf_scale) / 8000
         self.assertAlmostEqual(v.position_size, expected_size, places=4)
 
     def test_reset_circuit_breaker(self):
@@ -238,7 +240,8 @@ class TestForwardEngine(unittest.IsolatedAsyncioTestCase):
         assert result is not None
         self.assertEqual(result.status.value if hasattr(result.status, "value") else result.status, "open")
         self.assertTrue(result.is_paper)
-        self.assertIn("BTC/USDT", engine._paper_positions)
+        # positions keyed by "symbol:broker" since Bug-14 composite-key fix
+        self.assertIn("BTC/USDT:binance", engine._paper_positions)
 
     async def test_position_size_multiplier_applied(self):
         engine = self._make_engine()
@@ -480,7 +483,11 @@ class TestMLScorer(unittest.TestCase):
         feats = _compute_features(df)
         self.assertIsNotNone(feats)
         assert feats is not None
-        for col in FEATURE_COLS:
+        # regime_code is NOT produced by _compute_features — it is added separately
+        # by trainer.py (training) and ml_scorer.py (inference) via a sliding-window
+        # classifier call that requires full OHLCV history, not just feature computation.
+        base_cols = [c for c in FEATURE_COLS if c != "regime_code"]
+        for col in base_cols:
             self.assertIn(col, feats.columns)
 
     def test_feature_no_nan_at_tail(self):
@@ -489,7 +496,9 @@ class TestMLScorer(unittest.TestCase):
         feats = _compute_features(df)
         self.assertIsNotNone(feats)
         assert feats is not None
-        last = feats[FEATURE_COLS].iloc[-1]
+        # regime_code is not produced by _compute_features (added separately)
+        base_cols = [c for c in FEATURE_COLS if c != "regime_code"]
+        last = feats[base_cols].iloc[-1]
         self.assertFalse(last.isna().any(), f"NaN found in last feature row: {last}")
 
     def test_reload_clears_cache(self):
@@ -589,13 +598,15 @@ class TestConfluenceScore(unittest.IsolatedAsyncioTestCase):
         # primary=BUY, 4h=HOLD, 1d=HOLD → 1/3 ≈ 0.33
         self.assertAlmostEqual(score, 1/3, places=5)
 
-    async def test_exception_in_higher_tf_treated_as_hold(self):
+    async def test_exception_in_higher_tf_excluded_from_denominator(self):
         from tasks.signal_runner import _confluence_score
         mock_engine = AsyncMock()
         mock_engine.run = AsyncMock(side_effect=Exception("timeout"))
         score = await _confluence_score(mock_engine, "hybrid", "BTC/USDT", "binance", "1h", "BUY")
-        # primary=BUY, both higher TFs error → treated as HOLD → 1/3
-        self.assertAlmostEqual(score, 1/3, places=5)
+        # Transient errors are EXCLUDED from the denominator (skipped) so a broker
+        # outage doesn't systematically suppress all strategies.
+        # primary=BUY only remains → 1/1 = 1.0
+        self.assertAlmostEqual(score, 1.0, places=5)
 
     async def test_min_confluence_gate(self):
         from tasks.signal_runner import MIN_CONFLUENCE
@@ -613,8 +624,10 @@ class TestForwardEngineInitialize(unittest.IsolatedAsyncioTestCase):
         from core.engine.forward_engine import ForwardEngine, PAPER_INITIAL_CAPITAL
         from db.models import Trade, OrderStatus, ExecutionMode, BrokerName, AssetClass
 
+        from db.models import BrokerName
         open_trade = MagicMock(spec=Trade)
         open_trade.symbol = "BTC/USDT"
+        open_trade.broker = BrokerName.BINANCE  # needed for symbol:broker composite key
 
         mock_session = AsyncMock()
 
@@ -627,14 +640,18 @@ class TestForwardEngineInitialize(unittest.IsolatedAsyncioTestCase):
         # Query 3: per-broker realised PnL sum
         pnl_result = MagicMock()
         pnl_result.scalar_one.return_value = 500.0
+        # Query 4: per-broker unrealised PnL sum (open positions mark-to-market)
+        unrealised_result = MagicMock()
+        unrealised_result.scalar_one.return_value = 0.0
 
-        mock_session.execute = AsyncMock(side_effect=[open_result, broker_result, pnl_result])
+        mock_session.execute = AsyncMock(side_effect=[open_result, broker_result, pnl_result, unrealised_result])
 
         engine = ForwardEngine()
         await engine.initialize(mock_session)
 
         self.assertEqual(len(engine._paper_positions), 1)
-        self.assertIn("BTC/USDT", engine._paper_positions)
+        # key is "symbol:broker" since Bug-14 composite-key fix
+        self.assertIn("BTC/USDT:binance", engine._paper_positions)
         # _paper_balance is now dict[str, float] keyed by broker name (F-028)
         self.assertIsInstance(engine._paper_balance, dict)
         self.assertIn("binance", engine._paper_balance)
@@ -1025,7 +1042,8 @@ class TestBullCallSpreadStrategy(unittest.TestCase):
              patch.object(strat.macd_tool, "calculate") as mock_macd:
             mock_atr.return_value = MagicMock(value=5.0)
             mock_rsi.return_value = MagicMock(value=48.0)
-            mock_macd.return_value = MagicMock(histogram=0.05, macd=0.1, signal=0.05)
+            # BUG-CRIT-04: ToolOutput uses .value (histogram float) and .signal (string)
+            mock_macd.return_value = MagicMock(value=0.05, signal="bullish_crossover")
             sig = strat.generate_signal(df, "AMD")
         if sig.signal == "BUY":
             self.assertIsNotNone(sig.options_meta)
@@ -1059,8 +1077,8 @@ class TestBullCallSpreadStrategy(unittest.TestCase):
              patch.object(strat.macd_tool, "calculate") as mock_macd:
             mock_atr.return_value = MagicMock(value=5.0)
             mock_rsi.return_value = MagicMock(value=48.0)
-            # histogram<0 AND macd < signal → bearish
-            mock_macd.return_value = MagicMock(histogram=-0.1, macd=-0.05, signal=0.05)
+            # BUG-CRIT-04: bearish signal string → macd_bullish = False
+            mock_macd.return_value = MagicMock(value=-0.1, signal="bearish_crossover")
             sig = strat.generate_signal(df, "AMD")
         self.assertEqual(sig.signal, "HOLD")
 
@@ -1076,7 +1094,8 @@ class TestBullCallSpreadStrategy(unittest.TestCase):
              patch.object(strat.macd_tool, "calculate") as mock_macd:
             mock_atr.return_value = MagicMock(value=0.01)   # tiny ATR → same strike after rounding
             mock_rsi.return_value = MagicMock(value=48.0)
-            mock_macd.return_value = MagicMock(histogram=0.05, macd=0.1, signal=0.05)
+            # BUG-CRIT-04: ToolOutput uses .value (histogram float) and .signal (string)
+            mock_macd.return_value = MagicMock(value=0.05, signal="bullish_crossover")
             sig = strat.generate_signal(df, "AMD")
         # If strikes collapse to same value → HOLD (either due to spread guard or near-zero debit)
         self.assertIn(sig.signal, ("HOLD", "BUY"))   # BUY is OK only if different strikes survived
