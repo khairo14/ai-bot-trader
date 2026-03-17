@@ -316,16 +316,28 @@ class ScalpingEmaVwap(BaseScalpingStrategy):
                 ),
             ), data, atr_val)
 
-        # No signal — compile informative HOLD reason
+        # No signal — compile informative HOLD reason with full score breakdown
         hold_reasons: list[str] = []
         if not ribbon_bullish and not ribbon_bearish:
             hold_reasons.append(f"EMA ribbon mixed (8={e8:.4f} 13={e13:.4f} 21={e21:.4f})")
         if not vol_ok:
-            hold_reasons.append(f"Volume below threshold ({vol_out.value:.2f}× < {min_vol_r}×)")
+            hold_reasons.append(f"Volume below threshold ({vol_out.value:.2f}\u00d7 < {min_vol_r}\u00d7)")
         if not atr_active:
             hold_reasons.append(f"Market inactive (ATR signal: {atr_out.signal})")
-        if not hold_reasons:
-            hold_reasons = [
-                f"Score insufficient (long={long_score} short={short_score} < {min_score})"
-            ]
+        # Always append a full per-condition breakdown so the log shows exactly what's missing
+        _best_score = max(long_score, short_score)
+        _best_dir   = "long" if long_score >= short_score else "short"
+        _r_ok  = ribbon_bullish if _best_dir == "long" else ribbon_bearish
+        _v_ok  = vwap_bullish   if _best_dir == "long" else vwap_bearish
+        _rc_ok = roc5_bullish   if _best_dir == "long" else roc5_bearish
+        _cr_ok = recent_bull_cross if _best_dir == "long" else recent_bear_cross
+        hold_reasons.append(
+            f"Score {_best_score}/7 (need {min_score}) [{_best_dir}]: "
+            f"ribbon={'Y' if _r_ok else 'N'} "
+            f"vwap={'Y' if _v_ok else 'N'} "
+            f"roc={'Y' if _rc_ok else 'N'} "
+            f"vol={'Y' if vol_ok else 'N'}({vol_out.value:.2f}\u00d7) "
+            f"atr={'Y' if atr_active else 'N'} "
+            f"cross={'Y' if _cr_ok else 'N'}"
+        )
         return _hold(hold_reasons)

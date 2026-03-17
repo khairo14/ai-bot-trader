@@ -240,9 +240,21 @@ async def _async_run() -> None:
                 # Skip non-actionable signals — mark candle processed but don't persist
                 if sig.signal not in _TRACKABLE:
                     _last_scalp_candle_fired[strat.id] = last_close_ts
-                    logger.debug(
-                        f"[scalping_runner] HOLD {symbol} ({strat.name}) — no signal this candle"
+                    _hold_reasons_str = "; ".join(str(r) for r in (sig.reasons or ["no reason"]))
+                    logger.info(
+                        f"[scalping_runner] HOLD {symbol} ({strat.name}) [{timeframe}] — {_hold_reasons_str}"
                     )
+                    # Broadcast to frontend so the dashboard shows why there's no signal
+                    try:
+                        from api.websocket import manager as _ws_hold
+                        await _ws_hold.broadcast("scalp_hold", {
+                            "symbol": symbol,
+                            "strategy_name": _display_name,
+                            "timeframe": timeframe,
+                            "reasons": list(sig.reasons or []),
+                        })
+                    except Exception:
+                        pass
                     continue
 
                 # Mark candle as processed (only trackable signals reach here)
