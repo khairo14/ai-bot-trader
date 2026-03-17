@@ -62,6 +62,9 @@ async def ml_status():
             mtime = datetime.datetime.fromtimestamp(_LATEST_JSON.stat().st_mtime)
             last_retrain = mtime.isoformat(timespec="seconds")
             for symbol, path in registry.items():
+                # Skip scalp models — they belong to /api/scalping/ml/status
+                if symbol.endswith(":scalp") or symbol.endswith(":scalp:short"):
+                    continue
                 p = pathlib.Path(path)
                 # Extract date from filename: BTC_USDT_2026-03-05.pkl
                 parts = p.stem.split("_")
@@ -74,13 +77,19 @@ async def ml_status():
         except Exception:
             pass
 
-    # ── Outcome stats from DB ─────────────────────────────────────────────
+    # ── Outcome stats from DB (swing strategies only, exclude scalp) ──────
+    _SWING_FILTER = ~TradeOutcome.strategy_name.ilike("%scalp%")
+
     async with AsyncSessionLocal() as session:
-        total_r = await session.execute(select(func.count()).select_from(TradeOutcome))
+        total_r = await session.execute(
+            select(func.count()).select_from(TradeOutcome).where(_SWING_FILTER)
+        )
         outcomes_total = total_r.scalar() or 0
 
         resolved_r = await session.execute(
-            select(func.count()).select_from(TradeOutcome).where(TradeOutcome.resolved == True)  # noqa: E712
+            select(func.count()).select_from(TradeOutcome)
+            .where(_SWING_FILTER)
+            .where(TradeOutcome.resolved == True)  # noqa: E712
         )
         outcomes_resolved = resolved_r.scalar() or 0
 
@@ -91,6 +100,7 @@ async def ml_status():
         if outcomes_resolved > 0:
             wins_r = await session.execute(
                 select(func.count()).select_from(TradeOutcome).where(
+                    _SWING_FILTER,
                     TradeOutcome.resolved == True,  # noqa: E712
                     TradeOutcome.ml_label == 1,
                 )
@@ -99,9 +109,9 @@ async def ml_status():
             win_rate_pct = round(wins / outcomes_resolved * 100, 1)
 
             pnl_r = await session.execute(
-                select(func.avg(TradeOutcome.pnl_pct)).where(
-                    TradeOutcome.resolved == True  # noqa: E712
-                )
+                select(func.avg(TradeOutcome.pnl_pct))
+                .where(_SWING_FILTER)
+                .where(TradeOutcome.resolved == True)  # noqa: E712
             )
             avg_pnl_raw = pnl_r.scalar()
             if avg_pnl_raw is not None:

@@ -257,6 +257,9 @@ class ModelTrainer:
                 strategies = result.scalars().all()
 
             for strat in strategies:
+                # Skip scalp strategies — they have their own retrain task
+                if (strat.strategy_type or "").startswith("scalp_"):
+                    continue
                 params = strat.parameters or {}
                 sym = params.get("symbol")
                 tf = params.get("timeframe", "1d")

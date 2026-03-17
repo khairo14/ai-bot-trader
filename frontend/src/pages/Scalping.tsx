@@ -428,12 +428,12 @@ export default function Scalping() {
         <ScalpSignalFeed />
       </div>
 
-      {/* ML Models */}
+      {/* ML Feedback Loop */}
       <section className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Brain size={14} className="text-brand-500" />
-            <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">ML Models</h2>
+            <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">ML Feedback Loop</h2>
           </div>
           <button
             onClick={retrainNow}
