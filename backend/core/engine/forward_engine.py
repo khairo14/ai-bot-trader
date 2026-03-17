@@ -800,6 +800,49 @@ class ForwardEngine:
                     pass
                 return trade
         mode_tag = "PAPER" if is_paper else "LIVE"
+        # ── Paper Binance SHORT simulation ────────────────────────────────────
+        # Binance testnet uses SPOT credentials.  A SHORT (side="sell") requires the
+        # account to already hold the base token (e.g. UNI, ETH, WLD).  The testnet
+        # account only holds USDT, so every SHORT call fails with "insufficient balance".
+        # For paper mode we can safely skip the broker call entirely: we debit the
+        # paper P&L in software (same as the multi-leg options paper simulation path).
+        _is_binance_paper_short = (
+            is_paper
+            and broker_key == "binance"
+            and side == "sell"
+        )
+        if _is_binance_paper_short:
+            trade.status = OrderStatus.OPEN
+            trade.broker_order_id = (
+                f"paper_short_{signal.symbol}_{int(datetime.now(timezone.utc).timestamp())}"
+            )
+            if db_session:
+                db_session.add(trade)
+                await db_session.commit()
+                await db_session.refresh(trade)
+            self._paper_positions[f"{signal.symbol}:{broker_key}"] = trade
+            logger.info(
+                f"[ForwardEngine] ✅ PAPER SHORT simulated (Binance spot has no short balance): "
+                f"{signal.signal} {signal.symbol} @ {signal.entry_price} qty={effective_size}"
+            )
+            try:
+                from notifications.notifier import notifier as _notifier
+                await _notifier.trade(
+                    db_session,
+                    title=f"[PAPER] Short Opened — {signal.symbol}",
+                    message=(
+                        f"{signal.signal} {signal.symbol} @ {signal.entry_price} "
+                        f"qty={effective_size} — paper simulated"
+                    ),
+                    metadata={
+                        "symbol": signal.symbol, "side": signal.signal,
+                        "broker": broker_key, "is_paper": True,
+                        "strategy": signal.strategy_name,
+                    },
+                )
+            except Exception:
+                pass
+            return trade
         # ── Pre-commit the PENDING trade BEFORE calling the broker ───────────
         # This closes the orphan window: if place_order() succeeds but the process
         # crashes before the final DB commit, the PENDING row already exists and the
@@ -1043,35 +1086,53 @@ class ForwardEngine:
 
         _skip_market_order = False
         _norm_sym = _norm_sym_close(trade.symbol)
-        try:
-            _bpos = await broker.get_positions()
-            _has_pos = any(abs(p.quantity) > 0 and p.symbol == _norm_sym for p in _bpos)
-            if not _has_pos:
-                # F-103 false-negative guard: broker APIs can transiently return an empty
-                # position list while a fill is settling (observed with Alpaca paper).  A
-                # false negative here skips the market close and marks the DB FILLED even
-                # though the position is still open — creating a stealth orphan on the next
-                # reconcile tick.  Retry once after a short delay before trusting "absent".
-                logger.info(
-                    f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} not found at {_broker_key} "
-                    f"— retrying position check in 2s before skipping close order"
-                )
-                await asyncio.sleep(2)
-                _bpos2 = await broker.get_positions()
-                _has_pos = any(abs(p.quantity) > 0 and p.symbol == _norm_sym for p in _bpos2)
+
+        # ── Paper Binance SHORT: no broker position exists (simulated entry) ──
+        # SELL-side paper shorts on Binance are fully simulated (the testnet spot
+        # account only holds USDT, not the tokens needed to short on spot).
+        # Skip the F-103 position-check loop and the market close call entirely —
+        # just use the price snapshot to compute PnL and mark FILLED.
+        _is_binance_paper_short_close = (
+            trade.is_paper
+            and _broker_key == "binance"
+            and trade.side not in ("buy", "cover", "long")  # i.e. a short/sell side
+        )
+        if _is_binance_paper_short_close:
+            _skip_market_order = True
+            logger.info(
+                f"[ForwardEngine] Paper Binance SHORT close — skipping broker call, "
+                f"computing PnL from snapshot price for {trade.symbol} id={trade.id}"
+            )
+        else:
+            try:
+                _bpos = await broker.get_positions()
+                _has_pos = any(abs(p.quantity) > 0 and p.symbol == _norm_sym for p in _bpos)
                 if not _has_pos:
-                    logger.warning(
-                        f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} confirmed absent "
-                        f"at {_broker_key} after retry — skipping market close, marking FILLED at snapshot price"
-                    )
-                    _skip_market_order = True
-                else:
+                    # F-103 false-negative guard: broker APIs can transiently return an empty
+                    # position list while a fill is settling (observed with Alpaca paper).  A
+                    # false negative here skips the market close and marks the DB FILLED even
+                    # though the position is still open — creating a stealth orphan on the next
+                    # reconcile tick.  Retry once after a short delay before trusting "absent".
                     logger.info(
-                        f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} reappeared on retry "
-                        f"— proceeding with market close order (transient position API gap)"
+                        f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} not found at {_broker_key} "
+                        f"— retrying position check in 2s before skipping close order"
                     )
-        except Exception as _f103_err:
-            logger.debug(f"[ForwardEngine] F-103 position check failed: {_f103_err} — proceeding with close order")
+                    await asyncio.sleep(2)
+                    _bpos2 = await broker.get_positions()
+                    _has_pos = any(abs(p.quantity) > 0 and p.symbol == _norm_sym for p in _bpos2)
+                    if not _has_pos:
+                        logger.warning(
+                            f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} confirmed absent "
+                            f"at {_broker_key} after retry — skipping market close, marking FILLED at snapshot price"
+                        )
+                        _skip_market_order = True
+                    else:
+                        logger.info(
+                            f"[ForwardEngine] F-103: {trade.symbol} id={trade.id} reappeared on retry "
+                            f"— proceeding with market close order (transient position API gap)"
+                        )
+            except Exception as _f103_err:
+                logger.debug(f"[ForwardEngine] F-103 position check failed: {_f103_err} — proceeding with close order")
 
         # ── Fetch current market price (live and paper) ───────────────────
         exit_price: float = 0.0
