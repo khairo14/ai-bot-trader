@@ -41,7 +41,11 @@ _SETTINGS_DEFAULTS = {
     "ml_veto_threshold": 0.40,
     "sr_tp_snap": False,
     # Risk gate overrides (applied by ForwardEngine for scalp_ signals only)
-    "max_consecutive_losses": 5,   # higher tolerance than swing (3)
+    "max_consecutive_losses": 5,        # CB trips after N consecutive losses (swing default: 3)
+    "daily_circuit_breaker_pct": 5.0,   # max daily loss % before halting scalping (swing default: 3%)
+    "max_open_positions": 10,           # max concurrent scalp positions (swing typically 5)
+    "max_exposure_per_asset_pct": 20.0, # max % of balance exposed to one symbol (swing default: 10%)
+    "max_exposure_per_class_pct": 50.0, # max % of balance exposed to one asset class (swing default: 30%)
     "session_filter": {"crypto": None, "stock": ["14:30-21:00"]},
 }
 
@@ -176,18 +180,22 @@ async def get_scalp_settings(_user=Depends(get_current_user)):
 # ── POST /scalping/settings ───────────────────────────────────────────────────
 
 class ScalpingSettingsUpdate(BaseModel):
-    enabled:                Optional[bool]  = None
-    timeframe:              Optional[str]   = None
-    risk_per_trade_pct:     Optional[float] = None
-    sl_atr_mult:            Optional[float] = None
-    tp_atr_mult:            Optional[float] = None
-    min_volume_ratio:       Optional[float] = None
-    max_spread_pct:         Optional[float] = None
-    min_score:              Optional[int]   = None
-    ml_veto_threshold:      Optional[float] = None
-    sr_tp_snap:             Optional[bool]  = None
-    max_consecutive_losses: Optional[int]   = None
-    session_filter:         Optional[dict]  = None
+    enabled:                      Optional[bool]  = None
+    timeframe:                    Optional[str]   = None
+    risk_per_trade_pct:           Optional[float] = None
+    sl_atr_mult:                  Optional[float] = None
+    tp_atr_mult:                  Optional[float] = None
+    min_volume_ratio:             Optional[float] = None
+    max_spread_pct:               Optional[float] = None
+    min_score:                    Optional[int]   = None
+    ml_veto_threshold:            Optional[float] = None
+    sr_tp_snap:                   Optional[bool]  = None
+    max_consecutive_losses:       Optional[int]   = None
+    daily_circuit_breaker_pct:    Optional[float] = None
+    max_open_positions:           Optional[int]   = None
+    max_exposure_per_asset_pct:   Optional[float] = None
+    max_exposure_per_class_pct:   Optional[float] = None
+    session_filter:               Optional[dict]  = None
 
 
 @router.post("/settings")
@@ -222,6 +230,26 @@ async def update_scalp_settings(
         v = updates["max_consecutive_losses"]
         if not (1 <= v <= 20):
             raise HTTPException(status_code=422, detail="max_consecutive_losses must be 1–20")
+
+    if "daily_circuit_breaker_pct" in updates:
+        v = updates["daily_circuit_breaker_pct"]
+        if not (0.5 <= v <= 20.0):
+            raise HTTPException(status_code=422, detail="daily_circuit_breaker_pct must be 0.5–20.0")
+
+    if "max_open_positions" in updates:
+        v = updates["max_open_positions"]
+        if not (1 <= v <= 50):
+            raise HTTPException(status_code=422, detail="max_open_positions must be 1–50")
+
+    if "max_exposure_per_asset_pct" in updates:
+        v = updates["max_exposure_per_asset_pct"]
+        if not (1.0 <= v <= 100.0):
+            raise HTTPException(status_code=422, detail="max_exposure_per_asset_pct must be 1–100")
+
+    if "max_exposure_per_class_pct" in updates:
+        v = updates["max_exposure_per_class_pct"]
+        if not (1.0 <= v <= 100.0):
+            raise HTTPException(status_code=422, detail="max_exposure_per_class_pct must be 1–100")
 
     merged = {**current, **updates}
     _write_settings(merged)

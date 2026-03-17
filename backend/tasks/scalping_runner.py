@@ -54,9 +54,11 @@ def _load_scalp_settings() -> dict:
         "sr_tp_snap": False,
         # Risk gate overrides — applied by ForwardEngine for all scalp_ signals
         # so they don't compete with the global broker_risk_settings row.
-        "max_consecutive_losses": 5,   # higher tolerance than swing (3)
-        "daily_circuit_breaker_pct": 5.0,  # independent of Binance swing CB (swing uses DB row, default 3%)
-        "max_open_positions": 10,      # scalp positions: higher limit than swing (typically 5) since sizes are much smaller
+        "max_consecutive_losses": 5,        # CB trips after N consecutive losses (swing default: 3)
+        "daily_circuit_breaker_pct": 5.0,   # max daily loss % before halting scalping (swing default: 3%)
+        "max_open_positions": 10,           # max concurrent scalp positions (swing typically 5)
+        "max_exposure_per_asset_pct": 20.0, # max % of balance exposed to one symbol (swing default: 10%)
+        "max_exposure_per_class_pct": 50.0, # max % of balance in one asset class (swing default: 30%)
         "session_filter": {"crypto": None, "stock": ["14:30-21:00"]},
     }
     try:

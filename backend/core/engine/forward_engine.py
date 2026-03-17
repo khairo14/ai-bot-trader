@@ -435,6 +435,12 @@ class ForwardEngine:
                 # Default 10 — small-sized scalp positions tolerate more concurrency than swing.
                 if "max_open_positions" in _scfg:
                     broker_settings["max_open_positions"] = _scfg["max_open_positions"]
+                # Per-asset and per-class exposure caps — scalp defaults are more permissive
+                # since scalp position sizes are smaller than swing.
+                if "max_exposure_per_asset_pct" in _scfg:
+                    broker_settings["max_exposure_per_asset_pct"] = _scfg["max_exposure_per_asset_pct"]
+                if "max_exposure_per_class_pct" in _scfg:
+                    broker_settings["max_exposure_per_class_pct"] = _scfg["max_exposure_per_class_pct"]
                 # Scalp losses should not pollute the shared per-broker Binance CB that
                 # swing strategies also use.  An isolated "scalp" key ensures the scalp
                 # CB and swing CB are tracked and tripped independently.

@@ -46,6 +46,10 @@ interface ScalpSettings {
   ml_veto_threshold: number
   sr_tp_snap: boolean
   max_consecutive_losses: number
+  daily_circuit_breaker_pct: number
+  max_open_positions: number
+  max_exposure_per_asset_pct: number
+  max_exposure_per_class_pct: number
 }
 
 export default function Scalping() {
@@ -348,6 +352,50 @@ export default function Scalping() {
                 className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
               />
               <p className="text-xs text-gray-600 mt-1">CB trips after this many scalp losses in a row (global swing default: 3)</p>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Daily Circuit Breaker (%)</label>
+              <input
+                type="number" step="0.1" min="0.5" max="20"
+                value={form.daily_circuit_breaker_pct ?? settings.daily_circuit_breaker_pct}
+                onChange={e => setForm(f => ({ ...f, daily_circuit_breaker_pct: parseFloat(e.target.value) }))}
+                className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+              />
+              <p className="text-xs text-gray-600 mt-1">Max daily loss % before scalping halts (swing default: 3%)</p>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Max Open Positions</label>
+              <input
+                type="number" step="1" min="1" max="50"
+                value={form.max_open_positions ?? settings.max_open_positions}
+                onChange={e => setForm(f => ({ ...f, max_open_positions: parseInt(e.target.value) }))}
+                className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+              />
+              <p className="text-xs text-gray-600 mt-1">Concurrent scalp positions allowed (swing default: 5)</p>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Max Exposure per Asset (%)</label>
+              <input
+                type="number" step="1" min="1" max="100"
+                value={form.max_exposure_per_asset_pct ?? settings.max_exposure_per_asset_pct}
+                onChange={e => setForm(f => ({ ...f, max_exposure_per_asset_pct: parseFloat(e.target.value) }))}
+                className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+              />
+              <p className="text-xs text-gray-600 mt-1">Max % of balance exposed to one symbol (swing default: 10%)</p>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">Max Exposure per Asset Class (%)</label>
+              <input
+                type="number" step="1" min="1" max="100"
+                value={form.max_exposure_per_class_pct ?? settings.max_exposure_per_class_pct}
+                onChange={e => setForm(f => ({ ...f, max_exposure_per_class_pct: parseFloat(e.target.value) }))}
+                className="w-full bg-dark-700 border border-dark-500 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-500"
+              />
+              <p className="text-xs text-gray-600 mt-1">Max % of balance in one asset class (swing default: 30%)</p>
             </div>
           </div>
 
