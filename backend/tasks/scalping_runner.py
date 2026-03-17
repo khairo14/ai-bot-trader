@@ -236,8 +236,12 @@ async def _async_run() -> None:
                 # Preserve the canonical scalp_ type on the signal so ForwardEngine's
                 # risk override check (startswith("scalp_")) always matches correctly.
                 # The display name is stored separately in the DB signal row below.
-                sig.strategy_name = strategy_type   # e.g. "scalp_ema_vwap"
-                _display_name = strat.name           # e.g. "5min UNI/USDT"
+                # Use the display name as strategy_name so the per-strategy circuit
+                # breaker sidebar (Settings page) shows the human-readable name, not
+                # the algo type key.  ForwardEngine detects scalp via strategy_params
+                # ["strategy_type"] (injected below in exec_params), not this field.
+                _display_name = strat.name           # e.g. "5min BNB/USDT"
+                sig.strategy_name = _display_name    # e.g. "5min BNB/USDT" (not "scalp_ema_vwap")
 
                 # Skip non-actionable signals — mark candle processed but don't persist
                 if sig.signal not in _TRACKABLE:
@@ -439,6 +443,54 @@ async def _async_run() -> None:
                     await session.commit()
                 except Exception as _n_err:
                     logger.debug(f"[scalping_runner] Signal notification failed: {_n_err}")
+
+                # ── Final pre-execution price anchor ────────────────────────────
+                # The _live_bid/_live_ask from the spread check above were captured at
+                # approximately the same time as the OHLCV candle close, so
+                # sig.entry_price ≈ _live_bid → delta ≈ 0 → that earlier anchoring is
+                # often a no-op.  By the time all the DB writes, dedup checks, and
+                # notifications finish (~5-30s), the market has moved. Re-fetch right
+                # now so the actual fill price is used and the SL is NOT pre-triggered
+                # on the very first 5s monitor tick.
+                if sig.signal in _TRACKABLE:
+                    try:
+                        _exec_bid, _exec_ask = await asyncio.wait_for(
+                            broker.get_bid_ask(symbol), timeout=5.0
+                        )
+                        if _exec_bid and _exec_ask and _exec_bid > 0:
+                            _is_long_exec = sig.signal in ("BUY", "COVER")
+                            _fill_exec = _exec_ask if _is_long_exec else _exec_bid
+                            _exec_delta = _fill_exec - sig.entry_price
+                            if abs(_exec_delta) > 0.000001:
+                                if sig.stop_loss is not None:
+                                    sig.stop_loss  = round(sig.stop_loss  + _exec_delta, 8)
+                                if sig.take_profit is not None:
+                                    sig.take_profit = round(sig.take_profit + _exec_delta, 8)
+                                sig.entry_price = round(_fill_exec, 8)
+                                logger.info(
+                                    f"[scalping_runner] EXEC-ANCHOR {symbol} {sig.signal}: "
+                                    f"entry→{sig.entry_price:.6f} (Δ={_exec_delta:+.6f}) "
+                                    f"sl→{sig.stop_loss:.6f} tp→{sig.take_profit:.6f}"
+                                )
+                            # Guard: if current price is already past the SL, opening this
+                            # trade will result in an immediate stop-out on the first
+                            # monitor tick — skip it entirely.
+                            if sig.stop_loss is not None:
+                                _sl_exec_hit = (
+                                    (_is_long_exec  and _fill_exec <= sig.stop_loss) or
+                                    (not _is_long_exec and _fill_exec >= sig.stop_loss)
+                                )
+                                if _sl_exec_hit:
+                                    logger.info(
+                                        f"[scalping_runner] EXEC-STALE {symbol} {sig.signal}: "
+                                        f"live {'ask' if _is_long_exec else 'bid'}={_fill_exec:.6f} "
+                                        f"already past SL={sig.stop_loss:.6f} — skipping instant stop-out"
+                                    )
+                                    continue
+                    except Exception as _exec_anch_err:
+                        logger.warning(
+                            f"[scalping_runner] Pre-exec anchor fetch failed for {symbol}: {_exec_anch_err}"
+                        )
 
                 # ── Forward execution ────────────────────────────────────────────
                 if sig.signal in _TRACKABLE:
