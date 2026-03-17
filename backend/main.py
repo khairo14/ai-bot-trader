@@ -93,15 +93,25 @@ async def _scalping_sl_tp_heartbeat():
     """
     from db.database import AsyncSessionLocal
     from core.engine.forward_engine import get_forward_engine
+    import time as _time
 
     _engine = get_forward_engine()
     logger.info("[Scalp SL/TP Heartbeat] 5-second scalp monitor started.")
+
+    # LG-1 FIX: initialize() does several DB queries (all open trades, per-broker
+    # P&L aggregations).  Calling it every 5s at 12/min is wasteful; rate-limit
+    # to once per 60s while keeping the SL/TP monitor at full 5s cadence.
+    _INIT_INTERVAL = 60.0
+    _last_init: float = 0.0
 
     while True:
         await asyncio.sleep(5)
         try:
             async with AsyncSessionLocal() as session:
-                await _engine.initialize(session)
+                now = _time.monotonic()
+                if now - _last_init >= _INIT_INTERVAL:
+                    await _engine.initialize(session)
+                    _last_init = now
                 try:
                     closed = await _engine.monitor_sl_tp(session)
                     if closed:

@@ -10,6 +10,7 @@ from sqlalchemy import select, func
 from db.database import get_db
 from db.models import Trade, LiveTrade, OrderStatus, BrokerName
 from config import settings
+from core.auth import get_current_user as _get_current_user
 from core.risk_manager import RiskManager as _RiskManager, get_risk_manager as _get_risk_manager  # BUG-2 FIX
 
 # Singleton — reads risk_state.json the same way ForwardEngine does.
@@ -77,7 +78,7 @@ async def _safe_balance(broker_name: str) -> dict:
 
 
 @router.get("/summary")
-async def portfolio_summary(db: AsyncSession = Depends(get_db)):
+async def portfolio_summary(db: AsyncSession = Depends(get_db), _user=Depends(_get_current_user)):
     """
     Single call that returns:
     - Live balance from every connected broker (parallel, with timeout)

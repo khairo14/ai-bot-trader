@@ -318,6 +318,7 @@ class ModelTrainer:
                         TradeOutcome.symbol == symbol,
                         TradeOutcome.resolved == True,  # noqa: E712
                         TradeOutcome.ml_label != None,  # noqa: E711
+                        TradeOutcome.is_paper == False,  # DI-2 FIX: exclude paper outcomes to avoid idealised-fill bias
                     )
                 )
                 outcomes = result.scalars().all()

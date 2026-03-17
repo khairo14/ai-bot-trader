@@ -1,6 +1,7 @@
 """Forward Test API — paper trading control, status and trade history."""
 import asyncio as _asyncio
 import csv
+import hashlib as _hashlib
 import io
 import math as _math
 import time as _time_module
@@ -24,7 +25,7 @@ from db.models import (
     ExecutionMode,
 )
 from config import settings as _settings
-from core.auth import get_current_user as _get_current_user
+from core.auth import get_current_user as _get_current_user, require_admin as _require_admin
 
 router = APIRouter()
 
@@ -833,7 +834,12 @@ async def _run_one_strategy(strat, skip_monitor: bool = False) -> dict | None:
             # pg_advisory_xact_lock is transaction-scoped; auto-released on commit.
             from sqlalchemy import text as _sql_text
             _lock_str = f"{strategy_type}:{sig.symbol}:{timeframe}"
-            _lock_int = abs(hash(_lock_str)) % (2 ** 31)
+            # LG-4 FIX: Python hash() is PYTHONHASHSEED-randomized per process; two
+            # Celery workers would compute different lock keys, making the advisory
+            # lock useless.  Use SHA-256 for a stable, deterministic key.
+            _lock_int = int.from_bytes(
+                _hashlib.sha256(_lock_str.encode()).digest()[:4], "big"
+            ) % (2 ** 31)
             await session.execute(_sql_text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lock_int})
 
             # ── Deduplication: skip if an identical signal already exists within
@@ -1034,7 +1040,7 @@ async def _run_signals_background():
 
 
 @router.post("/emergency-stop")
-async def emergency_stop(db: AsyncSession = Depends(get_db)):
+async def emergency_stop(db: AsyncSession = Depends(get_db), _user=Depends(_require_admin)):
     """
     Close all open paper trades immediately — fetches current price from broker
     to compute real PnL before marking each trade as FILLED.

@@ -31,7 +31,7 @@ def _trade_dict(t: Trade | LiveTrade) -> dict:
         "pnl_pct": t.pnl_pct,
         "broker": t.broker.value if hasattr(t.broker, "value") else t.broker,
         "strategy_name": t.strategy_name,
-        "timeframe": t.timeframe,
+        "timeframe": getattr(t, "timeframe", None),  # BUG-1 FIX: Trade/LiveTrade have no timeframe col
         "is_paper": t.is_paper,
         "status": t.status.value if hasattr(t.status, "value") else t.status,
         "opened_at": t.opened_at.isoformat() if t.opened_at else None,
@@ -115,7 +115,7 @@ class ClosePositionRequest(BaseModel):
 async def close_position(
     request: ClosePositionRequest,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_admin),
 ):
     """Manually close an open position at market price."""
     # Filter by OPEN status in both queries to avoid the ID-collision case:

@@ -140,6 +140,7 @@ def retrain_if_new_outcomes(self):
                         TradeOutcome.resolved == True,  # noqa: E712
                         TradeOutcome.ml_label != None,   # noqa: E711
                         TradeOutcome.resolved_at >= cutoff,
+                        TradeOutcome.is_paper == False,  # DI-2 FIX: exclude paper outcomes
                     )
                     .group_by(TradeOutcome.symbol)
                     .having(func.count(TradeOutcome.id) >= MIN_NEW_OUTCOMES_FOR_RETRAIN)
