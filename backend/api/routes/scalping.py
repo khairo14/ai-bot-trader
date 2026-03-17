@@ -94,7 +94,7 @@ async def scalp_signals(
     """Latest N scalping signals (strategy_name LIKE 'scalp_%')."""
     query = (
         select(Signal)
-        .where(Signal.strategy_name.like("%scalp%"))
+        .where(Signal.strategy_name.ilike("%scalp%"))
         .where(Signal.dismissed == False)  # noqa: E712
         .where(Signal.signal != SignalType.HOLD)  # exclude noise — only trade signals
         .order_by(desc(Signal.created_at))
@@ -124,7 +124,7 @@ async def scalp_stats(
     q = await db.execute(
         select(TradeOutcome).where(
             and_(
-                TradeOutcome.strategy_name.like("%scalp%"),
+                TradeOutcome.strategy_name.ilike("%scalp%"),
                 TradeOutcome.resolved == True,  # noqa: E712
                 TradeOutcome.created_at >= since.replace(tzinfo=None),
             )
@@ -145,7 +145,7 @@ async def scalp_stats(
     today_q    = await db.execute(
         select(func.count(Signal.id)).where(
             and_(
-                Signal.strategy_name.like("%scalp%"),
+                Signal.strategy_name.ilike("%scalp%"),
                 Signal.signal != SignalType.HOLD,
                 Signal.created_at >= today_utc.replace(tzinfo=None),
             )
@@ -319,13 +319,13 @@ async def scalp_ml_status(_user=Depends(get_current_user)):
     async with AsyncSessionLocal() as session:
         total_r = await session.execute(
             select(_f.count()).select_from(TradeOutcome)
-            .where(TradeOutcome.strategy_name.like("%scalp%"))
+            .where(TradeOutcome.strategy_name.ilike("%scalp%"))
         )
         outcomes_total = total_r.scalar() or 0
 
         resolved_r = await session.execute(
             select(_f.count()).select_from(TradeOutcome)
-            .where(TradeOutcome.strategy_name.like("%scalp%"))
+            .where(TradeOutcome.strategy_name.ilike("%scalp%"))
             .where(TradeOutcome.resolved == True)  # noqa: E712
         )
         outcomes_resolved = resolved_r.scalar() or 0
@@ -336,7 +336,7 @@ async def scalp_ml_status(_user=Depends(get_current_user)):
         if outcomes_resolved > 0:
             wins_r = await session.execute(
                 select(_f.count()).select_from(TradeOutcome)
-                .where(TradeOutcome.strategy_name.like("%scalp%"))
+                .where(TradeOutcome.strategy_name.ilike("%scalp%"))
                 .where(TradeOutcome.resolved == True)  # noqa: E712
                 .where(TradeOutcome.ml_label == 1)
             )
@@ -345,7 +345,7 @@ async def scalp_ml_status(_user=Depends(get_current_user)):
 
             pnl_r = await session.execute(
                 select(_f.avg(TradeOutcome.pnl_pct))
-                .where(TradeOutcome.strategy_name.like("%scalp%"))
+                .where(TradeOutcome.strategy_name.ilike("%scalp%"))
                 .where(TradeOutcome.resolved == True)  # noqa: E712
             )
             avg_pnl_raw = pnl_r.scalar()

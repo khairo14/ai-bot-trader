@@ -49,6 +49,9 @@ class BinanceClient(AbstractBroker):
             logger.info("BinanceClient initialized in TESTNET (paper) mode.")
         else:
             logger.info("BinanceClient initialized in LIVE mode.")
+        # Cache last-known prices so get_balance() can still value crypto holdings
+        # if the batch fetch_tickers call times out (common on testnet).
+        self._last_ticker_cache: dict[str, float] = {}
         # Separate unauthenticated exchange for public market-data (OHLCV).
         # Testnet has very limited historical candles; always use the production
         # endpoint for OHLCV regardless of paper/live mode.
@@ -165,9 +168,21 @@ class BinanceClient(AbstractBroker):
                 for symbol, qty in pending.items():
                     t = tickers.get(symbol) or {}
                     price = float(t.get("last") or 0.0)
+                    if price > 0:
+                        self._last_ticker_cache[symbol] = price  # keep cache fresh
                     usdt_total += qty * price
             except Exception:
-                pass  # non-fatal — USDT balance already captured above
+                # Ticker fetch failed (testnet timeout is common) — fall back to the
+                # last known prices so crypto holdings are still included in the total.
+                # Without this, the balance appears to drop by the full position cost
+                # whenever a BUY trade is open and the batch request times out.
+                for symbol, qty in pending.items():
+                    cached_price = self._last_ticker_cache.get(symbol, 0.0)
+                    usdt_total += qty * cached_price
+                if any(self._last_ticker_cache.get(s, 0.0) > 0 for s in pending):
+                    logger.debug("[Binance] fetch_tickers timed out — used cached prices for balance")
+                else:
+                    logger.debug("[Binance] fetch_tickers failed and no cached prices — balance may be understated")
 
         return Balance(
             total=round(usdt_total, 4),

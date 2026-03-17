@@ -34,6 +34,7 @@ interface ForwardStatus {
   brokers: string[]
   broker_breakdown: BrokerBreakdown[]
   paper_balance: number
+  broker_balance?: number
   initial_capital: number
   open_positions: number
   realized_pnl: number
@@ -499,7 +500,7 @@ export default function ForwardTest() {
             b.is_active ? 'border-brand-500/40' : b.connected ? 'border-dark-600' : 'border-dark-700 opacity-50'
           }`}>
             <div className="flex items-center justify-between mb-2">
-              <p className="text-xs text-gray-500 uppercase tracking-wider">{b.broker}</p>
+              <p className="text-xs text-gray-500 uppercase tracking-wider">{b.broker} <span className="normal-case text-gray-600 font-normal">(live account)</span></p>
               <div className="flex items-center gap-1.5">
                 {b.is_paper && <span className="text-xs text-yellow-500 bg-yellow-900/20 px-1.5 py-0.5 rounded">paper</span>}
                 {b.is_active
@@ -541,8 +542,14 @@ export default function ForwardTest() {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
+          {
+            label: 'Paper Balance',
+            value: status ? fmtUSD(status.paper_balance) : '—',
+            sub: status ? `Initial: ${fmtUSD(status.initial_capital)}` : '',
+            color: (status?.paper_balance ?? 0) >= (status?.initial_capital ?? 0) ? 'text-green-400' : 'text-red-400',
+          },
           {
             label: 'Open Positions',
             value: status?.open_positions ?? '—',

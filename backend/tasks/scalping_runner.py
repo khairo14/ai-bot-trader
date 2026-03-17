@@ -56,6 +56,7 @@ def _load_scalp_settings() -> dict:
         # so they don't compete with the global broker_risk_settings row.
         "max_consecutive_losses": 5,   # higher tolerance than swing (3)
         "daily_circuit_breaker_pct": 5.0,  # independent of Binance swing CB (swing uses DB row, default 3%)
+        "max_open_positions": 10,      # scalp positions: higher limit than swing (typically 5) since sizes are much smaller
         "session_filter": {"crypto": None, "stock": ["14:30-21:00"]},
     }
     try:
@@ -334,7 +335,7 @@ async def _async_run() -> None:
                         session,
                         title=f"⚡ [SCALP] {sig.signal} • {sig.symbol}",
                         message=(
-                            f"Strategy: {sig.strategy_name} | "
+                            f"Strategy: {_display_name} | "
                             f"Entry: ${sig.entry_price:,.4f} | "
                             f"Conf: {sig.confidence * 100:.0f}% | "
                             f"TF: {timeframe}"
@@ -346,7 +347,7 @@ async def _async_run() -> None:
                             "entry_price": sig.entry_price,
                             "stop_loss": sig.stop_loss,
                             "take_profit": sig.take_profit,
-                            "strategy": sig.strategy_name,
+                            "strategy": _display_name,
                             "broker": broker_name,
                             "timeframe": timeframe,
                             "spread_pct": spread_pct_live,

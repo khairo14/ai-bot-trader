@@ -431,6 +431,10 @@ class ForwardEngine:
                 broker_settings["risk_per_trade_pct"]        = _scfg.get("risk_per_trade_pct", 0.5)
                 broker_settings["max_consecutive_losses"]     = _scfg.get("max_consecutive_losses", 5)
                 broker_settings["daily_circuit_breaker_pct"]  = _scfg.get("daily_circuit_breaker_pct", 5.0)
+                # Allow scalp to have its own max_open_positions if set in scalp settings.
+                # Default 10 — small-sized scalp positions tolerate more concurrency than swing.
+                if "max_open_positions" in _scfg:
+                    broker_settings["max_open_positions"] = _scfg["max_open_positions"]
                 # Scalp losses should not pollute the shared per-broker Binance CB that
                 # swing strategies also use.  An isolated "scalp" key ensures the scalp
                 # CB and swing CB are tracked and tripped independently.

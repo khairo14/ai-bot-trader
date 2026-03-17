@@ -132,8 +132,8 @@ async def close_position(
     if not trade:
         raise HTTPException(status_code=404, detail="Open trade not found")
 
-    from core.engine.forward_engine import ForwardEngine
-    engine = ForwardEngine()
+    from core.engine.forward_engine import get_forward_engine
+    engine = get_forward_engine()
     try:
         await engine.close_position(trade, reason=request.reason or "manual_close", db_session=db)
     except Exception as exc:
@@ -151,9 +151,9 @@ async def emergency_stop(
     """
     EMERGENCY STOP: Close all open positions and halt all strategies immediately.
     """
-    from core.engine.forward_engine import ForwardEngine
+    from core.engine.forward_engine import get_forward_engine
     from notifications.notifier import notifier as _notify
-    engine = ForwardEngine()
+    engine = get_forward_engine()
     closed = await engine.emergency_stop(db_session=db)
     from core.auth import audit
     audit("emergency_stop", closed_positions=closed)
@@ -178,8 +178,8 @@ async def sync_broker_positions(
     has already exited.  This is the same logic that runs every 60 s via the
     Celery scheduler — calling this endpoint forces it to run right now.
     """
-    from core.engine.forward_engine import ForwardEngine
-    engine = ForwardEngine()
+    from core.engine.forward_engine import get_forward_engine
+    engine = get_forward_engine()
     try:
         synced = await engine.reconcile_positions(db)
     except Exception as exc:

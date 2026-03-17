@@ -234,9 +234,13 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
     realized_pnl   = _realized_pnl_total  # Bug-10 FIX: exact SQL sum, not truncated Python sum
     unrealized_pnl = sum(t.pnl or 0.0 for t in open_trades)
     open_count     = len(open_trades)
-    # Total = sum of real API balances for active+connected brokers.
-    # GAP-5 FIX: fall back to paper_initial_balance when all brokers are offline
-    # so the dashboard does not show a misleadingly alarming $0.00 balance.
+    # Paper balance = ledger-based P&L accounting.
+    # Calculated from initial capital + all closed P&L + any open-trade unrealised P&L.
+    # This is stable and does not fluctuate with position cost the way broker.get_balance()
+    # does on Binance testnet (where USDT drops by full position cost while crypto is held,
+    # and the non-USDT ticker fetch can time out, making the balance look wrong).
+    paper_balance = _settings.paper_initial_balance + realized_pnl + unrealized_pnl
+    # Also retain the real broker API balance (for the broker_breakdown tiles).
     total_balance = (
         sum(bd["total"] for bd in broker_breakdown if bd["connected"] and bd["is_active"])
         or sum(bd["total"] for bd in broker_breakdown if bd["connected"])
@@ -278,7 +282,8 @@ async def _get_paper_stats(db: AsyncSession) -> dict:
         "strategy_names": [s.name for s in active_strategies],
         "brokers": active_brokers,
         "broker_breakdown": broker_breakdown,
-        "paper_balance": round(total_balance, 2),
+        "paper_balance": round(paper_balance, 2),
+        "broker_balance": round(total_balance, 2),
         "initial_capital": round(_settings.paper_initial_balance, 2),
         "open_positions": open_count,
         "realized_pnl": round(realized_pnl, 4),
@@ -515,6 +520,7 @@ async def export_paper_trades(
     """Download all paper trades as CSV."""
     result = await db.execute(
         select(Trade)
+        .where(Trade.status == OrderStatus.FILLED)
         .order_by(desc(Trade.opened_at))
     )
     trades = result.scalars().all()
@@ -524,7 +530,7 @@ async def export_paper_trades(
     writer.writerow([
         "id", "symbol", "side", "quantity", "entry_price", "exit_price",
         "stop_loss", "take_profit", "pnl", "pnl_pct", "status",
-        "broker", "strategy_name", "opened_at", "closed_at",
+        "broker", "strategy_name", "is_paper", "opened_at", "closed_at",
     ])
     for t in trades:
         writer.writerow([
@@ -538,6 +544,7 @@ async def export_paper_trades(
             t.status.value if hasattr(t.status, "value") else t.status,
             t.broker.value if hasattr(t.broker, "value") else t.broker,
             t.strategy_name or "",
+            t.is_paper,
             t.opened_at.isoformat() if t.opened_at else "",
             t.closed_at.isoformat() if t.closed_at else "",
         ])
