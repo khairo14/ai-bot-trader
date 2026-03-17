@@ -198,6 +198,15 @@ async def get_candles(
     if since is None:
         since = until - 200 * tf_ms  # default: last 200 candles
 
+    # Clamp `since` so we never request more than MAX_CANDLES bars worth of history.
+    # Without this, a 5m chart with a 1M range requests ~8,640 bars but the backend
+    # paginates forward and hits the 5,000-bar cap mid-range, returning only the
+    # oldest 17 days and leaving a visible gap between the last bar and the live
+    # WebSocket candle. Clamping ensures we always return the most recent N bars.
+    _max_since = until - MAX_CANDLES * tf_ms
+    if since < _max_since:
+        since = _max_since
+
     # Cache check — return immediately for duplicate/recent requests.
     # IBKR is included: we only ever store non-empty results (see _cache_set
     # guard below), so a cache hit is always valid data — no risk of serving

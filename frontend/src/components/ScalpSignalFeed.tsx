@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Wifi, WifiOff, Zap } from 'lucide-react'
+import { TrendingUp, TrendingDown, Wifi, WifiOff, Zap, ChevronLeft, ChevronRight } from 'lucide-react'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 interface ScalpSignal {
@@ -24,6 +24,7 @@ const WS_URL = (() => {
 })()
 
 const MAX_SIGNALS = 50
+const PAGE_SIZE  = 10
 
 function fmtPrice(v: number | null): string {
   if (v == null || v === 0) return '—'
@@ -37,6 +38,7 @@ function fmtPrice(v: number | null): string {
 export default function ScalpSignalFeed() {
   const [signals, setSignals] = useState<ScalpSignal[]>([])
   const [loading, setLoading] = useState(true)
+  const [page, setPage] = useState(0)
 
   // Seed with the last 50 scalp signals from DB on mount
   useEffect(() => {
@@ -71,20 +73,48 @@ export default function ScalpSignalFeed() {
         setSignals(prev =>
           [{ ...(msg.data as unknown as ScalpSignal), _received_at: Date.now() }, ...prev].slice(0, MAX_SIGNALS)
         )
+        setPage(0) // jump to first page on new signal
       }
     },
   })
 
+  const totalPages = Math.max(1, Math.ceil(signals.length / PAGE_SIZE))
+  const safePage = Math.min(page, totalPages - 1)
+  const pageSignals = signals.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE)
+
   return (
     <div className="space-y-2">
-      {/* Connection indicator */}
-      <div className="flex items-center gap-1.5 text-xs">
-        {connected
-          ? <><Wifi size={11} className="text-green-400" /><span className="text-green-400">Connected</span></>
-          : <><WifiOff size={11} className="text-gray-500" /><span className="text-gray-500">Reconnecting…</span></>
-        }
-        {signals.length > 0 && (
-          <span className="text-gray-600 ml-2">{signals.length} signal{signals.length !== 1 ? 's' : ''} received</span>
+      {/* Connection indicator + pagination summary */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-xs">
+          {connected
+            ? <><Wifi size={11} className="text-green-400" /><span className="text-green-400">Connected</span></>
+            : <><WifiOff size={11} className="text-gray-500" /><span className="text-gray-500">Reconnecting…</span></>
+          }
+          {signals.length > 0 && (
+            <span className="text-gray-600 ml-2">{signals.length} signal{signals.length !== 1 ? 's' : ''} received</span>
+          )}
+        </div>
+        {signals.length > PAGE_SIZE && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setPage(p => Math.max(0, p - 1))}
+              disabled={safePage === 0}
+              className="p-1 rounded text-gray-500 hover:text-gray-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <ChevronLeft size={13} />
+            </button>
+            <span className="text-xs text-gray-500 min-w-[60px] text-center">
+              {safePage + 1} / {totalPages}
+            </span>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+              disabled={safePage === totalPages - 1}
+              className="p-1 rounded text-gray-500 hover:text-gray-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              <ChevronRight size={13} />
+            </button>
+          </div>
         )}
       </div>
 
@@ -98,8 +128,8 @@ export default function ScalpSignalFeed() {
           {!connected && !loading && <p className="text-gray-600 text-xs mt-1">Connecting to live stream…</p>}
         </div>
       ) : (
-        <div className="space-y-2">
-          {signals.map((sig, i) => {
+        <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+          {pageSignals.map((sig, i) => {
             const isBull = sig.signal === 'BUY' || sig.signal === 'COVER'
             return (
               <div

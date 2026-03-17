@@ -1,9 +1,26 @@
 import { useEffect, useState } from 'react'
-import { Timer, Zap, Settings, RefreshCw, ToggleLeft, ToggleRight } from 'lucide-react'
+import { Timer, Zap, Settings, RefreshCw, ToggleLeft, ToggleRight, Brain } from 'lucide-react'
 import axios from 'axios'
 import toast from 'react-hot-toast'
 import ScalpSignalFeed from '../components/ScalpSignalFeed'
 import { SkeletonStat } from '../components/Skeleton'
+
+interface ModelInfo {
+  symbol: string
+  model_path: string
+  trained_date: string | null
+}
+
+interface MLStatus {
+  model_count: number
+  models: ModelInfo[]
+  last_retrain: string | null
+  outcomes_total: number
+  outcomes_resolved: number
+  win_rate_pct: number | null
+  avg_pnl_pct: number | null
+  feedback_loop_active: boolean
+}
 
 interface ScalpStats {
   period_days: number
@@ -38,18 +55,22 @@ export default function Scalping() {
   const [showSettings, setShowSettings] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
   const [form, setForm] = useState<Partial<ScalpSettings>>({})
+  const [mlStatus, setMlStatus] = useState<MLStatus | null>(null)
+  const [retraining, setRetraining] = useState(false)
 
   const fetchAll = async () => {
     setLoadingStats(true)
-    const [statsRes, settingsRes] = await Promise.allSettled([
+    const [statsRes, settingsRes, mlRes] = await Promise.allSettled([
       axios.get('/api/scalping/stats'),
       axios.get('/api/scalping/settings'),
+      axios.get('/api/ml/status'),
     ])
     if (statsRes.status === 'fulfilled') setStats(statsRes.value.data)
     if (settingsRes.status === 'fulfilled') {
       setSettings(settingsRes.value.data)
       setForm(settingsRes.value.data)
     }
+    if (mlRes.status === 'fulfilled') setMlStatus(mlRes.value.data)
     setLoadingStats(false)
   }
 
@@ -86,6 +107,23 @@ export default function Scalping() {
       toast.error(typeof detail === 'string' ? detail : 'Failed to save settings')
     } finally {
       setSavingSettings(false)
+    }
+  }
+
+  const retrainNow = async () => {
+    setRetraining(true)
+    try {
+      const res = await axios.post('/api/ml/retrain')
+      if (res.data.status === 'queued' || res.status === 200) {
+        toast.success('ML retraining queued — runs in background. Results in ~2–5 min.')
+      } else {
+        toast.error(res.data.detail || 'Retrain request failed')
+      }
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } }
+      toast.error(err?.response?.data?.detail || 'Retrain request failed')
+    } finally {
+      setRetraining(false)
     }
   }
 
@@ -340,6 +378,88 @@ export default function Scalping() {
         </div>
         <ScalpSignalFeed />
       </div>
+
+      {/* ML Models */}
+      <section className="bg-dark-800 border border-dark-600 rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Brain size={14} className="text-brand-500" />
+            <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">ML Models</h2>
+          </div>
+          <button
+            onClick={retrainNow}
+            disabled={retraining}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-500 hover:bg-green-400 disabled:opacity-50 text-black text-xs font-semibold rounded-lg transition-all"
+          >
+            <RefreshCw size={11} className={retraining ? 'animate-spin' : ''} />
+            {retraining ? 'Queuing...' : 'Retrain Now'}
+          </button>
+        </div>
+
+        {mlStatus ? (
+          <>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-dark-700 rounded-lg p-3 text-center">
+                <div className="text-lg font-bold text-white">{mlStatus.model_count}</div>
+                <div className="text-xs text-gray-500 mt-0.5">Models trained</div>
+              </div>
+              <div className="bg-dark-700 rounded-lg p-3 text-center">
+                <div className="text-lg font-bold text-white">
+                  {mlStatus.win_rate_pct != null ? `${mlStatus.win_rate_pct}%` : '—'}
+                </div>
+                <div className="text-xs text-gray-500 mt-0.5">Signal win rate</div>
+              </div>
+              <div className="bg-dark-700 rounded-lg p-3 text-center">
+                <div className={`text-lg font-bold ${
+                  mlStatus.avg_pnl_pct == null ? 'text-white'
+                  : mlStatus.avg_pnl_pct >= 0 ? 'text-brand-500' : 'text-red-400'
+                }`}>
+                  {mlStatus.avg_pnl_pct != null ? `${mlStatus.avg_pnl_pct > 0 ? '+' : ''}${mlStatus.avg_pnl_pct}%` : '—'}
+                </div>
+                <div className="text-xs text-gray-500 mt-0.5">Avg signal P&amp;L</div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-500">Feedback loop</span>
+              <span className={mlStatus.feedback_loop_active ? 'text-brand-500' : 'text-gray-600'}>
+                {mlStatus.feedback_loop_active
+                  ? `Active — ${mlStatus.outcomes_resolved} resolved / ${mlStatus.outcomes_total} total signals`
+                  : `Inactive — ${mlStatus.outcomes_total} signals pending resolution`}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-500">Last retrain</span>
+              <span className="text-gray-400">
+                {mlStatus.last_retrain
+                  ? new Date(mlStatus.last_retrain).toLocaleString()
+                  : 'Never — click Retrain Now'}
+              </span>
+            </div>
+
+            {mlStatus.models.length > 0 ? (
+              <div className="space-y-1">
+                <div className="text-xs text-gray-600 uppercase tracking-wider mb-1">Trained symbols</div>
+                {mlStatus.models.map(m => (
+                  <div key={m.symbol} className="flex items-center justify-between bg-dark-700 px-3 py-2 rounded-lg">
+                    <span className="text-sm font-medium text-white">{m.symbol}</span>
+                    <span className="text-xs text-gray-500">
+                      {m.trained_date ? `Trained ${m.trained_date}` : m.model_path}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-4 text-xs text-gray-600">
+                No models trained yet. Click <span className="text-brand-500">Retrain Now</span> to train on available trade history.
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="text-xs text-gray-600 text-center py-3">Loading ML status…</div>
+        )}
+      </section>
     </div>
   )
 }
