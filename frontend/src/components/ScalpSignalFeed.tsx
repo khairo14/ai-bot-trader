@@ -12,6 +12,7 @@ interface ScalpSignal {
   confidence: number
   timeframe: string
   strategy_name: string
+  strategy_type?: string
   reasons: string[]
   spread_pct: number
   source: string

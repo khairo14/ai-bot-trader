@@ -87,6 +87,7 @@ class Signal(Base):
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 0.0 – 1.0
     timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
     strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    strategy_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)  # STRATEGY_REGISTRY key
     regime: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     asset_class: Mapped[AssetClass] = mapped_column(SAEnum(AssetClass), nullable=False)
     broker: Mapped[BrokerName] = mapped_column(SAEnum(BrokerName), nullable=False)

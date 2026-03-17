@@ -33,6 +33,7 @@ interface Signal {
   confidence: number
   timeframe: string
   strategy_name: string
+  strategy_type?: string
   asset_class?: string
   broker: string
   reasons: string[]
@@ -101,7 +102,7 @@ export default function SignalCard({ signal }: Props) {
         params: {
           symbol: signal.symbol,
           broker: signal.broker,
-          strategy_type: signal.strategy_name,
+          strategy_type: signal.strategy_type || signal.strategy_name,
           timeframes: tfParam,
         },
       })

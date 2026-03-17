@@ -14,8 +14,10 @@ import asyncio
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException
 from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.engine.signal_engine import SignalEngine, STRATEGY_REGISTRY
+from db.database import get_db
 
 router = APIRouter()
 _engine = SignalEngine()
@@ -53,14 +55,31 @@ def _consensus(signals: list[dict]) -> dict:
 async def get_confluence(
     symbol: str = Query(..., description="Trading symbol e.g. BTC/USDT"),
     broker: str = Query(..., description="Broker e.g. binance"),
-    strategy_type: str = Query("hybrid_macd_rsi", description="Strategy key from registry"),
+    strategy_type: str = Query("hybrid_macd_rsi", description="Strategy key from registry OR display name"),
     timeframes: str = Query("1h,4h,1d", description="Comma-separated timeframes"),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Run the same strategy on multiple timeframes and return a confluence analysis.
+    Accepts either a STRATEGY_REGISTRY key (e.g. hybrid_macd_rsi) or a strategy
+    display name (e.g. "BTC Trend Follower") — the latter is resolved via the DB.
     """
+    # Resolve display name → registry key if needed
+    resolved_type = strategy_type
     if strategy_type not in STRATEGY_REGISTRY:
-        raise HTTPException(400, f"Unknown strategy_type '{strategy_type}'. Available: {list(STRATEGY_REGISTRY)}")
+        from db.models import Strategy as StrategyModel
+        from sqlalchemy import select
+        result = await db.execute(
+            select(StrategyModel.parameters).where(StrategyModel.name == strategy_type)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            resolved_type = row.get("strategy_type") or row.get("strategy_name") or strategy_type
+        if resolved_type not in STRATEGY_REGISTRY:
+            raise HTTPException(
+                400,
+                f"Unknown strategy '{strategy_type}'. Available registry keys: {sorted(STRATEGY_REGISTRY)}",
+            )
 
     tf_list = [t.strip() for t in timeframes.split(",") if t.strip() in VALID_TIMEFRAMES]
     if not tf_list:
@@ -70,7 +89,7 @@ async def get_confluence(
     async def _run_one(tf: str) -> dict:
         try:
             sig = await _engine.run(
-                strategy_name=strategy_type,
+                strategy_name=resolved_type,
                 symbol=symbol.upper(),
                 broker_name=broker.lower(),
                 timeframe=tf,
@@ -88,7 +107,7 @@ async def get_confluence(
                 "error": None,
             }
         except Exception as exc:
-            logger.warning(f"[confluence] {strategy_type} {symbol} {tf} failed: {exc}")
+            logger.warning(f"[confluence] {resolved_type} {symbol} {tf} failed: {exc}")
             return {
                 "timeframe": tf,
                 "signal": "HOLD",
@@ -113,7 +132,7 @@ async def get_confluence(
     return {
         "symbol": symbol.upper(),
         "broker": broker.lower(),
-        "strategy_type": strategy_type,
+        "strategy_type": resolved_type,
         "consensus": cdata["consensus"],
         "confluence_score": cdata["confluence_score"],
         "timeframes": results,
@@ -126,13 +145,25 @@ async def get_confluence_batch(
     strategy_type: str = Query("hybrid_macd_rsi"),
     symbols: str = Query(..., description="Comma-separated symbols"),
     timeframes: str = Query("1h,4h,1d"),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Run confluence for multiple symbols at once.
     Returns list of per-symbol confluence results.
     """
+    # Resolve display name → registry key if needed
+    resolved_type = strategy_type
     if strategy_type not in STRATEGY_REGISTRY:
-        raise HTTPException(400, f"Unknown strategy_type '{strategy_type}'")
+        from db.models import Strategy as StrategyModel
+        from sqlalchemy import select
+        result = await db.execute(
+            select(StrategyModel.parameters).where(StrategyModel.name == strategy_type)
+        )
+        row = result.scalar_one_or_none()
+        if row:
+            resolved_type = row.get("strategy_type") or row.get("strategy_name") or strategy_type
+        if resolved_type not in STRATEGY_REGISTRY:
+            raise HTTPException(400, f"Unknown strategy_type '{strategy_type}'")
 
     sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     if not sym_list:
@@ -147,7 +178,7 @@ async def get_confluence_batch(
             async def _one(tf: str) -> dict:
                 try:
                     sig = await _engine.run(
-                        strategy_name=strategy_type,
+                        strategy_name=resolved_type,
                         symbol=sym,
                         broker_name=broker.lower(),
                         timeframe=tf,

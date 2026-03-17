@@ -11,6 +11,7 @@ interface Signal {
   confidence: number
   timeframe: string
   strategy_name: string
+  strategy_type?: string
   broker: string
   reasons: string
   created_at: string

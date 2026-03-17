@@ -22,6 +22,7 @@ def _signal_dict(s: Signal) -> dict:
         "confidence": s.confidence,
         "timeframe": s.timeframe,
         "strategy_name": s.strategy_name,
+        "strategy_type": getattr(s, "strategy_type", None),
         "regime": s.regime,
         "asset_class": s.asset_class.value if hasattr(s.asset_class, "value") else s.asset_class,
         "broker": s.broker.value if hasattr(s.broker, "value") else s.broker,
